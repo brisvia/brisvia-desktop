@@ -1,0 +1,30 @@
+[package]
+name = "brisvia-miner"
+version = "0.1.0"
+description = "Brisvia (BRVA) desktop miner"
+authors = ["Brisvia"]
+edition = "2021"
+
+[lib]
+name = "brisvia_miner_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Lightweight HTTP client for the local JSON-RPC with bitcoind (localhost, no TLS -> fewer deps and simple cross-compile).
+ureq = { version = "2", default-features = false, features = ["json"] }
+# BIP39 (12 words) + BIP32 (derivation) for real wallet backup.
+bip39 = { version = "2", features = ["rand"] }
+bitcoin = "0.32"
+zeroize = "1"
+# Operating system language (to pick es/en on first run).
+sys-locale = "0.3"
+# Start with the system (opt-in from Settings).
+tauri-plugin-autostart = "2"
+# Single instance: prevents opening two windows (and two mining engines) if the program is launched while already open.
+tauri-plugin-single-instance = "2"

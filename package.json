@@ -1,0 +1,16 @@
+{
+  "name": "brisvia-miner",
+  "version": "0.1.0",
+  "description": "Brisvia (BRVA) desktop miner — mine with your CPU and join the network.",
+  "author": "Brisvia",
+  "license": "MIT",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  },
+  "//": "Architecture: Tauri (system webview, lightweight and with fewer antivirus false positives) + UI in src/renderer + Rust backend in src-tauri. The real mining engine (cpuminer/XMRig fork, rx/brva profile) runs as a separate native process, orchestrated by the backend."
+}

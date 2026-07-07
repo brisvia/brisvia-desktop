@@ -1,0 +1,28 @@
+# Build artifacts (regenerated; never committed). No leading slash = in any subfolder.
+target/
+node_modules/
+dist/
+
+# Node and mining engine binaries: built by CI for each system, not versioned
+/src-tauri/binaries/*.exe
+/src-tauri/binaries/*.dll
+/src-tauri/binaries/bitcoind
+/src-tauri/binaries/bitcoin-cli
+/src-tauri/binaries/brisvia-worker
+/src-tauri/binaries/*.viejo
+
+# Secrets / credentials (never commit)
+*.key
+*.pem
+.env
+*.cookie
+
+# System files
+.DS_Store
+Thumbs.db
+*.log
+
+# Internal development docs (not committed to the public repo)
+I18N_SPEC.md
+PLAN.md
+crates/brisvia-randomx/README.md

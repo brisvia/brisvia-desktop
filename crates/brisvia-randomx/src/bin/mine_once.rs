@@ -1,0 +1,285 @@
+//! Brisvia miner: CONTINUOUS, MULTITHREADED mining against a node.
+//! Each round: getblocktemplate -> build block -> N threads search for a nonce (shared Cache, Vm per thread) ->
+//! submitblock -> repeat. Reuses the Cache per seed. Measures real hashrate.
+//! Usage: mine-once <rpc_url> <user> <pass> <payout_addr> [max_blocks] [threads] [max_nonces]
+
+use bitcoin::absolute::LockTime;
+use bitcoin::blockdata::block::{Block, Header, Version};
+use bitcoin::blockdata::script::Builder;
+use bitcoin::consensus::{deserialize, serialize};
+use bitcoin::hashes::Hash;
+use bitcoin::transaction::Version as TxVersion;
+use bitcoin::{
+    Amount, BlockHash, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxMerkleNode,
+    TxOut, Witness,
+};
+use brisvia_randomx::{Cache, Dataset, Vm};
+use serde_json::{json, Value};
+use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
+
+/// RPC with retries (unstable network). Does not panic; returns Err after exhausting attempts.
+fn rpc(url: &str, user: &str, pass: &str, method: &str, params: Value) -> Result<Value, String> {
+    let auth = format!("Basic {}", base64(&format!("{user}:{pass}")));
+    let mut last = String::new();
+    for intento in 0..3 {
+        if intento > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+        }
+        let body = json!({"jsonrpc":"1.0","id":"mine","method":method,"params":params});
+        match ureq::post(url).set("Authorization", &auth).send_json(body) {
+            Ok(resp) => match resp.into_json::<Value>() {
+                Ok(v) => {
+                    if !v["error"].is_null() {
+                        return Err(format!("RPC {method} error: {}", v["error"]));
+                    }
+                    return Ok(v["result"].clone());
+                }
+                Err(e) => last = format!("json {method}: {e}"),
+            },
+            Err(e) => last = format!("RPC {method}: {e}"),
+        }
+    }
+    Err(last)
+}
+
+fn base64(s: &str) -> String {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let b = s.as_bytes();
+    let mut out = String::new();
+    for c in b.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | (*c.get(2).unwrap_or(&0) as u32);
+        out.push(T[(n >> 18 & 63) as usize] as char);
+        out.push(T[(n >> 12 & 63) as usize] as char);
+        out.push(if c.len() > 1 { T[(n >> 6 & 63) as usize] as char } else { '=' });
+        out.push(if c.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
+    }
+    out
+}
+
+fn hex32(s: &str) -> [u8; 32] {
+    let b = hex::decode(s).expect("hex");
+    let mut a = [0u8; 32];
+    a.copy_from_slice(&b);
+    a
+}
+
+fn build_candidate(tmpl: &Value, payout_script: &ScriptBuf, extranonce: u64) -> (Block, Vec<u8>, [u8; 32], [u8; 32]) {
+    let version = tmpl["version"].as_i64().unwrap() as i32;
+    let prev = BlockHash::from_str(tmpl["previousblockhash"].as_str().unwrap()).unwrap();
+    let curtime = tmpl["curtime"].as_u64().unwrap() as u32;
+    let bits = u32::from_str_radix(tmpl["bits"].as_str().unwrap(), 16).unwrap();
+    let height = tmpl["height"].as_u64().unwrap();
+    let coinbasevalue = tmpl["coinbasevalue"].as_u64().unwrap();
+    let target_be = hex32(tmpl["target"].as_str().unwrap());
+    let mut seed_key = hex32(tmpl["brisvia"]["randomx_seed_hash"].as_str().unwrap());
+    seed_key.reverse();
+
+    let script_sig = Builder::new()
+        .push_int(height as i64)
+        .push_slice(extranonce.to_le_bytes())
+        .push_slice(*b"/Brisvia/")
+        .into_script();
+    let coinbase_in = TxIn {
+        previous_output: OutPoint::null(),
+        script_sig,
+        sequence: Sequence::MAX,
+        witness: Witness::from_slice(&[[0u8; 32]]),
+    };
+    let mut outs = vec![TxOut { value: Amount::from_sat(coinbasevalue), script_pubkey: payout_script.clone() }];
+    if let Some(wc) = tmpl["default_witness_commitment"].as_str() {
+        outs.push(TxOut { value: Amount::ZERO, script_pubkey: ScriptBuf::from_hex(wc).unwrap() });
+    }
+    let coinbase = Transaction {
+        version: TxVersion(2),
+        lock_time: LockTime::ZERO,
+        input: vec![coinbase_in],
+        output: outs,
+    };
+
+    let mut txdata = vec![coinbase];
+    if let Some(txs) = tmpl["transactions"].as_array() {
+        for t in txs {
+            let raw = hex::decode(t["data"].as_str().unwrap()).unwrap();
+            txdata.push(deserialize::<Transaction>(&raw).unwrap());
+        }
+    }
+    let mut block = Block {
+        header: Header {
+            version: Version::from_consensus(version),
+            prev_blockhash: prev,
+            merkle_root: TxMerkleNode::all_zeros(),
+            time: curtime,
+            bits: CompactTarget::from_consensus(bits),
+            nonce: 0,
+        },
+        txdata,
+    };
+    block.header.merkle_root = block.compute_merkle_root().expect("merkle");
+    let header_bytes = serialize(&block.header);
+    assert_eq!(header_bytes.len(), 80);
+    (block, header_bytes, target_be, seed_key)
+}
+
+/// Searches for a valid nonce with `threads` threads (fast/dataset). One thread watches the tip: if a new block
+/// appears, it bails out (to avoid mining stale work). Returns (nonce, hashes, stale=bailed out due to new tip).
+#[allow(clippy::too_many_arguments)]
+fn mine_block(cache: Arc<Cache>, dataset: Arc<Dataset>, header: &[u8], target_be: &[u8; 32], threads: usize,
+              max_nonces: u64, url: &str, user: &str, pass: &str, prev_hash: &str) -> (Option<u32>, u64, bool) {
+    let found = AtomicBool::new(false);
+    let stale = AtomicBool::new(false);
+    let winner = AtomicU32::new(0);
+    let hashes = AtomicU64::new(0);
+    std::thread::scope(|s| {
+        // Tip watcher: every 1.5s checks whether the best block changed relative to the current template.
+        {
+            let (found, stale) = (&found, &stale);
+            s.spawn(move || {
+                let mut ticks = 0u32;
+                while !found.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(150)); // responds quickly to "found"
+                    ticks += 1;
+                    if found.load(Ordering::Relaxed) { break; }
+                    if ticks % 10 == 0 { // queries the tip ~every 1.5s
+                        if let Ok(best) = rpc(url, user, pass, "getbestblockhash", json!([])) {
+                            if best.as_str() != Some(prev_hash) {
+                                stale.store(true, Ordering::SeqCst);
+                                found.store(true, Ordering::SeqCst);
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        for t in 0..threads {
+            let (cache, dataset, found, winner, hashes) = (cache.clone(), dataset.clone(), &found, &winner, &hashes);
+            s.spawn(move || {
+                let vm = Vm::new_fast(cache, dataset);
+                let mut local = header.to_vec();
+                let mut count = 0u64;
+                let mut nonce = t as u64;
+                while nonce <= max_nonces && nonce <= u32::MAX as u64 {
+                    if count % 512 == 0 && found.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    local[76..80].copy_from_slice(&(nonce as u32).to_le_bytes());
+                    let mut h = vm.hash(&local);
+                    count += 1;
+                    h.reverse(); // LE -> BE
+                    if &h <= target_be {
+                        winner.store(nonce as u32, Ordering::SeqCst);
+                        found.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    nonce += threads as u64;
+                }
+                hashes.fetch_add(count, Ordering::Relaxed);
+            });
+        }
+    });
+    let total = hashes.load(Ordering::Relaxed);
+    let stale = stale.load(Ordering::SeqCst);
+    if !stale && found.load(Ordering::SeqCst) {
+        (Some(winner.load(Ordering::SeqCst)), total, false)
+    } else {
+        (None, total, stale)
+    }
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() < 5 {
+        eprintln!("usage: mine-once <rpc_url> <user> <pass> <payout_addr> [max_blocks] [threads] [max_nonces]");
+        std::process::exit(2);
+    }
+    let (url, user, pass, addr) = (&args[1], &args[2], &args[3], &args[4]);
+    let max_blocks: u64 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(u64::MAX);
+    let threads: usize = args.get(6).and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2));
+    let max_nonces: u64 = args.get(7).and_then(|s| s.parse().ok()).unwrap_or(50_000_000);
+
+    // JSON event mode (for Brisvia Desktop / sidecar): one JSON line per event to stdout.
+    let json_mode = std::env::var("BRISVIA_JSON").is_ok();
+    let ev = |obj: Value| {
+        if json_mode { println!("{}", obj); }
+    };
+
+    let info = rpc(url, user, pass, "getaddressinfo", json!([addr])).unwrap();
+    let payout_script = ScriptBuf::from_hex(info["scriptPubKey"].as_str().expect("scriptPubKey")).unwrap();
+
+    if json_mode { ev(json!({"event":"started","threads":threads})); }
+    else { println!("Brisvia miner · {threads} threads"); }
+    let mut mined = 0u64;
+    let mut cur_seed: Option<[u8; 32]> = None;
+    let mut cache: Option<Arc<Cache>> = None;
+    let mut dataset: Option<Arc<Dataset>> = None;
+    let mut total_hashes = 0u64;
+    let t_start = Instant::now();
+
+    while mined < max_blocks {
+        let tmpl = match rpc(url, user, pass, "getblocktemplate", json!([{"rules":["segwit"]}])) {
+            Ok(t) => t,
+            Err(e) => { eprintln!("getblocktemplate: {e}"); break; }
+        };
+        let height = tmpl["height"].as_u64().unwrap();
+        let prev_hash = tmpl["previousblockhash"].as_str().unwrap().to_string();
+        let (mut block, header_bytes, target_be, seed_key) = build_candidate(&tmpl, &payout_script, mined + 1);
+
+        if cur_seed != Some(seed_key) {
+            let t_ds = Instant::now();
+            let c = Cache::new(&seed_key);
+            let d = Dataset::new(&c, threads); // ~2.1GB, multithreaded init (once per seed)
+            let ds_s = t_ds.elapsed().as_secs_f64();
+            if json_mode { ev(json!({"event":"seed_ready","seconds":ds_s})); }
+            else { eprintln!("(RandomX dataset ready in {ds_s:.0}s)"); }
+            cache = Some(c);
+            dataset = Some(d);
+            cur_seed = Some(seed_key);
+        }
+        let cache_ref = cache.clone().unwrap();
+        let dataset_ref = dataset.clone().unwrap();
+
+        let t_block = Instant::now();
+        let (found, hashes, stale) = mine_block(cache_ref, dataset_ref, &header_bytes, &target_be, threads, max_nonces, url, user, pass, &prev_hash);
+        total_hashes += hashes;
+
+        if stale {
+            if json_mode { ev(json!({"event":"stale","height":height})); }
+            else { println!("Block {height}: a new block appeared on the network, retrying with a fresh template"); }
+            continue;
+        }
+        match found {
+            Some(nonce) => {
+                block.header.nonce = nonce;
+                let block_hex = hex::encode(serialize(&block));
+                match rpc(url, user, pass, "submitblock", json!([block_hex])) {
+                    Ok(v) if v.is_null() => {
+                        mined += 1;
+                        let secs = t_block.elapsed().as_secs_f64();
+                        let hs = hashes as f64 / secs.max(0.001);
+                        if json_mode { ev(json!({"event":"accepted","height":height,"nonce":nonce,"seconds":secs,"hashrate":hs,"mined":mined})); }
+                        else { println!("Block {height} ACCEPTED (nonce {nonce}) · {secs:.1}s · {hs:.0} H/s · mined={mined}"); }
+                    }
+                    Ok(v) => {
+                        if json_mode { ev(json!({"event":"rejected","height":height,"reason":v})); }
+                        else { println!("Block {height} rejected: {v}"); } break;
+                    }
+                    Err(e) => {
+                        if json_mode { ev(json!({"event":"error","msg":e})); }
+                        else { println!("submitblock error: {e}"); } break;
+                    }
+                }
+            }
+            None => {
+                if json_mode { ev(json!({"event":"exhausted","height":height})); }
+                else { println!("Block {height}: no nonce found in {max_nonces} attempts"); } break;
+            }
+        }
+    }
+    let hs = total_hashes as f64 / t_start.elapsed().as_secs_f64().max(0.001);
+    if json_mode { ev(json!({"event":"done","mined":mined,"total_hashes":total_hashes,"hashrate":hs})); }
+    else { println!("--- done: {mined} blocks, {total_hashes} hashes, {hs:.0} H/s average ---"); }
+}

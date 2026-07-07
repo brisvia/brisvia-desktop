@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:">
+  <title>Brisvia</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- ============ PRIMER ARRANQUE (onboarding + crear billetera + respaldo de semilla) ============ -->
+  <div id="setup" class="overlay" hidden>
+    <div class="card setup-card">
+
+      <!-- Paso: bienvenida (3 slides) -->
+      <section class="step" data-step="welcome">
+        <img class="logo lg" src="assets/logo.png" alt="Brisvia">
+        <h2 id="onb-title"></h2>
+        <p id="onb-text" class="muted"></p>
+        <div class="onb-dots"><span class="dot on"></span><span class="dot"></span><span class="dot"></span></div>
+        <button id="onb-next" class="btn primary block"></button>
+      </section>
+
+      <!-- Paso: crear o importar -->
+      <section class="step" data-step="choose" hidden>
+        <img class="logo lg" src="assets/logo.png" alt="Brisvia">
+        <h2 data-i18n="onboarding.choose_t"></h2>
+        <p class="muted" data-i18n="onboarding.choose_x"></p>
+        <button id="btn-create" class="btn primary block" data-i18n="onboarding.create"></button>
+        <button id="btn-import" class="btn ghost block" data-i18n="onboarding.import"></button>
+      </section>
+
+      <!-- Paso: mostrar semilla -->
+      <section class="step" data-step="seed" hidden>
+        <h2 data-i18n="onboarding.seed_t"></h2>
+        <p class="muted" data-i18n="onboarding.seed_x"></p>
+        <div class="warn" data-i18n="onboarding.seed_warn"></div>
+        <ol id="seed-grid" class="seed-grid"></ol>
+        <label class="check"><input type="checkbox" id="seed-ack"> <span data-i18n="onboarding.seed_ack"></span></label>
+        <button id="seed-next" class="btn primary block" disabled data-i18n="common.continue"></button>
+      </section>
+
+      <!-- Paso: verificar respaldo -->
+      <section class="step" data-step="verify" hidden>
+        <h2 data-i18n="onboarding.verify_t"></h2>
+        <p class="muted" data-i18n="onboarding.verify_x"></p>
+        <div id="verify-slots" class="verify-slots"></div>
+        <div id="verify-bank" class="verify-bank"></div>
+        <p id="verify-msg" class="verify-msg" hidden></p>
+        <div class="row-gap">
+          <button id="verify-back" class="btn ghost" data-i18n="onboarding.verify_back"></button>
+          <button id="verify-reset" class="btn ghost" data-i18n="common.retry"></button>
+        </div>
+      </section>
+
+      <!-- Paso: importar frase -->
+      <section class="step" data-step="import" hidden>
+        <h2 data-i18n="onboarding.import_t"></h2>
+        <p class="muted" data-i18n="onboarding.import_x"></p>
+        <ol id="import-grid" class="import-grid"></ol>
+        <p id="import-msg" class="verify-msg" hidden></p>
+        <div class="row-gap">
+          <button id="import-back" class="btn ghost" data-i18n="common.back"></button>
+          <button id="import-ok" class="btn primary" data-i18n="onboarding.do_import"></button>
+        </div>
+      </section>
+
+    </div>
+  </div>
+
+  <!-- ============ APP PRINCIPAL ============ -->
+  <header class="topbar">
+    <div class="brand">
+      <img class="logo sm" src="assets/logo.png" alt="Brisvia">
+      <span class="brand-name">Brisvia</span>
+    </div>
+    <nav class="nav" role="tablist">
+      <button class="nav-btn active" data-view="wallet" data-i18n="nav.wallet"></button>
+      <button class="nav-btn" data-view="mine" data-i18n="nav.mine"></button>
+      <button class="nav-btn" data-view="settings" data-i18n="nav.settings"></button>
+    </nav>
+    <div class="net" data-tip-key="net"><span class="net-dot"></span> <span id="net-label"></span></div>
+  </header>
+
+  <!-- Aviso de red de prueba (testnet): monedas sin valor + cuenta regresiva hacia la red principal -->
+  <div id="testnet-banner" class="testnet-banner" hidden>
+    <span class="tb-text"><strong data-i18n="testnet.tag"></strong> <span data-i18n="testnet.note"></span></span>
+    <span id="tb-countdown" class="tb-countdown" hidden></span>
+  </div>
+
+  <main class="content">
+
+    <!-- ---- Vista Billetera ---- -->
+    <section class="view" data-view="wallet">
+      <div class="wallet-left">
+        <div class="balance-card">
+          <div class="bal-lbl muted small" data-tip-key="balance"><span data-i18n="wallet.balance_available"></span></div>
+          <div class="bal-val"><span id="bal-amount">0</span> <span class="bal-unit">BRVA</span></div>
+          <div id="bd-maturing-row" class="bal-incoming" hidden data-tip-key="incoming">
+            <span class="bd-dot mat"></span><span data-i18n="wallet.incoming"></span>:&nbsp;<strong id="bd-maturing">0</strong>&nbsp;BRVA
+          </div>
+          <div class="bal-actions">
+            <button id="act-receive" class="btn primary" data-i18n="wallet.receive"></button>
+            <button id="act-send" class="btn mineral" data-i18n="wallet.send"></button>
+          </div>
+          <div class="bal-trust muted small" data-i18n="wallet.trust"></div>
+        </div>
+
+        <div class="panel net-panel">
+          <div class="panel-head"><h3 data-i18n="net_panel.title"></h3></div>
+          <div class="net-rows">
+            <div class="nr"><span class="muted" data-tip-key="status" data-i18n="net_panel.status"></span><span id="nr-status"></span></div>
+            <div class="nr"><span class="muted" data-tip-key="blocks" data-i18n="net_panel.height"></span><span id="nr-height">—</span></div>
+            <div class="nr"><span class="muted" data-tip-key="peers" data-i18n="net_panel.peers"></span><span id="nr-peers">—</span></div>
+            <div class="nr"><span class="muted" data-tip-key="difficulty" data-i18n="net_panel.difficulty"></span><span id="nr-diff">—</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel movimientos">
+        <div class="panel-head"><h3 data-i18n="wallet.movements"></h3></div>
+        <ul id="history-list" class="history"></ul>
+        <div id="history-empty" class="empty">
+          <img class="logo empty-logo" src="assets/logo.png" alt="Brisvia">
+          <p class="muted"><span data-i18n="wallet.empty"></span><br><span data-i18n="wallet.empty_hint"></span></p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---- Vista Minar ---- -->
+    <section class="view" data-view="mine" hidden>
+      <div class="mine-grid">
+        <div class="hero">
+          <div class="state-line"><span id="state-badge" class="badge off"></span></div>
+          <h1 id="hero-title"></h1>
+          <p id="hero-sub" class="muted"></p>
+          <button id="toggle" class="btn giant primary"></button>
+          <div class="intensity">
+            <span class="muted small" data-tip-key="intensity" data-i18n="mine.how_much"></span>
+            <div class="seg" role="group" data-i18n-attr="aria-label:mine.how_much">
+              <button class="seg-btn" data-i="suave" data-i18n="mine.soft"></button>
+              <button class="seg-btn active" data-i="equilibrado" data-i18n="mine.balanced"></button>
+              <button class="seg-btn" data-i="intenso" data-i18n="mine.intense"></button>
+            </div>
+          </div>
+        </div>
+        <aside class="contrib">
+          <h3 data-i18n="mine.your_contribution"></h3>
+          <div class="metric" data-tip-key="mine_time"><div class="m-val" id="m-time">0</div><div class="m-lbl muted" data-i18n="mine.time_mining"></div></div>
+          <div class="metric" data-tip-key="mine_accepted"><div class="m-val" id="m-accepted">0</div><div class="m-lbl muted" data-i18n="mine.accepted"></div></div>
+          <div class="metric" data-tip-key="mine_rate"><div class="m-val" id="m-rate">0</div><div class="m-lbl muted" data-i18n="mine.rate"></div></div>
+          <p class="note muted small" data-i18n="mine.note"></p>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ---- Vista Ajustes ---- -->
+    <section class="view" data-view="settings" hidden>
+      <div class="panel settings-panel">
+        <div class="set-row">
+          <div><div class="set-title" data-i18n="settings.autostart_title"></div><div class="muted small" data-i18n="settings.autostart_sub"></div></div>
+          <label class="switch"><input type="checkbox" id="set-autostart"><span class="slider"></span></label>
+        </div>
+        <div class="set-row">
+          <div><div class="set-title" data-i18n="settings.tray_title"></div><div class="muted small" data-i18n="settings.tray_sub"></div></div>
+          <label class="switch"><input type="checkbox" id="set-tray"><span class="slider"></span></label>
+        </div>
+        <div class="set-row">
+          <div><div class="set-title" data-i18n="settings.intensity_title"></div><div class="muted small" data-i18n="settings.intensity_sub"></div></div>
+          <div class="seg small-seg" id="set-intensity">
+            <button class="seg-btn" data-i="suave" data-i18n="mine.soft"></button>
+            <button class="seg-btn active" data-i="equilibrado" data-i18n="mine.balanced"></button>
+            <button class="seg-btn" data-i="intenso" data-i18n="mine.intense"></button>
+          </div>
+        </div>
+        <div class="set-row">
+          <div><div class="set-title" data-i18n="settings.language_title"></div><div class="muted small" data-i18n="settings.language_sub"></div></div>
+          <div class="seg small-seg" id="set-language">
+            <button class="seg-btn" data-lang="es">Español</button>
+            <button class="seg-btn" data-lang="en">English</button>
+          </div>
+        </div>
+        <div class="set-row">
+          <div><div class="set-title" data-i18n="settings.security_title"></div><div class="muted small" data-i18n="settings.security_sub"></div></div>
+          <button id="set-security" class="btn ghost" data-i18n="common.open"></button>
+        </div>
+        <div class="set-row">
+          <div><div class="set-title" data-i18n="settings.network_title"></div><div class="muted small" data-i18n="settings.network_sub"></div></div>
+          <div class="muted" id="set-netinfo" data-i18n="settings.network_value"></div>
+        </div>
+      </div>
+
+      <div class="panel community">
+        <div class="panel-head"><h3 data-i18n="settings.community"></h3></div>
+        <div class="social-grid">
+          <button class="social" data-url="https://brisvia.com">brisvia.com</button>
+          <button class="social" data-url="https://x.com/brisviacoin">X · @brisviacoin</button>
+          <button class="social" data-url="https://instagram.com/brisviacoin">Instagram · @brisviacoin</button>
+          <button class="social" data-url="https://chat.whatsapp.com/FF8p6xJ3hSQ7KvePYFD8BY">WhatsApp · grupo</button>
+          <button class="social" data-url="https://t.me/brisvia">Telegram</button>
+          <button class="social" data-url="https://discord.gg/ZF4MExMJn4">Discord</button>
+        </div>
+      </div>
+      <p class="foot-note muted small"><span data-i18n="settings.footnote"></span> <span id="ver-label">v0.1.0</span></p>
+    </section>
+  </main>
+
+  <!-- ============ MODALES ============ -->
+  <div id="modal-receive" class="overlay" hidden>
+    <div class="card modal">
+      <button class="modal-x" data-close data-i18n-attr="aria-label:common.close">×</button>
+      <h2 data-i18n="receive.title"></h2>
+      <p class="muted" data-i18n="receive.sub"></p>
+      <div id="qr" class="qr" aria-hidden="true"></div>
+      <div class="addr-box"><code id="recv-addr"></code></div>
+      <div class="row-gap">
+        <button id="recv-copy" class="btn primary" data-i18n="receive.copy_addr"></button>
+        <button id="recv-new" class="btn ghost" data-i18n="receive.new_addr"></button>
+      </div>
+    </div>
+  </div>
+
+  <div id="modal-send" class="overlay" hidden>
+    <div class="card modal">
+      <button class="modal-x" data-close data-i18n-attr="aria-label:common.close">×</button>
+      <h2 data-i18n="send.title"></h2>
+      <label class="field"><span class="muted small" data-i18n="send.to"></span>
+        <input id="send-addr" type="text" placeholder="brv1q…"></label>
+      <label class="field"><span class="muted small" data-i18n="send.amount"></span>
+        <input id="send-amount" type="number" min="0" step="0.00000001" placeholder="0.00"></label>
+      <p id="send-msg" class="verify-msg" hidden></p>
+      <div class="row-gap">
+        <button data-close class="btn ghost" data-i18n="send.cancel"></button>
+        <button id="send-go" class="btn mineral" data-i18n="send.go"></button>
+      </div>
+    </div>
+  </div>
+
+  <div id="modal-seed" class="overlay" hidden>
+    <div class="card modal">
+      <button class="modal-x" data-close data-i18n-attr="aria-label:common.close">×</button>
+      <h2 data-i18n="seedview.title"></h2>
+      <div class="warn" data-i18n="seedview.warn"></div>
+      <ol id="seed-grid-view" class="seed-grid"></ol>
+      <button data-close class="btn primary block" data-i18n="seedview.ok"></button>
+    </div>
+  </div>
+
+  <!-- Detalle de un movimiento -->
+  <div id="modal-txdetail" class="overlay" hidden>
+    <div class="card modal">
+      <button class="modal-x" data-close data-i18n-attr="aria-label:common.close">×</button>
+      <h2 data-i18n="tx.title"></h2>
+      <div class="detail-rows" id="txd-rows"></div>
+    </div>
+  </div>
+
+  <!-- Seguridad y respaldo -->
+  <div id="modal-security" class="overlay" hidden>
+    <div class="card modal">
+      <button class="modal-x" data-close data-i18n-attr="aria-label:common.close">×</button>
+      <h2 data-i18n="security.title"></h2>
+      <div class="detail-rows">
+        <div class="dr"><span class="muted" data-i18n="security.kind"></span><span class="val" id="sec-kind"></span></div>
+        <div class="dr"><span class="muted" data-i18n="security.phrase"></span><span class="val" id="sec-seed"></span></div>
+      </div>
+      <p class="muted small" data-i18n="security.note"></p>
+      <p id="sec-backup-result" class="verify-msg" hidden></p>
+      <button id="sec-backup" class="btn primary block" data-i18n="security.backup_btn"></button>
+    </div>
+  </div>
+
+  <script src="locales.js"></script>
+  <script src="i18n.js"></script>
+  <script src="tauri-bridge.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
