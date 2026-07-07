@@ -5,15 +5,22 @@ fn main() {
         .unwrap_or_else(|_| "/root/randomx-lib/build".to_string());
     println!("cargo:rustc-link-search=native={}", lib_dir);
     println!("cargo:rustc-link-lib=static=randomx");
-    // RandomX is written in C++ -> we must link libstdc++ (Linux/mingw).
-    if cfg!(target_env = "gnu") || cfg!(target_os = "linux") {
+
+    // RandomX is written in C++, so we must link the platform's C++ standard library.
+    // Read the TARGET config (CARGO_CFG_*), which is correct even when cross-compiling.
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    if target_os == "macos" {
+        // macOS ships libc++ (not libstdc++).
+        println!("cargo:rustc-link-lib=dylib=c++");
+    } else if target_os == "linux" || target_env == "gnu" {
         println!("cargo:rustc-link-lib=dylib=stdc++");
     }
-    if cfg!(all(target_os = "windows", target_env = "gnu")) {
+    if target_os == "windows" && target_env == "gnu" {
         println!("cargo:rustc-link-lib=dylib=winpthread");
     }
     // Windows: RandomX uses the privileges API (large pages) -> Advapi32.
-    if cfg!(target_os = "windows") {
+    if target_os == "windows" {
         println!("cargo:rustc-link-lib=dylib=advapi32");
     }
 }
