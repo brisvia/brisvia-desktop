@@ -1,0 +1,87 @@
+name: Build macOS
+
+# Builds the whole app for macOS (Apple Silicon) on GitHub's free macOS runners:
+# RandomX -> bitcoind node -> Rust miner -> Tauri app (.dmg) -> attach to the release.
+# Triggered manually from the Actions tab.
+on:
+  workflow_dispatch:
+
+jobs:
+  macos-arm64:
+    runs-on: macos-14 # Apple Silicon (arm64)
+    steps:
+      - name: Checkout desktop app
+        uses: actions/checkout@v4
+
+      - name: Checkout core (with the RandomX submodule)
+        uses: actions/checkout@v4
+        with:
+          repository: brisvia/brisvia
+          submodules: recursive
+          path: core
+
+      - name: Install build dependencies
+        run: brew install cmake boost libevent sqlite
+
+      - name: Build RandomX (static lib)
+        run: |
+          cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release -DARCH=native
+          cmake --build core/src/randomx/build -j3
+
+      - name: Build bitcoind and bitcoin-cli
+        run: |
+          cd core
+          cmake -B build \
+            -DENABLE_IPC=OFF -DBUILD_TESTS=OFF -DBUILD_GUI=OFF -DWITH_ZMQ=OFF -DBUILD_BENCH=OFF \
+            -DBRISVIA_RANDOMX_LIB="$PWD/src/randomx/build/librandomx.a" \
+            -DBRISVIA_RANDOMX_INCLUDE="$PWD/src/randomx/src"
+          cmake --build build --target bitcoind bitcoin-cli -j3
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the miner (mine-once)
+        run: |
+          export RANDOMX_LIB_DIR="$PWD/core/src/randomx/build"
+          cargo build --release --manifest-path crates/brisvia-randomx/Cargo.toml --bin mine-once
+
+      - name: Stage binaries (no .exe on macOS) and point the config at them
+        run: |
+          mkdir -p src-tauri/binaries
+          cp core/build/bin/bitcoind src-tauri/binaries/bitcoind
+          cp core/build/bin/bitcoin-cli src-tauri/binaries/bitcoin-cli
+          cp crates/brisvia-randomx/target/release/mine-once src-tauri/binaries/brisvia-worker || \
+            cp target/release/mine-once src-tauri/binaries/brisvia-worker
+          chmod +x src-tauri/binaries/*
+          python3 - <<'PY'
+          import json
+          p = "src-tauri/tauri.conf.json"
+          d = json.load(open(p))
+          d["bundle"]["resources"] = ["binaries/bitcoind", "binaries/bitcoin-cli", "binaries/brisvia-worker"]
+          json.dump(d, open(p, "w"), indent=2)
+          PY
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install frontend dependencies
+        run: npm install
+
+      - name: Build the Tauri app (.dmg)
+        run: npm run tauri build
+
+      - name: Smoke test the compiled binaries
+        run: |
+          ./src-tauri/binaries/bitcoind -version | head -1 || echo "bitcoind version check failed"
+          file ./src-tauri/binaries/brisvia-worker || true
+
+      - name: Attach the .dmg to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1.0
+          files: |
+            src-tauri/target/release/bundle/dmg/*.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

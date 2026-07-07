@@ -180,6 +180,21 @@ function finishSetup() { $('#setup').hidden = true; showView('wallet'); if (wind
 
 // ===================== Minado =====================
 let mining = false;
+// Formats a hashrate (H/s) with the right unit, and a duration (seconds) in a human, non-technical way.
+function fmtHashrate(hs) {
+  hs = hs || 0;
+  if (hs >= 1e9) return `${(hs / 1e9).toFixed(2)} <span class="unit">GH/s</span>`;
+  if (hs >= 1e6) return `${(hs / 1e6).toFixed(2)} <span class="unit">MH/s</span>`;
+  if (hs >= 1000) return `${(hs / 1000).toFixed(2)} <span class="unit">kH/s</span>`;
+  return `${Math.round(hs)} <span class="unit">H/s</span>`;
+}
+function fmtDuration(secs) {
+  secs = Math.floor(secs || 0);
+  const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), s = secs % 60;
+  if (h > 0) return `${h} <span class="unit">${T('mine.unit_h')}</span> ${m} <span class="unit">${T('mine.unit_min')}</span>`;
+  if (m > 0) return `${m} <span class="unit">${T('mine.unit_min')}</span> ${s} <span class="unit">${T('mine.unit_s')}</span>`;
+  return `${s} <span class="unit">${T('mine.unit_s')}</span>`;
+}
 async function refreshMine() {
   const s = await window.brisvia.getStatus();
   mining = s.mining;
@@ -211,11 +226,12 @@ async function refreshMine() {
   }
   $('#toggle').textContent = mining ? T('mine.stop') : T('mine.start');
   $('#toggle').className = 'btn giant ' + (mining ? 'mineral' : 'primary');
-  const mins = Math.floor(s.secondsMining / 60);
-  $('#m-time').innerHTML = mins >= 60 ? `${(mins / 60).toFixed(1)} <span class="unit">${T('mine.unit_h')}</span>` : `${mins} <span class="unit">${T('mine.unit_min')}</span>`;
-  $('#m-accepted').textContent = s.accepted;
-  const rate = s.secondsMining > 0 ? (s.accepted / (s.secondsMining / 60)) : 0;
-  $('#m-rate').innerHTML = `${rate.toFixed(1)} <span class="unit">${T('mine.unit_blocks_min')}</span>`;
+  $('#m-blocks').textContent = window.I18N.fmtNum(s.accepted || 0);
+  $('#m-speed').innerHTML = fmtHashrate(mining ? (s.hashrate || 0) : 0);
+  const pct = (s.cores > 0) ? Math.round((s.threads / s.cores) * 100) : 0;
+  $('#m-cpu').textContent = (mining ? pct : 0) + '%';
+  $('#m-session').innerHTML = fmtDuration(s.secondsMining || 0);
+  $('#m-total').innerHTML = fmtDuration(s.totalSeconds || 0);
 }
 $('#toggle').addEventListener('click', async () => {
   if (mining) await window.brisvia.stop();
@@ -237,14 +253,16 @@ function catLabel(cat) {
 }
 async function loadWallet() {
   const w = await window.brisvia.wallet.summary();
-  // Big number = what can be used now (available). "Incoming" (maturing) is shown apart, only if any.
+  // Big number = what can be spent now (available). Maturing (mining rewards) and Incoming (unconfirmed) are
+  // shown apart, each only if there is an amount. They are NEVER added into the available number.
   $('#bal-amount').textContent = fmt(w.balance);
-  if (w.pending > 0) {
-    $('#bd-maturing-row').hidden = false;
-    $('#bd-maturing').textContent = fmt(w.pending);
-  } else {
-    $('#bd-maturing-row').hidden = true;
-  }
+  const mat = w.immature || 0, inc = w.incoming || 0;
+  $('#bd-maturing-row').hidden = !(mat > 0);
+  $('#bd-incoming-row').hidden = !(inc > 0);
+  if (mat > 0) $('#bd-maturing').textContent = fmt(mat);
+  if (inc > 0) $('#bd-incoming').textContent = fmt(inc);
+  $('#bal-incoming-wrap').hidden = !(mat > 0 || inc > 0);
+  if (!(mat > 0 || inc > 0)) $('#bal-explain').hidden = true;
   const hist = await window.brisvia.wallet.history();
   const list = $('#history-list'), empty = $('#history-empty');
   list.innerHTML = '';
@@ -286,6 +304,14 @@ async function openTxDetail(h) {
   const cp = $('#txd-copy');
   if (cp) cp.addEventListener('click', async () => { try { await navigator.clipboard.writeText(d.txid); cp.textContent = T('common.copied'); } catch {} });
 }
+
+// Chips de saldo (Madurando / En camino): al tocarlos, explican por qué esa parte no se puede usar todavía.
+$$('.bal-chip').forEach((c) => c.addEventListener('click', () => {
+  const ex = $('#bal-explain');
+  const key = c.classList.contains('mat') ? 'wallet.maturing_note' : 'wallet.incoming_note';
+  if (!ex.hidden && ex.dataset.k === key) { ex.hidden = true; return; }
+  ex.textContent = T(key); ex.dataset.k = key; ex.hidden = false;
+}));
 
 // Recibir
 $('#act-receive').addEventListener('click', async () => {
@@ -352,20 +378,34 @@ $$('#set-language .seg-btn').forEach((b) => b.addEventListener('click', () => {
 $$('.social').forEach((b) => b.addEventListener('click', () => window.brisvia.openUrl(b.dataset.url)));
 
 // Seguridad y respaldo
-$('#set-security').addEventListener('click', async () => {
-  const k = await window.brisvia.wallet.kind();
-  $('#sec-kind').textContent = T('security.kind_value');
-  $('#sec-seed').textContent = (k && k.has_seed_phrase) ? T('security.phrase_available') : T('security.phrase_none');
-  $('#sec-backup-result').hidden = true;
-  openModal('modal-security');
+$('#set-security').addEventListener('click', () => openModal('modal-security'));
+// Ver las 12 palabras: se piden al backend en el momento; no se guardan en ningún archivo.
+$('#sec-view').addEventListener('click', async () => {
+  const words = await window.brisvia.wallet.getSeed();
+  const grid = $('#seed-grid-view'); grid.innerHTML = '';
+  (words || []).forEach((w) => { const li = document.createElement('li'); li.textContent = w; grid.appendChild(li); });
+  closeModal('modal-security'); openModal('modal-seed');
 });
-$('#sec-backup').addEventListener('click', async () => {
-  const btn = $('#sec-backup'); btn.disabled = true; btn.textContent = T('security.backing_up');
-  const r = await window.brisvia.wallet.backup();
-  const msg = $('#sec-backup-result'); msg.hidden = false;
-  if (r && r.ok) { msg.className = 'verify-msg ok'; msg.textContent = `${T('security.backup_ok')}\n${r.path}`; }
-  else { msg.className = 'verify-msg err'; msg.textContent = r && r.error ? transError(r.error) : T('security.backup_fail'); }
-  btn.disabled = false; btn.textContent = T('security.backup_btn');
+// Verificar respaldo: el usuario escribe sus 12 palabras y se comparan con las de la billetera.
+$('#sec-verify').addEventListener('click', () => {
+  const grid = $('#vb-grid'); grid.innerHTML = '';
+  for (let i = 0; i < 12; i++) {
+    const li = document.createElement('li');
+    const inp = document.createElement('input');
+    inp.type = 'text'; inp.autocomplete = 'off'; inp.spellcheck = false; inp.setAttribute('aria-label', `${i + 1}`);
+    li.appendChild(inp); grid.appendChild(li);
+  }
+  $('#vb-msg').hidden = true;
+  closeModal('modal-security'); openModal('modal-verify-backup');
+});
+$('#vb-check').addEventListener('click', async () => {
+  const words = [...$('#vb-grid').querySelectorAll('input')].map((i) => i.value.trim().toLowerCase()).filter(Boolean);
+  const msg = $('#vb-msg'); msg.hidden = false;
+  if (words.length !== 12) { msg.className = 'verify-msg err'; msg.textContent = T('security.verify_len', { n: words.length }); return; }
+  const real = await window.brisvia.wallet.getSeed();
+  const ok = Array.isArray(real) && real.length === 12 && real.every((w, i) => w === words[i]);
+  msg.className = ok ? 'verify-msg ok' : 'verify-msg err';
+  msg.textContent = ok ? T('security.verify_ok') : T('security.verify_bad');
 });
 
 // ===================== Modales =====================
