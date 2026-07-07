@@ -27,6 +27,7 @@
     "active": true,
     "targets": ["nsis"],
     "category": "Utility",
+    "publisher": "Brisvia",
     "shortDescription": "Mine Brisvia with your CPU and join the network.",
     "icon": ["icons/icon.png"],
     "resources": ["binaries/bitcoind.exe", "binaries/bitcoin-cli.exe", "binaries/brisvia-worker.exe"]

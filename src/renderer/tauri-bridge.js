@@ -83,7 +83,8 @@
   window.brisvia = {
     getStatus: async () => {
       const base = { suave: 120, equilibrado: 320, intenso: 620 }[st.intensity] || 320;
-      return { mining: st.mining, hashrate: st.mining ? base : 0, accepted: Math.floor(st.seconds / 12), secondsMining: st.seconds, intensity: st.intensity };
+      const cores = 8, threads = { suave: 1, equilibrado: 4, intenso: 8 }[st.intensity] || 4;
+      return { mining: st.mining, hashrate: st.mining ? base : 0, accepted: Math.floor(st.seconds / 12), secondsMining: st.seconds, intensity: st.intensity, threads: st.mining ? threads : 0, cores, totalSeconds: st.seconds };
     },
     start: async (i) => { st.mining = true; if (i) st.intensity = i; return { mining: true }; },
     stop: async () => { st.mining = false; return { mining: false }; },
@@ -102,7 +103,7 @@
       confirmBackup: async () => { const w = LS.get('brv_wallet', {}); w.backed_up = true; LS.set('brv_wallet', w); return { backed_up: true }; },
       summary: async () => {
         const w = LS.get('brv_wallet', {});
-        return { balance: 0, pending: 0, address: w.address || '', backed_up: !!w.backed_up };
+        return { balance: 0, immature: 0, incoming: 0, pending: 0, address: w.address || '', backed_up: !!w.backed_up };
       },
       history: async () => [],
       newAddress: async () => { const w = LS.get('brv_wallet', {}); w.address = genAddress(); LS.set('brv_wallet', w); return { address: w.address }; },

@@ -46,6 +46,11 @@ struct AppState {
     // Current language (es/en) and tray handle to rebuild its menu when the language changes.
     lang: Arc<Mutex<String>>,
     tray: Arc<Mutex<Option<tauri::tray::TrayIcon>>>,
+    // Total CPU cores (fixed) and the miner's current thread count, to show processor usage.
+    cores: usize,
+    miner_threads: Arc<AtomicU64>,
+    // Lifetime mining time in seconds, persisted to disk so the total survives restarts.
+    total_mined_secs: Arc<Mutex<u64>>,
 }
 
 // ---- dependency-free base64 (for the cookie's Basic auth header) ----
@@ -108,7 +113,13 @@ fn rpc(datadir: &PathBuf, wallet: Option<&str>, method: &str, params: Value) -> 
     }
 }
 
-// ---- locate bitcoind.exe (prod: resource_dir; dev: manifest/binaries) ----
+// Binary extension per platform: ".exe" on Windows, empty elsewhere (macOS/Linux).
+#[cfg(windows)]
+const EXE_SUFFIX: &str = ".exe";
+#[cfg(not(windows))]
+const EXE_SUFFIX: &str = "";
+
+// ---- locate a bundled binary (prod: resource_dir; dev: manifest/binaries) ----
 fn find_binary(app: &AppHandle, name: &str) -> Option<PathBuf> {
     if let Ok(res) = app.path().resource_dir() {
         for cand in [res.join("binaries").join(name), res.join(name)] {
@@ -140,7 +151,7 @@ fn no_window(cmd: &mut Command) {
 
 // ---- start the node as a child process ----
 fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
-    let bitcoind = find_binary(app, "bitcoind.exe").ok_or("bitcoind.exe not found")?;
+    let bitcoind = find_binary(app, &format!("bitcoind{EXE_SUFFIX}")).ok_or("bitcoind not found")?;
     std::fs::create_dir_all(&state.datadir).map_err(|e| e.to_string())?;
     // Wide rpcthreads/rpcworkqueue: the miner (getblocktemplate + submitblock) plus the UI polling make several
     // concurrent RPC calls; with the defaults (4 threads) the node rejects connections under load.
@@ -222,10 +233,13 @@ fn wallet_create(state: State<AppState>) -> Result<Value, String> {
     Ok(json!({ "address": addr }))
 }
 
-// Kept for the UI bridge; the real seed phrase comes from the BIP39 flow.
+// Returns the 12 backup words: the in-memory mnemonic right after creation, or the persisted phrase later.
 #[tauri::command]
-fn wallet_seed() -> Value {
-    json!([])
+fn wallet_seed(state: State<AppState>) -> Value {
+    if let Some(p) = state.pending_mnemonic.lock().unwrap().clone() {
+        return json!(p.split(' ').collect::<Vec<_>>());
+    }
+    json!(load_seed_phrase(&state.datadir))
 }
 
 #[tauri::command]
@@ -241,6 +255,8 @@ fn wallet_summary(state: State<AppState>) -> Value {
     let immature = bal["mine"]["immature"].as_f64().unwrap_or(0.0);
     json!({
         "balance": trusted,
+        "immature": immature,
+        "incoming": pending,
         "pending": pending + immature,
         "address": *state.receive_addr.lock().unwrap(),
         "backed_up": true
@@ -426,6 +442,7 @@ fn wallet_create_bip39(state: State<AppState>, name: String) -> Result<Value, St
     import_descriptors(&state.datadir, &name, &ext, &int, false)?;
     let words = mnemonic.to_string();
     *state.pending_mnemonic.lock().unwrap() = Some(words.clone());
+    save_seed_phrase(&state.datadir, &words);
     activate_wallet(&state, &name);
     let list: Vec<&str> = words.split(' ').collect();
     Ok(json!({ "words": list, "fingerprint": fp }))
@@ -455,10 +472,34 @@ fn wallet_restore_bip39(state: State<AppState>, phrase: String, name: String) ->
     rpc(&state.datadir, None, "createwallet", json!([name, false, true, "", false, true]))?;
     import_descriptors(&state.datadir, &name, &ext, &int, true)?; // rescan from genesis
     activate_wallet(&state, &name);
+    save_seed_phrase(&state.datadir, phrase.trim());
     Ok(json!({ "ok": true, "fingerprint": fp }))
 }
 
 // ---- mining: launch the engine sidecar and follow its accepted-block events ----
+// Lifetime mining time is persisted in a small text file in the data directory.
+fn total_mined_path(datadir: &std::path::Path) -> std::path::PathBuf { datadir.join("mined_total_secs.txt") }
+fn load_total_mined(datadir: &std::path::Path) -> u64 {
+    std::fs::read_to_string(total_mined_path(datadir)).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0)
+}
+fn save_total_mined(datadir: &std::path::Path, secs: u64) {
+    let _ = std::fs::create_dir_all(datadir);
+    let _ = std::fs::write(total_mined_path(datadir), secs.to_string());
+}
+
+// The 12-word backup phrase is persisted locally so the user can view or verify it later (Security screen).
+// It sits next to the wallet, which is already unencrypted on disk; for mainnet this should be encrypted.
+fn seed_phrase_path(datadir: &std::path::Path) -> std::path::PathBuf { datadir.join("wallet_seed_phrase.txt") }
+fn save_seed_phrase(datadir: &std::path::Path, phrase: &str) {
+    let _ = std::fs::create_dir_all(datadir);
+    let _ = std::fs::write(seed_phrase_path(datadir), phrase.trim());
+}
+fn load_seed_phrase(datadir: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(seed_phrase_path(datadir)).ok()
+        .map(|s| s.trim().split_whitespace().map(|w| w.to_string()).collect())
+        .unwrap_or_default()
+}
+
 #[tauri::command]
 fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>) -> Value {
     if let Some(i) = intensity {
@@ -478,6 +519,7 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
         "intenso" => cores,
         _ => (cores / 2).max(1),
     };
+    state.miner_threads.store(threads as u64, Ordering::SeqCst);
 
     // Node cookie auth (never exposed in logs): the .cookie file contains "user:password".
     let cookie = std::fs::read_to_string(state.datadir.join(NET_SUBDIR).join(".cookie")).unwrap_or_default();
@@ -501,7 +543,7 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
     }
     let url = format!("http://127.0.0.1:{}/wallet/{}", RPC_PORT, WALLET_NAME);
 
-    let miner_bin = match find_binary(&app, "brisvia-worker.exe") {
+    let miner_bin = match find_binary(&app, &format!("brisvia-worker{EXE_SUFFIX}")) {
         Some(b) => b,
         None => { state.mining.store(false, Ordering::SeqCst); return json!({ "mining": false, "error": "ERR:MINER_NOT_FOUND" }); }
     };
@@ -567,6 +609,15 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
 #[tauri::command]
 fn miner_stop(state: State<AppState>) -> Value {
     state.mining.store(false, Ordering::SeqCst);
+    // Add this session's time to the lifetime total and persist it.
+    let sess = state.mine_start.lock().unwrap().map(|t| t.elapsed().as_secs()).unwrap_or(0);
+    if sess > 0 {
+        let mut tot = state.total_mined_secs.lock().unwrap();
+        *tot += sess;
+        save_total_mined(&state.datadir, *tot);
+    }
+    *state.mine_start.lock().unwrap() = None;
+    state.miner_threads.store(0, Ordering::SeqCst);
     if let Some(mut child) = state.miner_child.lock().unwrap().take() {
         let _ = child.kill();
         let _ = child.wait();
@@ -594,6 +645,7 @@ fn miner_status(state: State<AppState>) -> Value {
     let intensity = state.intensity.lock().unwrap().clone();
     // "preparing" = mining but the engine is still building the RandomX dataset (no event received yet).
     let preparing = mining && !state.miner_ready.load(Ordering::SeqCst);
+    let total = *state.total_mined_secs.lock().unwrap() + if mining { secs } else { 0 };
     json!({
         "mining": mining,
         "preparing": preparing,
@@ -601,7 +653,10 @@ fn miner_status(state: State<AppState>) -> Value {
         "secondsMining": if mining { secs } else { 0 },
         // REAL hashrate reported by the miner (CPU hashes per second)
         "hashrate": if mining { *state.hashrate.lock().unwrap() } else { 0.0 },
-        "intensity": intensity
+        "intensity": intensity,
+        "threads": state.miner_threads.load(Ordering::SeqCst),
+        "cores": state.cores as u64,
+        "totalSeconds": total
     })
 }
 
@@ -689,6 +744,8 @@ fn set_language(app: AppHandle, state: State<AppState>, lang: String) {
 pub fn run() {
     // data directory next to the user's app data
     let datadir = dirs_data_dir().join("BrisviaSim");
+    let total_secs_initial = load_total_mined(&datadir);
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
 
     let state = AppState {
         child: Arc::new(Mutex::new(None)),
@@ -706,6 +763,9 @@ pub fn run() {
         pending_mnemonic: Arc::new(Mutex::new(None)),
         lang: Arc::new(Mutex::new("es".to_string())),
         tray: Arc::new(Mutex::new(None)),
+        cores,
+        miner_threads: Arc::new(AtomicU64::new(0)),
+        total_mined_secs: Arc::new(Mutex::new(total_secs_initial)),
     };
 
     tauri::Builder::default()

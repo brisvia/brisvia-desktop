@@ -59,10 +59,17 @@ h1, h2, h3 { margin: 0; }
 .wallet-left .balance-card, .wallet-left .panel { margin-top: 0; }
 
 /* "Incoming" chip: mining rewards still maturing (apart from the big number, which is already spendable). */
-.bal-incoming { display: inline-flex; align-items: center; gap: 7px; margin-top: 14px; font-size: 13px; color: var(--sand); background: rgba(213,166,111,.10); border: 1px solid rgba(213,166,111,.28); border-radius: 999px; padding: 5px 12px; position: relative; z-index: 1; cursor: help; }
-.bal-incoming .bd-dot { width: 8px; height: 8px; border-radius: 50%; }
-.bal-incoming .bd-dot.mat { background: var(--sand); }
-.bal-incoming strong { color: var(--text); font-weight: 700; }
+.bal-incoming-wrap { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; position: relative; z-index: 1; }
+.bal-chip { display: inline-flex; align-items: center; gap: 7px; font: inherit; font-size: 13px; color: var(--sand); background: rgba(213,166,111,.10); border: 1px solid rgba(213,166,111,.28); border-radius: 999px; padding: 5px 12px; cursor: pointer; transition: all .15s ease; }
+.bal-chip:hover { background: rgba(213,166,111,.18); }
+.bal-chip.inc { color: var(--brand); background: var(--brand-soft); border-color: var(--border); }
+.bal-chip.inc:hover { border-color: var(--brand); }
+.bal-chip .bd-dot { width: 8px; height: 8px; border-radius: 50%; }
+.bal-chip .bd-dot.mat { background: var(--sand); }
+.bal-chip .bd-dot.inc { background: var(--brand); }
+.bal-chip strong { color: var(--text); font-weight: 700; }
+.bal-explain { margin-top: 10px; line-height: 1.45; position: relative; z-index: 1; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 9px 12px; }
+.sec-actions { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; }
 /* Trust signal at the bottom of the balance card. */
 .bal-trust { margin-top: 16px; position: relative; z-index: 1; line-height: 1.4; opacity: .82; }
 
@@ -153,6 +160,11 @@ h1 { font-size: 26px; line-height: 1.14; letter-spacing: -.02em; max-width: 15ch
 .m-val { font-size: 25px; font-weight: 730; letter-spacing: -.02em; }
 .m-val .unit { font-size: 14px; color: var(--muted); font-weight: 600; }
 .m-lbl { font-size: 12.5px; margin-top: 1px; }
+.metric.big { padding-top: 2px; }
+.metric.big .m-val { font-size: 40px; color: var(--brand); line-height: 1.05; }
+.metric-row { display: flex; gap: 18px; }
+.metric-row .metric { flex: 1; }
+.contrib .metric-row:last-of-type .metric { border-bottom: 0; }
 .note { margin: 14px 0 0; line-height: 1.4; }
 
 /* ---- Settings ---- */
@@ -164,7 +176,8 @@ h1 { font-size: 26px; line-height: 1.14; letter-spacing: -.02em; max-width: 15ch
 /* Community / social */
 .community { margin-top: 18px; }
 .social-grid { display: flex; flex-wrap: wrap; gap: 8px; }
-.social { font: inherit; font-size: 13px; font-weight: 600; color: var(--brand); background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; padding: 8px 15px; cursor: pointer; transition: all .15s ease; }
+.social { display: inline-flex; align-items: center; gap: 7px; font: inherit; font-size: 13px; font-weight: 600; color: var(--brand); background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; padding: 8px 15px; cursor: pointer; transition: all .15s ease; }
+.social svg { width: 15px; height: 15px; fill: currentColor; flex-shrink: 0; }
 .social:hover { border-color: var(--brand); background: var(--brand-soft); }
 /* switch */
 .switch { position: relative; display: inline-block; width: 46px; height: 26px; flex-shrink: 0; }
