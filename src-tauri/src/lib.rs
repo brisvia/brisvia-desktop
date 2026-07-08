@@ -853,6 +853,16 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "no update available".to_string())?;
+    // Stop the node and mining engine first so their .exe files aren't locked when the installer replaces them.
+    {
+        let state = app.state::<AppState>();
+        state.mining.store(false, Ordering::SeqCst);
+        if let Some(mut child) = state.miner_child.lock().unwrap().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        stop_node(&state);
+    }
     update
         .download_and_install(|_chunk, _total| {}, || {})
         .await
