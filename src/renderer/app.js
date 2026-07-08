@@ -379,6 +379,33 @@ $$('.social').forEach((b) => b.addEventListener('click', () => window.brisvia.op
 
 // Seguridad y respaldo
 $('#set-security').addEventListener('click', () => openModal('modal-security'));
+
+// ===================== Actualizaciones (auto-actualizador) =====================
+// Al iniciar chequea si hay una versión nueva firmada; si la hay, muestra un aviso con un botón
+// que la baja, verifica su firma, instala y reinicia. También se puede buscar a mano desde Ajustes.
+async function checkForUpdate(manual) {
+  const btn = $('#set-update');
+  if (manual && btn) { btn.disabled = true; btn.textContent = T('update.checking'); }
+  let res = null;
+  try { res = window.brisvia.checkUpdate ? await window.brisvia.checkUpdate() : null; } catch {}
+  if (res && res.available) {
+    const banner = $('#update-banner'); if (banner) banner.hidden = false;
+    if (btn) { btn.disabled = false; btn.textContent = T('update.check'); }
+  } else if (manual && btn) {
+    btn.disabled = false;
+    btn.textContent = res ? T('update.none') : T('update.error');
+    setTimeout(() => { btn.textContent = T('update.check'); }, 4000);
+  }
+}
+async function installUpdate() {
+  const b = $('#ub-install');
+  if (b) { b.disabled = true; b.textContent = T('update.installing'); }
+  try { await window.brisvia.installUpdate(); } // baja, verifica la firma, instala y reinicia el programa
+  catch { if (b) { b.disabled = false; b.textContent = T('update.install_now'); } }
+}
+if ($('#set-update')) $('#set-update').addEventListener('click', () => checkForUpdate(true));
+if ($('#ub-install')) $('#ub-install').addEventListener('click', installUpdate);
+
 // Ver las 12 palabras: se piden al backend en el momento; no se guardan en ningún archivo.
 $('#sec-view').addEventListener('click', async () => {
   const words = await window.brisvia.wallet.getSeed();
@@ -490,26 +517,24 @@ document.addEventListener('langchange', () => {
   document.addEventListener('click', hide);
 })();
 
-// ===================== Red de prueba (testnet): aviso + cuenta regresiva =====================
-// Test network end date. Set when the testnet is LAUNCHED (launch day + 7 days).
-// null = no date defined yet: only the "coins have no value" notice is shown, without a countdown.
-const TESTNET_END = null; // ej: '2026-07-16T00:00:00Z'
+// ===================== Red de prueba (testnet): aviso + cuenta regresiva al minado real =====================
+// Real mining start (mainnet). Fixed in code so the whole "test network" notice — including this
+// countdown — hides ITSELF the moment real mining begins, with no update required.
+const MAINNET_START = Date.UTC(2026, 7, 1, 15, 0, 0); // sáb 1 ago 2026, 12:00 Argentina = 15:00 UTC
 function updateTestnetBanner() {
   const banner = $('#testnet-banner');
   if (!banner) return;
-  banner.hidden = false; // estamos en la red de prueba: el aviso queda siempre visible
+  const diff = MAINNET_START - Date.now();
+  if (diff <= 0) { banner.hidden = true; return; } // ya arrancó el minado real: el aviso desaparece solo
+  banner.hidden = false;
   const cd = $('#tb-countdown');
   if (!cd) return;
-  if (TESTNET_END) {
-    const days = Math.ceil((new Date(TESTNET_END).getTime() - Date.now()) / 86400000);
-    if (days > 1) { cd.hidden = false; cd.textContent = T('testnet.countdown_days', { n: days }); }
-    else if (days === 1) { cd.hidden = false; cd.textContent = T('testnet.countdown_last'); }
-    else { cd.hidden = true; }
-  } else {
-    cd.hidden = true;
-  }
+  const days = Math.floor(diff / 86400000);
+  const hours = Math.floor((diff % 86400000) / 3600000);
+  cd.hidden = false;
+  cd.textContent = days >= 1 ? T('testnet.mainnet_in', { d: days, h: hours }) : T('testnet.mainnet_soon');
 }
-setInterval(updateTestnetBanner, 3600000); // refresca el contador una vez por hora
+setInterval(updateTestnetBanner, 60000); // refresca el contador cada minuto
 
 // ===================== Arranque =====================
 async function init() {
@@ -524,6 +549,8 @@ async function init() {
   window.I18N.setLang(lang);
   if (window.brisvia.setLanguage) window.brisvia.setLanguage(lang);
   updateTestnetBanner();
+  // Auto-chequeo de actualizaciones al iniciar (no bloqueante): si hay una versión nueva, aparece el aviso.
+  setTimeout(() => { checkForUpdate(false); }, 3000);
 
   if (window.brisvia.isReal) {
     $('#setup').hidden = true;

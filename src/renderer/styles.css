@@ -252,6 +252,13 @@ h1 { font-size: 26px; line-height: 1.14; letter-spacing: -.02em; max-width: 15ch
 .testnet-banner { display: flex; align-items: center; justify-content: center; gap: 10px 14px; flex-wrap: wrap; padding: 7px 16px; font-size: 12.5px; line-height: 1.35; background: rgba(213,166,111,.12); border-bottom: 1px solid rgba(213,166,111,.28); color: var(--sand); text-align: center; }
 .testnet-banner strong { color: var(--text); font-weight: 700; }
 .testnet-banner .tb-countdown { font-weight: 700; color: var(--text); background: rgba(213,166,111,.20); border: 1px solid rgba(213,166,111,.3); border-radius: 999px; padding: 2px 11px; white-space: nowrap; }
+.testnet-banner .tb-text { display: inline; }
+.testnet-banner .tb-until { font-weight: 700; color: var(--text); }
+.testnet-banner .tb-wallet { color: #59c07a; font-weight: 600; }
+.update-banner { display: flex; align-items: center; justify-content: center; gap: 10px 14px; flex-wrap: wrap; padding: 8px 16px; font-size: 12.5px; line-height: 1.35; background: rgba(47,199,212,.12); border-bottom: 1px solid rgba(47,199,212,.30); color: var(--text); text-align: center; }
+.update-banner strong { color: #2FC7D4; font-weight: 700; }
+.update-banner .ub-text { display: inline; }
+.update-banner .btn.xs { padding: 4px 13px; font-size: 12px; line-height: 1.25; min-height: 0; }
 
 @media (max-width: 720px) {
   .mine-grid { grid-template-columns: 1fr; }

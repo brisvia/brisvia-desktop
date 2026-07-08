@@ -11,9 +11,11 @@ window.LOCALES = {
     net: { connected: 'Red conectada', connecting: 'Conectando…', preparing: 'Preparando billetera…', syncing: 'Sincronizando…' },
     testnet: {
       tag: 'Red de prueba',
-      note: 'Las monedas de esta etapa son de práctica y no tienen valor.',
-      countdown_days: 'Quedan {n} días para la red principal',
-      countdown_last: 'Último día de la red de prueba',
+      note: 'Sin recompensa: las monedas de esta etapa no tienen ningún valor.',
+      until: 'La prueba va hasta el 14 de julio.',
+      wallet_note: 'Tu billetera (tus 12 palabras) también te va a servir para la red real.',
+      mainnet_in: 'Minado real en {d} d {h} h',
+      mainnet_soon: 'El minado real está por comenzar',
     },
     sync: {
       title: 'Sincronizando con la red',
@@ -77,7 +79,13 @@ window.LOCALES = {
       security_title: 'Seguridad y respaldo', security_sub: 'Respalda tu billetera para no perder tus Brisvia.',
       network_title: 'Red', network_sub: 'Estado de la conexión con Brisvia.', network_value: 'Conectada',
       language_title: 'Idioma / Language', language_sub: 'Elige el idioma de la aplicación.',
+      update_title: 'Actualizaciones', update_sub: 'El programa se actualiza solo cuando hay una versión nueva.',
       community: 'Comunidad', footnote: 'Brisvia · programa de código abierto ·',
+    },
+    update: {
+      check: 'Buscar actualizaciones', checking: 'Buscando…', none: 'Ya tenés la última versión',
+      available_tag: 'Versión nueva disponible', available_note: 'Actualizá para tener la última versión del minero.',
+      install_now: 'Actualizar ahora', installing: 'Actualizando…', error: 'No se pudo buscar actualizaciones',
     },
     onboarding: {
       welcome1_t: 'Tu computadora participa',
@@ -145,10 +153,12 @@ window.LOCALES = {
     brand: { miner: 'Miner' },
     net: { connected: 'Network connected', connecting: 'Connecting…', preparing: 'Preparing wallet…', syncing: 'Syncing…' },
     testnet: {
-      tag: 'Testnet',
-      note: 'Coins in this stage are for practice and have no value.',
-      countdown_days: '{n} days left until mainnet',
-      countdown_last: 'Last day of the testnet',
+      tag: 'Test network',
+      note: 'No reward: coins at this stage have no value whatsoever.',
+      until: 'The test runs until July 14.',
+      wallet_note: 'Your wallet (your 12 words) will also work on the real network.',
+      mainnet_in: 'Real mining in {d}d {h}h',
+      mainnet_soon: 'Real mining is about to begin',
     },
     sync: {
       title: 'Syncing with the network',
@@ -212,7 +222,13 @@ window.LOCALES = {
       security_title: 'Security and backup', security_sub: 'Back up your wallet so you don\'t lose your Brisvia.',
       network_title: 'Network', network_sub: 'Connection status with Brisvia.', network_value: 'Connected',
       language_title: 'Idioma / Language', language_sub: 'Choose the application language.',
+      update_title: 'Updates', update_sub: 'The app updates itself when a new version is available.',
       community: 'Community', footnote: 'Brisvia · open source software ·',
+    },
+    update: {
+      check: 'Check for updates', checking: 'Checking…', none: 'You have the latest version',
+      available_tag: 'New version available', available_note: 'Update to get the latest miner.',
+      install_now: 'Update now', installing: 'Updating…', error: 'Couldn\'t check for updates',
     },
     onboarding: {
       welcome1_t: 'Your computer participates',

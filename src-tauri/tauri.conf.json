@@ -25,6 +25,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": ["nsis"],
     "category": "Utility",
     "publisher": "Brisvia",
@@ -35,6 +36,14 @@
       "nsis": {
         "installerIcon": "icons/installer_icon.ico"
       }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRBQkY1ODdCRTA5RjVBClJXUmFuK0I3V0w5S0FOdlJ2V3lGVUVaSThZejY5S2NOWFRMYWhzMkgzR3hkVjRGRDhpdldkWTVOCg==",
+      "endpoints": [
+        "https://github.com/brisvia/brisvia-desktop/releases/latest/download/latest.json"
+      ]
     }
   }
 }

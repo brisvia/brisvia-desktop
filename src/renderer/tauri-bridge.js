@@ -15,6 +15,8 @@
       openUrl: (url) => call('open_url', { url }),
       systemLocale: () => call('system_locale'),
       setLanguage: (lang) => call('set_language', { lang }),
+      checkUpdate: () => call('check_update'),
+      installUpdate: () => invoke('install_update'),
       getStatus: () => invoke('miner_status'),
       start: (intensity) => invoke('miner_start', { intensity }),
       stop: () => invoke('miner_stop'),
@@ -121,5 +123,7 @@
     openUrl: async (url) => { window.open(url, '_blank'); },
     systemLocale: async () => navigator.language || 'en',
     setLanguage: async () => ({ ok: true }),
+    checkUpdate: async () => ({ available: false, currentVersion: '0.1.0' }),
+    installUpdate: async () => ({ ok: true }),
   };
 })();

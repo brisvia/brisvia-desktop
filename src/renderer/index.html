@@ -82,10 +82,21 @@
     <div class="net" data-tip-key="net"><span class="net-dot"></span> <span id="net-label"></span></div>
   </header>
 
-  <!-- Aviso de red de prueba (testnet): monedas sin valor + cuenta regresiva hacia la red principal -->
+  <!-- Aviso de red de prueba (testnet): sin recompensa + hasta 14 jul + billetera sirve para la real + cuenta regresiva al minado real (1 ago) -->
   <div id="testnet-banner" class="testnet-banner" hidden>
-    <span class="tb-text"><strong data-i18n="testnet.tag"></strong> <span data-i18n="testnet.note"></span></span>
+    <span class="tb-text">
+      <strong data-i18n="testnet.tag"></strong>
+      <span data-i18n="testnet.note"></span>
+      <span class="tb-until" data-i18n="testnet.until"></span>
+      <span class="tb-wallet" data-i18n="testnet.wallet_note"></span>
+    </span>
     <span id="tb-countdown" class="tb-countdown" hidden></span>
+  </div>
+
+  <!-- Aviso de actualización disponible (auto-detectada al iniciar). Un clic instala y reinicia. -->
+  <div id="update-banner" class="update-banner" hidden>
+    <span class="ub-text"><strong data-i18n="update.available_tag"></strong> <span data-i18n="update.available_note"></span></span>
+    <button id="ub-install" class="btn primary xs" data-i18n="update.install_now"></button>
   </div>
 
   <main class="content">
@@ -199,6 +210,10 @@
         <div class="set-row">
           <div><div class="set-title" data-i18n="settings.network_title"></div><div class="muted small" data-i18n="settings.network_sub"></div></div>
           <div class="muted" id="set-netinfo" data-i18n="settings.network_value"></div>
+        </div>
+        <div class="set-row">
+          <div><div class="set-title" data-i18n="settings.update_title"></div><div class="muted small" data-i18n="settings.update_sub"></div></div>
+          <button id="set-update" class="btn ghost" data-i18n="update.check"></button>
         </div>
       </div>
 
