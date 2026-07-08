@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Brisvia Minero",
+  "productName": "Brisvia Miner",
   "version": "0.1.0",
   "identifier": "com.brisvia.miner",
   "build": {
@@ -10,7 +10,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Brisvia — Minero",
+        "title": "Brisvia — Miner",
         "width": 980,
         "height": 680,
         "minWidth": 860,
