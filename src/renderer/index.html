@@ -30,6 +30,24 @@
         <button id="btn-import" class="btn ghost block" data-i18n="onboarding.import"></button>
       </section>
 
+      <!-- Step: choose password (to create or import) -->
+      <section class="step" data-step="pass" hidden>
+        <h2 data-i18n="onboarding.pass_t"></h2>
+        <p class="muted" data-i18n="onboarding.pass_x"></p>
+        <label class="field"><span class="muted small" data-i18n="onboarding.pass_label"></span>
+          <input id="pass-1" type="password" autocomplete="new-password" spellcheck="false"></label>
+        <div id="pass-meter" class="pass-meter"><i></i></div>
+        <label class="field"><span class="muted small" data-i18n="onboarding.pass_confirm"></span>
+          <input id="pass-2" type="password" autocomplete="new-password" spellcheck="false"></label>
+        <label class="check"><input type="checkbox" id="pass-show"> <span data-i18n="onboarding.pass_show"></span></label>
+        <div class="warn" data-i18n="onboarding.pass_warn"></div>
+        <p id="pass-msg" class="verify-msg" hidden></p>
+        <div class="row-gap">
+          <button id="pass-back" class="btn ghost" data-i18n="common.back"></button>
+          <button id="pass-next" class="btn primary" data-i18n="common.continue"></button>
+        </div>
+      </section>
+
       <!-- Paso: mostrar semilla -->
       <section class="step" data-step="seed" hidden>
         <h2 data-i18n="onboarding.seed_t"></h2>
@@ -84,13 +102,15 @@
 
   <!-- Aviso de red de prueba (testnet): sin recompensa + hasta 14 jul + billetera sirve para la real + cuenta regresiva al minado real (1 ago) -->
   <div id="testnet-banner" class="testnet-banner" hidden>
-    <span class="tb-text">
+    <div class="tb-main">
       <strong data-i18n="testnet.tag"></strong>
       <span data-i18n="testnet.note"></span>
       <span class="tb-until" data-i18n="testnet.until"></span>
+    </div>
+    <div class="tb-sub">
       <span class="tb-wallet" data-i18n="testnet.wallet_note"></span>
-    </span>
-    <span id="tb-countdown" class="tb-countdown" hidden></span>
+      <span id="tb-countdown" class="tb-countdown" hidden></span>
+    </div>
   </div>
 
   <main class="content">
@@ -121,6 +141,7 @@
           <div class="panel-head"><h3 data-i18n="net_panel.title"></h3></div>
           <div class="net-rows">
             <div class="nr"><span class="muted" data-tip-key="status" data-i18n="net_panel.status"></span><span id="nr-status"></span></div>
+            <div class="nr"><span class="muted" data-tip-key="mining_status" data-i18n="net_panel.mining"></span><span id="nr-mining">—</span></div>
             <div class="nr"><span class="muted" data-tip-key="blocks" data-i18n="net_panel.height"></span><span id="nr-height">—</span></div>
             <div class="nr"><span class="muted" data-tip-key="peers" data-i18n="net_panel.peers"></span><span id="nr-peers">—</span></div>
             <div class="nr"><span class="muted" data-tip-key="difficulty" data-i18n="net_panel.difficulty"></span><span id="nr-diff">—</span></div>
@@ -255,9 +276,16 @@
       <button class="modal-x" data-close data-i18n-attr="aria-label:common.close">×</button>
       <h2 data-i18n="send.title"></h2>
       <label class="field"><span class="muted small" data-i18n="send.to"></span>
-        <input id="send-addr" type="text" placeholder="brv1q…"></label>
+        <input id="send-addr" type="text" placeholder="brv1q…" autocomplete="off" spellcheck="false"></label>
+      <div class="send-avail">
+        <span class="muted small"><span data-i18n="send.available"></span> <strong id="send-avail">0</strong> BRVA</span>
+        <button type="button" id="send-max" class="link small" data-i18n="send.max"></button>
+      </div>
       <label class="field"><span class="muted small" data-i18n="send.amount"></span>
-        <input id="send-amount" type="number" min="0" step="0.00000001" placeholder="0.00"></label>
+        <input id="send-amount" type="text" inputmode="decimal" autocomplete="off" placeholder="0,00"></label>
+      <p class="send-net muted small" data-i18n="send.testnet_note"></p>
+      <label class="field" id="send-pass-field"><span class="muted small" data-i18n="send.password"></span>
+        <input id="send-pass" type="password" autocomplete="current-password" placeholder="••••••••"></label>
       <p id="send-msg" class="verify-msg" hidden></p>
       <div class="row-gap">
         <button data-close class="btn ghost" data-i18n="send.cancel"></button>
@@ -293,8 +321,44 @@
       <p class="muted small" data-i18n="security.intro"></p>
       <div class="warn" data-i18n="security.warn"></div>
       <div class="sec-actions">
-        <button id="sec-view" class="btn primary block" data-i18n="security.view_btn"></button>
-        <button id="sec-verify" class="btn ghost block" data-i18n="security.verify_btn"></button>
+        <button id="sec-verify" class="btn primary block" data-i18n="security.verify_btn"></button>
+        <button id="sec-reveal" class="btn ghost block" data-i18n="security.reveal_btn"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Show phrase (advanced): asks for the wallet password -->
+  <div id="modal-reveal" class="overlay" hidden>
+    <div class="card modal">
+      <button class="modal-x" data-close data-i18n-attr="aria-label:common.close">×</button>
+      <h2 data-i18n="security.reveal_t"></h2>
+      <p class="muted small" data-i18n="security.reveal_x"></p>
+      <div class="warn" data-i18n="security.reveal_warn"></div>
+      <label class="field"><span class="muted small" data-i18n="security.reveal_pass"></span>
+        <input id="reveal-pass" type="password" autocomplete="current-password"></label>
+      <p id="reveal-msg" class="verify-msg" hidden></p>
+      <div class="row-gap">
+        <button data-close class="btn ghost" data-i18n="common.close"></button>
+        <button id="reveal-go" class="btn primary" data-i18n="security.reveal_do"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Protect an old wallet (no password) when opening it -->
+  <div id="modal-protect" class="overlay" hidden>
+    <div class="card modal">
+      <h2 data-i18n="protect.title"></h2>
+      <p class="muted small" data-i18n="protect.intro"></p>
+      <label class="field"><span class="muted small" data-i18n="onboarding.pass_label"></span>
+        <input id="protect-1" type="password" autocomplete="new-password" spellcheck="false"></label>
+      <div id="protect-meter" class="pass-meter"><i></i></div>
+      <label class="field"><span class="muted small" data-i18n="onboarding.pass_confirm"></span>
+        <input id="protect-2" type="password" autocomplete="new-password" spellcheck="false"></label>
+      <div class="warn" data-i18n="onboarding.pass_warn"></div>
+      <p id="protect-msg" class="verify-msg" hidden></p>
+      <div class="row-gap">
+        <button data-close class="btn ghost" data-i18n="protect.later"></button>
+        <button id="protect-go" class="btn primary" data-i18n="protect.do"></button>
       </div>
     </div>
   </div>
@@ -318,6 +382,7 @@
   <div id="modal-update" class="overlay" hidden>
     <div class="card modal">
       <h2 data-i18n="update.available_tag"></h2>
+      <p class="upd-ver" id="upd-ver"></p>
       <p class="muted" data-i18n="update.modal_text"></p>
       <div class="row-gap">
         <button id="upd-later" class="btn ghost" data-i18n="update.later"></button>
