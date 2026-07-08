@@ -60,6 +60,7 @@ jobs:
           p = "src-tauri/tauri.conf.json"
           d = json.load(open(p))
           d["bundle"]["resources"] = ["binaries/bitcoind", "binaries/bitcoin-cli", "binaries/brisvia-worker"]
+          d["bundle"]["targets"] = ["dmg"]  # macOS: nsis is Windows-only; produce a .dmg here
           json.dump(d, open(p, "w"), indent=2)
           PY
 
