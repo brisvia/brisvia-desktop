@@ -33,7 +33,7 @@
     "resources": ["binaries/bitcoind.exe", "binaries/bitcoin-cli.exe", "binaries/brisvia-worker.exe"],
     "windows": {
       "nsis": {
-        "installerIcon": "icons/icon.ico"
+        "installerIcon": "icons/installer_icon.ico"
       }
     }
   }
