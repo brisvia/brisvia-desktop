@@ -9,6 +9,8 @@ on:
 jobs:
   macos-arm64:
     runs-on: macos-14 # Apple Silicon (arm64)
+    permissions:
+      contents: write # needed to attach the .dmg to the release
     steps:
       - name: Checkout desktop app
         uses: actions/checkout@v4
