@@ -1,8 +1,8 @@
 // Link against the SAME librandomx v1.2.2 used by the node (guarantees the same hash).
-// The path is passed via RANDOMX_LIB_DIR; defaults to the Linux build on the VPS.
+// The path is passed via RANDOMX_LIB_DIR; falls back to a local build directory.
 fn main() {
     let lib_dir = std::env::var("RANDOMX_LIB_DIR")
-        .unwrap_or_else(|_| "/root/randomx-lib/build".to_string());
+        .unwrap_or_else(|_| "randomx-lib/build".to_string());
     println!("cargo:rustc-link-search=native={}", lib_dir);
     println!("cargo:rustc-link-lib=static=randomx");
 
