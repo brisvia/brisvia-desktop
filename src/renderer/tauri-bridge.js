@@ -8,6 +8,9 @@
   if (invoke) {
     // ----- Real backend (Tauri). Commands that don't exist yet fall to the catch -> the UI shows empty. -----
     const call = (cmd, args) => invoke(cmd, args).catch(() => null);
+    // Variant that PRESERVES the error (as { error }) so the UI can show a specific reason
+    // (wrong password, insufficient funds, ...) instead of a generic failure.
+    const callE = (cmd, args) => invoke(cmd, args).catch((e) => ({ error: typeof e === 'string' ? e : String((e && e.message) || e) }));
     window.brisvia = {
       isReal: true, // running inside Tauri with the real node
       nodeStatus: () => call('node_status'),
@@ -23,16 +26,19 @@
       setIntensity: (intensity) => invoke('miner_set_intensity', { intensity }),
       wallet: {
         exists: () => call('wallet_exists'),
-        create: () => call('wallet_create_bip39', { name: 'brisvia' }),
+        create: (password) => callE('wallet_create_bip39', { name: 'brisvia', password }),
         verifyBackup: (words) => call('wallet_verify_backup', { words }),
-        restore: (phrase) => call('wallet_restore_bip39', { phrase, name: 'brisvia' }),
+        checkBackup: (words) => call('wallet_check_backup', { words }),
+        restore: (phrase, password) => callE('wallet_restore_bip39', { phrase, name: 'brisvia', password }),
         getSeed: () => call('wallet_seed'),
+        revealSeed: (password) => callE('wallet_reveal_seed', { password }),
+        migrateEncrypt: (password) => callE('wallet_migrate_encrypt', { password }),
         confirmBackup: () => call('wallet_confirm_backup'),
         summary: () => call('wallet_summary'),
         history: () => call('wallet_history'),
         newAddress: () => call('wallet_new_address'),
         addresses: () => call('wallet_addresses'),
-        send: (address, amount) => call('wallet_send', { address, amount }),
+        send: (address, amount, password) => callE('wallet_send', { address, amount, password }),
         txDetail: (txid) => call('tx_detail', { txid }),
         backup: () => call('wallet_backup'),
         kind: () => call('wallet_kind'),
@@ -103,6 +109,9 @@
       verifyBackup: async (words) => { const seed = LS.get('brv_wallet', {}).seed || []; return { ok: JSON.stringify(seed) === JSON.stringify(words) }; },
       restore: async () => { const wallet = { seed: genSeed(), address: genAddress(), backed_up: true, created: Date.now() }; LS.set('brv_wallet', wallet); return { ok: true }; },
       getSeed: async () => (LS.get('brv_wallet', {}).seed || []),
+      checkBackup: async (words) => { const seed = LS.get('brv_wallet', {}).seed || []; return { ok: JSON.stringify(seed) === JSON.stringify(words) }; },
+      revealSeed: async () => ({ words: LS.get('brv_wallet', {}).seed || [] }),
+      migrateEncrypt: async () => ({ ok: true }),
       confirmBackup: async () => { const w = LS.get('brv_wallet', {}); w.backed_up = true; LS.set('brv_wallet', w); return { backed_up: true }; },
       summary: async () => {
         const w = LS.get('brv_wallet', {});

@@ -33,6 +33,7 @@ struct AppState {
     mined: Arc<AtomicU64>,
     stale: Arc<AtomicU64>, // blocks we found that arrived late (another block won the height) — normal on a shared net
     mine_start: Arc<Mutex<Option<Instant>>>,
+    keep_session_on_relaunch: Arc<AtomicBool>, // set before a power-change relaunch so it does NOT reset the session timer/speed
     intensity: Arc<Mutex<String>>,
     // The real mining engine process (sidecar brisvia-worker.exe, named differently from the window process so
     // they don't get confused in the task manager) and its last reported hashrate.
@@ -85,12 +86,18 @@ fn friendly_error(msg: &str) -> String {
     msg.to_string()
 }
 
+// The node's RPC port. Override with BRISVIA_RPC_PORT to run an isolated test instance without clashing
+// with the real app's node on the default port.
+fn rpc_port() -> u16 {
+    std::env::var("BRISVIA_RPC_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(RPC_PORT)
+}
+
 // ---- JSON-RPC call to bitcoind (cookie auth; the body is never logged) ----
 fn rpc(datadir: &PathBuf, wallet: Option<&str>, method: &str, params: Value) -> Result<Value, String> {
     let cookie = read_cookie(datadir).ok_or_else(|| "node is not ready yet".to_string())?;
     let url = match wallet {
-        Some(w) => format!("http://{}:{}/wallet/{}", RPC_HOST, RPC_PORT, w),
-        None => format!("http://{}:{}/", RPC_HOST, RPC_PORT),
+        Some(w) => format!("http://{}:{}/wallet/{}", RPC_HOST, rpc_port(), w),
+        None => format!("http://{}:{}/", RPC_HOST, rpc_port()),
     };
     let auth = format!("Basic {}", b64(cookie.trim().as_bytes()));
     let body = json!({ "jsonrpc": "1.0", "id": "brisvia", "method": method, "params": params });
@@ -161,7 +168,7 @@ fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
         // allows it (natpmp tries to open the port), and validates everything locally. RPC stays on 127.0.0.1 only.
         "chain={chain}\nserver=1\nlisten=1\ndiscover=1\ndnsseed=1\nnatpmp=1\nfallbackfee=0.0001\nrpcthreads=16\nrpcworkqueue=128\n[{chain}]\nrpcport={port}\nrpcbind=127.0.0.1\nrpcallowip=127.0.0.1\n",
         chain = NET_CHAIN,
-        port = RPC_PORT
+        port = rpc_port()
     );
     std::fs::write(state.datadir.join("bitcoin.conf"), conf).map_err(|e| e.to_string())?;
     let mut cmd = Command::new(&bitcoind);
@@ -237,10 +244,12 @@ fn wallet_create(state: State<AppState>) -> Result<Value, String> {
 // Returns the 12 backup words: the in-memory mnemonic right after creation, or the persisted phrase later.
 #[tauri::command]
 fn wallet_seed(state: State<AppState>) -> Value {
+    // Only right after creation (from memory, shown once). The persisted phrase is encrypted; to reveal it
+    // later the user must call wallet_reveal_seed with the wallet password.
     if let Some(p) = state.pending_mnemonic.lock().unwrap().clone() {
         return json!(p.split(' ').collect::<Vec<_>>());
     }
-    json!(load_seed_phrase(&state.datadir))
+    json!(Vec::<String>::new())
 }
 
 #[tauri::command]
@@ -299,12 +308,35 @@ fn wallet_new_address(state: State<AppState>) -> Result<Value, String> {
 }
 
 #[tauri::command]
-fn wallet_send(state: State<AppState>, address: String, amount: f64) -> Result<Value, String> {
+fn wallet_send(state: State<AppState>, address: String, amount: f64, password: String) -> Result<Value, String> {
     if amount <= 0.0 {
         return Err("ERR:INVALID_AMOUNT".into());
     }
-    let txid = rpc(&state.datadir, Some(WALLET_NAME), "sendtoaddress", json!([address, amount]))?;
-    Ok(json!({ "ok": true, "txid": txid }))
+    // Encrypted wallets (new format): unlock briefly with the password, send, and lock again right away.
+    // Old unencrypted wallets (created before password support): send directly, without a passphrase, so
+    // updating the app never breaks an existing wallet. The UI offers to protect them with a password.
+    if wallet_is_encrypted(&state.datadir) {
+        rpc(&state.datadir, Some(WALLET_NAME), "walletpassphrase", json!([password, 30]))
+            .map_err(|e| {
+                let m = e.to_lowercase();
+                if m.contains("passphrase") || m.contains("incorrect") { "ERR:BAD_PASSWORD".to_string() } else { e }
+            })?;
+        let res = rpc(&state.datadir, Some(WALLET_NAME), "sendtoaddress", json!([address, amount]));
+        let _ = rpc(&state.datadir, Some(WALLET_NAME), "walletlock", json!([]));
+        let txid = res?;
+        Ok(json!({ "ok": true, "txid": txid }))
+    } else {
+        let txid = rpc(&state.datadir, Some(WALLET_NAME), "sendtoaddress", json!([address, amount]))?;
+        Ok(json!({ "ok": true, "txid": txid }))
+    }
+}
+
+// A Core wallet is encrypted iff getwalletinfo exposes "unlocked_until".
+fn wallet_is_encrypted(datadir: &PathBuf) -> bool {
+    rpc(datadir, Some(WALLET_NAME), "getwalletinfo", json!([]))
+        .ok()
+        .map(|i| i.get("unlocked_until").is_some())
+        .unwrap_or(false)
 }
 
 #[tauri::command]
@@ -394,11 +426,14 @@ fn wallet_backup(state: State<AppState>) -> Result<Value, String> {
 #[tauri::command]
 fn wallet_kind(state: State<AppState>) -> Value {
     let info = rpc(&state.datadir, Some(WALLET_NAME), "getwalletinfo", json!([])).unwrap_or_else(|_| json!({}));
+    // A Core wallet exposes "unlocked_until" only when it is encrypted with a passphrase.
+    let encrypted = info.get("unlocked_until").is_some() || enc_seed_path(&state.datadir).exists();
     json!({
         "name": info["walletname"],
         "descriptors": info["descriptors"],
         "kind": "brisvia_wallet",
-        "has_seed_phrase": true
+        "has_seed_phrase": true,
+        "encrypted": encrypted
     })
 }
 
@@ -461,15 +496,19 @@ fn activate_wallet(state: &AppState, name: &str) {
 
 // Create a NEW wallet with a 12-word backup. Returns the words (to show once) + fingerprint.
 #[tauri::command]
-fn wallet_create_bip39(state: State<AppState>, name: String) -> Result<Value, String> {
+fn wallet_create_bip39(state: State<AppState>, name: String, password: String) -> Result<Value, String> {
+    validate_password(&password)?;
     let mnemonic = Mnemonic::generate(12).map_err(|e| e.to_string())?;
     let (fp, ext, int) = descriptors_from_mnemonic(&mnemonic)?;
     // createwallet blank (no keys), descriptor
     rpc(&state.datadir, None, "createwallet", json!([name, false, true, "", false, true]))?;
     import_descriptors(&state.datadir, &name, &ext, &int, false)?;
+    // Encrypt the Core wallet's private keys with the user's password (wallet is left locked afterwards).
+    rpc(&state.datadir, Some(&name), "encryptwallet", json!([password]))?;
     let words = mnemonic.to_string();
     *state.pending_mnemonic.lock().unwrap() = Some(words.clone());
-    save_seed_phrase(&state.datadir, &words);
+    // Store the phrase ENCRYPTED (Argon2id + AES-256-GCM), never plaintext.
+    encrypt_phrase_file(&state.datadir, &words, &password)?;
     activate_wallet(&state, &name);
     let list: Vec<&str> = words.split(' ').collect();
     Ok(json!({ "words": list, "fingerprint": fp }))
@@ -491,16 +530,73 @@ fn wallet_verify_backup(state: State<AppState>, words: Vec<String>) -> Value {
 
 // Restore from 12 words into a NEW wallet (never overwrites an existing one). Rescan from genesis.
 #[tauri::command]
-fn wallet_restore_bip39(state: State<AppState>, phrase: String, name: String) -> Result<Value, String> {
+fn wallet_restore_bip39(state: State<AppState>, phrase: String, name: String, password: String) -> Result<Value, String> {
+    validate_password(&password)?;
     let mnemonic = Mnemonic::parse(phrase.trim())
         .map_err(|_| "ERR:INVALID_PHRASE".to_string())?;
     let (fp, ext, int) = descriptors_from_mnemonic(&mnemonic)?;
     // new name: NEVER overwrites a wallet with funds
     rpc(&state.datadir, None, "createwallet", json!([name, false, true, "", false, true]))?;
     import_descriptors(&state.datadir, &name, &ext, &int, true)?; // rescan from genesis
+    // Encrypt the restored wallet's keys and store the phrase encrypted with the new password.
+    rpc(&state.datadir, Some(&name), "encryptwallet", json!([password]))?;
+    encrypt_phrase_file(&state.datadir, phrase.trim(), &password)?;
     activate_wallet(&state, &name);
-    save_seed_phrase(&state.datadir, phrase.trim());
     Ok(json!({ "ok": true, "fingerprint": fp }))
+}
+
+// Reveal the 12 words AFTER creation — advanced/protected, only with the correct wallet password.
+#[tauri::command]
+fn wallet_reveal_seed(state: State<AppState>, password: String) -> Result<Value, String> {
+    let phrase = decrypt_phrase_file(&state.datadir, &password)?;
+    let list: Vec<String> = phrase.split_whitespace().map(|s| s.to_string()).collect();
+    Ok(json!({ "words": list }))
+}
+
+// Migrate an OLD (unencrypted) wallet to a password: encrypt the Core keys + the phrase file, drop the plaintext.
+#[tauri::command]
+fn wallet_migrate_encrypt(state: State<AppState>, password: String) -> Result<Value, String> {
+    validate_password(&password)?;
+    let old = load_seed_phrase(&state.datadir); // plaintext phrase from the old format, if any
+    rpc(&state.datadir, Some(WALLET_NAME), "encryptwallet", json!([password]))?;
+    if !old.is_empty() {
+        encrypt_phrase_file(&state.datadir, &old.join(" "), &password)?;
+        let _ = std::fs::remove_file(seed_phrase_path(&state.datadir)); // remove the plaintext file
+    }
+    Ok(json!({ "ok": true }))
+}
+
+// The wallet's master fingerprint, read from its own descriptors (e.g. "wpkh([1a2b3c4d/84h/1h/0h]xpub…)").
+fn wallet_fingerprint(datadir: &PathBuf) -> Option<String> {
+    let res = rpc(datadir, Some(WALLET_NAME), "listdescriptors", json!([])).ok()?;
+    let arr = res["descriptors"].as_array()?;
+    for d in arr {
+        if let Some(desc) = d["desc"].as_str() {
+            if let Some(start) = desc.find('[') {
+                let rest = &desc[start + 1..];
+                if let Some(slash) = rest.find('/') {
+                    return Some(rest[..slash].to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+// Verify a backup WITHOUT the password and WITHOUT revealing the phrase: derive the fingerprint from the words
+// the user types and compare it with the wallet's own fingerprint. Same words -> same fingerprint.
+#[tauri::command]
+fn wallet_check_backup(state: State<AppState>, words: Vec<String>) -> Value {
+    let phrase = words.join(" ");
+    let derived = match Mnemonic::parse(phrase.trim()) {
+        Ok(m) => match descriptors_from_mnemonic(&m) {
+            Ok((fp, _, _)) => fp,
+            Err(_) => return json!({ "ok": false }),
+        },
+        Err(_) => return json!({ "ok": false }),
+    };
+    let wf = wallet_fingerprint(&state.datadir).unwrap_or_default();
+    json!({ "ok": !wf.is_empty() && wf.eq_ignore_ascii_case(&derived) })
 }
 
 // ---- mining: launch the engine sidecar and follow its accepted-block events ----
@@ -514,17 +610,102 @@ fn save_total_mined(datadir: &std::path::Path, secs: u64) {
     let _ = std::fs::write(total_mined_path(datadir), secs.to_string());
 }
 
-// The 12-word backup phrase is persisted locally so the user can view or verify it later (Security screen).
-// It sits next to the wallet, which is already unencrypted on disk; for mainnet this should be encrypted.
+// Legacy plaintext phrase file (old unencrypted format). Kept only to READ during migration to the
+// encrypted format; new/updated wallets never write it (see encrypt_phrase_file / wallet_migrate_encrypt).
 fn seed_phrase_path(datadir: &std::path::Path) -> std::path::PathBuf { datadir.join("wallet_seed_phrase.txt") }
-fn save_seed_phrase(datadir: &std::path::Path, phrase: &str) {
-    let _ = std::fs::create_dir_all(datadir);
-    let _ = std::fs::write(seed_phrase_path(datadir), phrase.trim());
-}
 fn load_seed_phrase(datadir: &std::path::Path) -> Vec<String> {
     std::fs::read_to_string(seed_phrase_path(datadir)).ok()
         .map(|s| s.trim().split_whitespace().map(|w| w.to_string()).collect())
         .unwrap_or_default()
+}
+
+// ---- password-based encryption of the recovery phrase (Argon2id + AES-256-GCM) ----
+// The 12-word phrase is NEVER stored in plaintext once a wallet has a password. It is encrypted with a
+// key derived from the user's password. The Core wallet's private keys are encrypted separately with
+// `encryptwallet`. Losing the password is recovered ONLY from the 12 words (there is no backdoor).
+fn enc_seed_path(datadir: &std::path::Path) -> std::path::PathBuf { datadir.join("wallet_seed.enc") }
+
+fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32], String> {
+    use argon2::{Argon2, Algorithm, Version, Params};
+    // 64 MiB, 3 passes, 1 lane: strong for desktop without choking modest PCs (well above OWASP minimums).
+    let params = Params::new(65536, 3, 1, Some(32)).map_err(|e| e.to_string())?;
+    let a2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut key = [0u8; 32];
+    a2.hash_password_into(password.as_bytes(), salt, &mut key).map_err(|e| e.to_string())?;
+    Ok(key)
+}
+
+// File layout: version(1) | salt(16) | nonce(12) | ciphertext+tag
+fn encrypt_phrase_file(datadir: &std::path::Path, phrase: &str, password: &str) -> Result<(), String> {
+    use aes_gcm::{Aes256Gcm, Key, Nonce, aead::{Aead, KeyInit}};
+    use rand::RngCore;
+    use zeroize::Zeroize;
+    let mut salt = [0u8; 16];
+    let mut nonce_bytes = [0u8; 12];
+    rand::rngs::OsRng.fill_bytes(&mut salt);
+    rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+    let mut key = derive_key(password, &salt)?;
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+    let ct = cipher
+        .encrypt(Nonce::from_slice(&nonce_bytes), phrase.trim().as_bytes())
+        .map_err(|_| "ERR:ENCRYPT_FAILED".to_string())?;
+    key.zeroize();
+    let mut out = Vec::with_capacity(1 + 16 + 12 + ct.len());
+    out.push(1u8);
+    out.extend_from_slice(&salt);
+    out.extend_from_slice(&nonce_bytes);
+    out.extend_from_slice(&ct);
+    let _ = std::fs::create_dir_all(datadir);
+    std::fs::write(enc_seed_path(datadir), out).map_err(|e| e.to_string())
+}
+
+fn decrypt_phrase_file(datadir: &std::path::Path, password: &str) -> Result<String, String> {
+    use aes_gcm::{Aes256Gcm, Key, Nonce, aead::{Aead, KeyInit}};
+    use zeroize::Zeroize;
+    let data = std::fs::read(enc_seed_path(datadir)).map_err(|_| "ERR:NO_SEED_FILE".to_string())?;
+    if data.len() < 1 + 16 + 12 + 16 || data[0] != 1 {
+        return Err("ERR:SEED_CORRUPT".to_string());
+    }
+    let salt = &data[1..17];
+    let nonce_bytes = &data[17..29];
+    let ct = &data[29..];
+    let mut key = derive_key(password, salt)?;
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+    let pt = cipher
+        .decrypt(Nonce::from_slice(nonce_bytes), ct)
+        .map_err(|_| "ERR:BAD_PASSWORD".to_string());
+    key.zeroize();
+    let pt = pt?;
+    String::from_utf8(pt).map_err(|_| "ERR:SEED_CORRUPT".to_string())
+}
+
+// Minimum password policy for non-technical users (kept light; the real backstop is the 12-word phrase).
+fn validate_password(password: &str) -> Result<(), String> {
+    if password.chars().count() < 8 {
+        return Err("ERR:WEAK_PASSWORD".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod seed_crypto_tests {
+    use super::{decrypt_phrase_file, encrypt_phrase_file};
+    #[test]
+    fn seed_roundtrip_and_wrong_password() {
+        let dir = std::env::temp_dir().join("brisvia_seed_crypto_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let phrase = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+        encrypt_phrase_file(&dir, phrase, "clave-correcta-123").unwrap();
+        // The file must NOT contain the phrase in plaintext.
+        let raw = std::fs::read(dir.join("wallet_seed.enc")).unwrap();
+        assert!(!String::from_utf8_lossy(&raw).contains("winner"), "the phrase leaked in plaintext");
+        // Correct password decrypts to the same phrase.
+        assert_eq!(decrypt_phrase_file(&dir, "clave-correcta-123").unwrap(), phrase);
+        // Wrong password fails (AES-GCM auth tag mismatch).
+        assert!(decrypt_phrase_file(&dir, "clave-incorrecta").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[tauri::command]
@@ -535,9 +716,13 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
     if state.mining.swap(true, Ordering::SeqCst) {
         return json!({ "mining": true }); // already mining
     }
-    *state.mine_start.lock().unwrap() = Some(Instant::now());
-    *state.hashrate.lock().unwrap() = 0.0;
-    state.miner_ready.store(false, Ordering::SeqCst); // starts "preparing" until the engine's first event
+    // A power change relaunches the engine; in that case keep the session timer, the shown speed and the
+    // "ready" flag (the worker reports the new speed in a moment) — for the user it's the same session.
+    if !state.keep_session_on_relaunch.swap(false, Ordering::SeqCst) {
+        *state.mine_start.lock().unwrap() = Some(Instant::now());
+        *state.hashrate.lock().unwrap() = 0.0;
+        state.miner_ready.store(false, Ordering::SeqCst); // starts "preparing" until the engine's first event
+    }
 
     // How many cores to use. `intensity` is a percentage "1".."100" of the machine's cores (fallback 50%).
     // Legacy named values (suave/equilibrado/intenso) map to 25/50/100 for backward compatibility.
@@ -551,9 +736,15 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
     .clamp(1, 100);
     let threads = ((cores * pct + 99) / 100).max(1); // ceil(cores * pct / 100), at least 1
     state.miner_threads.store(threads as u64, Ordering::SeqCst);
-    // Tray tooltip: show the mining power on hover over the notification-area icon.
+    // Tray tooltip: show the mining power in plain words on hover over the notification-area icon.
     if let Some(tray) = state.tray.lock().unwrap().as_ref() {
-        let _ = tray.set_tooltip(Some(&format!("Brisvia — {}% ({}/{})", pct, threads, cores)));
+        let lang = state.lang.lock().unwrap().clone();
+        let tip = if lang == "es" {
+            format!("Brisvia — Minando al {}% · {} de {} núcleos", pct, threads, cores)
+        } else {
+            format!("Brisvia — Mining at {}% · {} of {} cores", pct, threads, cores)
+        };
+        let _ = tray.set_tooltip(Some(&tip));
     }
 
     // Node cookie auth (never exposed in logs): the .cookie file contains "user:password".
@@ -576,7 +767,7 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
         state.mining.store(false, Ordering::SeqCst);
         return json!({ "mining": false, "error": "ERR:WALLET_NOT_READY" });
     }
-    let url = format!("http://127.0.0.1:{}/wallet/{}", RPC_PORT, WALLET_NAME);
+    let url = format!("http://127.0.0.1:{}/wallet/{}", rpc_port(), WALLET_NAME);
 
     let miner_bin = match find_binary(&app, &format!("brisvia-worker{EXE_SUFFIX}")) {
         Some(b) => b,
@@ -686,6 +877,7 @@ fn miner_set_intensity(app: AppHandle, state: State<AppState>, intensity: String
             let _ = child.wait();
         }
         state.mining.store(false, Ordering::SeqCst);
+        state.keep_session_on_relaunch.store(true, Ordering::SeqCst); // don't reset the session on a power change
         return miner_start(app, state, Some(intensity));
     }
     json!({ "intensity": intensity })
@@ -872,8 +1064,10 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // data directory next to the user's app data
-    let datadir = dirs_data_dir().join("BrisviaSim");
+    // data directory next to the user's app data (override with BRISVIA_DATADIR, e.g. for isolated tests)
+    let datadir = std::env::var("BRISVIA_DATADIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| dirs_data_dir().join("BrisviaSim"));
     let total_secs_initial = load_total_mined(&datadir);
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
 
@@ -886,6 +1080,7 @@ pub fn run() {
         mined: Arc::new(AtomicU64::new(0)),
         stale: Arc::new(AtomicU64::new(0)),
         mine_start: Arc::new(Mutex::new(None)),
+        keep_session_on_relaunch: Arc::new(AtomicBool::new(false)),
         intensity: Arc::new(Mutex::new("equilibrado".to_string())),
         miner_child: Arc::new(Mutex::new(None)),
         hashrate: Arc::new(Mutex::new(0.0)),
@@ -899,16 +1094,19 @@ pub fn run() {
         total_mined_secs: Arc::new(Mutex::new(total_secs_initial)),
     };
 
-    tauri::Builder::default()
-        // Single instance: if the app is already open and it's launched again, instead of opening another window
-        // (and another mining engine), bring the existing window to the front. Must be the first plugin registered.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+    let mut builder = tauri::Builder::default();
+    // Single instance: if the app is already open and it's launched again, bring the existing window to the
+    // front instead of opening another. Skipped when BRISVIA_SOLO is set (isolated test instance).
+    if std::env::var("BRISVIA_SOLO").is_err() {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.show();
                 let _ = w.unminimize();
                 let _ = w.set_focus();
             }
-        }))
+        }));
+    }
+    builder
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec![]),
@@ -1058,6 +1256,9 @@ pub fn run() {
             wallet_create_bip39,
             wallet_verify_backup,
             wallet_restore_bip39,
+            wallet_reveal_seed,
+            wallet_migrate_encrypt,
+            wallet_check_backup,
             settings_get,
             settings_set,
             open_url,

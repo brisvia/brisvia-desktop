@@ -1,6 +1,6 @@
 [package]
 name = "brisvia-miner"
-version = "0.1.2"
+version = "0.2.0"
 description = "Brisvia (BRVA) desktop miner"
 authors = ["Brisvia"]
 edition = "2021"
@@ -22,6 +22,10 @@ ureq = { version = "2", default-features = false, features = ["json"] }
 bip39 = { version = "2", features = ["rand"] }
 bitcoin = "0.32"
 zeroize = "1"
+# Password-based encryption of the recovery phrase: Argon2id key derivation + AES-256-GCM.
+argon2 = "0.5"
+aes-gcm = "0.10"
+rand = "0.8"
 # Operating system language (to pick es/en on first run).
 sys-locale = "0.3"
 # Start with the system (opt-in from Settings).

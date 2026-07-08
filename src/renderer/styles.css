@@ -77,6 +77,8 @@ h1, h2, h3 { margin: 0; }
 .net-panel .panel-head { margin-bottom: 10px; }
 .net-rows { display: flex; flex-direction: column; gap: 10px; }
 .nr { display: flex; justify-content: space-between; align-items: center; font-size: 13.5px; gap: 12px; }
+.nr .nr-on { color: #59c07a; font-weight: 700; }
+.nr .nr-off { color: var(--text-dim); }
 .nr > span:last-child { font-weight: 600; }
 .mono, .nr .mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 11.5px; font-weight: 500 !important; color: var(--muted); word-break: break-all; text-align: right; }
 .link.small { font-size: 12.5px; padding: 0; }
@@ -247,6 +249,17 @@ h1 { font-size: 26px; line-height: 1.14; letter-spacing: -.02em; max-width: 15ch
 .field span { display: block; margin-bottom: 5px; }
 .field input { width: 100%; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; color: var(--text); font: inherit; padding: 11px 12px; }
 .field input:focus { outline: none; border-color: var(--brand); }
+.pass-meter { height: 6px; border-radius: 3px; background: var(--surface-2); margin: 6px 0 2px; overflow: hidden; }
+.pass-meter i { display: block; height: 100%; width: 0; border-radius: 3px; transition: width .2s ease, background .2s ease; }
+.pass-meter.lvl-1 i { width: 25%; background: var(--danger); }
+.pass-meter.lvl-2 i { width: 50%; background: #d8a24a; }
+.pass-meter.lvl-3 i { width: 75%; background: #d8a24a; }
+.pass-meter.lvl-4 i { width: 100%; background: var(--mineral); }
+.send-avail { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin: 2px 0 6px; }
+.send-avail strong { color: var(--text); font-variant-numeric: tabular-nums; }
+.send-avail .link { white-space: nowrap; }
+.send-net { margin: 8px 0 0; opacity: .85; }
+#send-go.is-busy { opacity: .6; pointer-events: none; }
 .addr-box { background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin: 12px 0 0; word-break: break-all; }
 .addr-box code { font-size: 12.5px; color: var(--brand); }
 .qr { width: 150px; height: 150px; margin: 12px auto 0; background: #fff; border-radius: 12px; padding: 8px; }
@@ -259,10 +272,11 @@ h1 { font-size: 26px; line-height: 1.14; letter-spacing: -.02em; max-width: 15ch
 .muted[data-tip-key], .bal-lbl[data-tip-key] { cursor: help; }
 
 /* Testnet banner: sober warning strip below the top bar (worthless coins + countdown). */
-.testnet-banner { display: flex; align-items: center; justify-content: center; gap: 10px 14px; flex-wrap: wrap; padding: 7px 16px; font-size: 12.5px; line-height: 1.35; background: rgba(213,166,111,.12); border-bottom: 1px solid rgba(213,166,111,.28); color: var(--sand); text-align: center; }
+.testnet-banner { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 8px 16px; font-size: 12.5px; line-height: 1.4; background: rgba(213,166,111,.12); border-bottom: 1px solid rgba(213,166,111,.28); color: var(--sand); text-align: center; }
 .testnet-banner strong { color: var(--text); font-weight: 700; }
+.testnet-banner .tb-main { display: flex; flex-wrap: wrap; justify-content: center; gap: 3px 7px; }
+.testnet-banner .tb-sub { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 5px 12px; }
 .testnet-banner .tb-countdown { font-weight: 700; color: var(--text); background: rgba(213,166,111,.20); border: 1px solid rgba(213,166,111,.3); border-radius: 999px; padding: 2px 11px; white-space: nowrap; }
-.testnet-banner .tb-text { display: inline; }
 .testnet-banner .tb-until { font-weight: 700; color: var(--text); }
 .testnet-banner .tb-wallet { color: #59c07a; font-weight: 600; }
 .update-banner { display: flex; align-items: center; justify-content: center; gap: 10px 14px; flex-wrap: wrap; padding: 8px 16px; font-size: 12.5px; line-height: 1.35; background: rgba(47,199,212,.12); border-bottom: 1px solid rgba(47,199,212,.30); color: var(--text); text-align: center; }

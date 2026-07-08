@@ -9,6 +9,9 @@ function transError(err) {
     const map = {
       INSUFFICIENT_FUNDS: 'errors.insufficient_funds', INVALID_ADDRESS: 'errors.invalid_address',
       FEE_TOO_LOW: 'errors.fee_too_low', NODE_STARTING: 'errors.node_starting', NODE_UNAVAILABLE: 'errors.node_unavailable',
+      BAD_PASSWORD: 'errors.bad_password', WEAK_PASSWORD: 'errors.weak_password',
+      NO_SEED_FILE: 'errors.no_seed_file', SEED_CORRUPT: 'errors.seed_corrupt',
+      INVALID_PHRASE: 'errors.invalid_phrase', ENCRYPT_FAILED: 'errors.encrypt_failed',
     };
     const key = map[err.slice(4)];
     if (key) return T(key);
@@ -42,15 +45,61 @@ $('#onb-next').addEventListener('click', () => {
 
 // -- Crear billetera (genera las 12 palabras reales en el backend) --
 let currentSeed = [];
-$('#btn-create').addEventListener('click', async () => {
-  const btn = $('#btn-create'); btn.disabled = true; btn.textContent = T('onboarding.creating');
-  const r = await window.brisvia.wallet.create();
-  btn.disabled = false; btn.textContent = T('onboarding.create');
-  if (r && r.words && r.words.length === 12) { currentSeed = r.words; showSeedStep(); }
-  else { alertInline(T('onboarding.create_err')); }
-});
+$('#btn-create').addEventListener('click', () => startPassStep('create'));
 $('#btn-import').addEventListener('click', () => { buildImportGrid(); setupStep('import'); });
 function alertInline(msg) { const t = $('#onb-text'); if (t) t.textContent = msg; }
+
+// -- Paso de contraseña: cifra la billetera (Core) y la frase de 12 palabras. Sirve para crear e importar. --
+let passMode = 'create';
+let importedWords = [];
+function startPassStep(mode) {
+  passMode = mode;
+  $('#pass-1').value = ''; $('#pass-2').value = ''; $('#pass-msg').hidden = true;
+  $('#pass-show').checked = false; $('#pass-1').type = 'password'; $('#pass-2').type = 'password';
+  updatePassMeter();
+  setupStep('pass');
+  $('#pass-1').focus();
+}
+// Fuerza 0..4: largo + variedad. Guía visual, no un bloqueo estricto (el respaldo real son las 12 palabras).
+function passStrength(p) {
+  let s = 0;
+  if (p.length >= 8) s++;
+  if (p.length >= 12) s++;
+  if (/[A-Z]/.test(p) && /[a-z]/.test(p)) s++;
+  if (/\d/.test(p)) s++;
+  if (/[^A-Za-z0-9]/.test(p)) s++;
+  return Math.min(s, 4);
+}
+function updatePassMeter() {
+  const p = $('#pass-1').value;
+  $('#pass-meter').className = 'pass-meter lvl-' + (p ? passStrength(p) : 0);
+}
+$('#pass-1').addEventListener('input', updatePassMeter);
+$('#pass-show').addEventListener('change', (e) => {
+  const t = e.target.checked ? 'text' : 'password';
+  $('#pass-1').type = t; $('#pass-2').type = t;
+});
+$('#pass-back').addEventListener('click', () => setupStep(passMode === 'import' ? 'import' : 'choose'));
+$('#pass-next').addEventListener('click', async () => {
+  const p1 = $('#pass-1').value, p2 = $('#pass-2').value;
+  const msg = $('#pass-msg'); msg.hidden = false; msg.className = 'verify-msg err';
+  if (p1.length < 8) { msg.textContent = T('onboarding.pass_weak'); return; }
+  if (p1 !== p2) { msg.textContent = T('onboarding.pass_mismatch'); return; }
+  const btn = $('#pass-next'); btn.disabled = true; btn.textContent = T('onboarding.creating');
+  try {
+    if (passMode === 'create') {
+      const r = await window.brisvia.wallet.create(p1);
+      if (r && r.words && r.words.length === 12) { currentSeed = r.words; msg.hidden = true; showSeedStep(); }
+      else { msg.textContent = r && r.error ? transError(r.error) : T('onboarding.create_err'); }
+    } else {
+      const r = await window.brisvia.wallet.restore(importedWords.join(' '), p1);
+      if (r && r.ok) { localStorage.setItem('brisvia_onboarded', '1'); msg.hidden = true; finishSetup(); }
+      else { msg.textContent = r && r.error ? transError(r.error) : T('onboarding.import_err'); }
+    }
+  } finally {
+    btn.disabled = false; btn.textContent = T('common.continue');
+  }
+});
 
 // 12 casilleros para importar la frase (uno por palabra). Pegar las 12 juntas en el primero las distribuye.
 function buildImportGrid() {
@@ -164,16 +213,9 @@ $('#import-ok').addEventListener('click', async () => {
     msg.textContent = T('onboarding.import_len_err', { n: words.length });
     return;
   }
-  const btn = $('#import-ok'); btn.disabled = true; btn.textContent = T('onboarding.restoring');
-  const r = await window.brisvia.wallet.restore(words.join(' '));
-  btn.disabled = false; btn.textContent = T('onboarding.do_import');
-  if (r && r.ok) {
-    localStorage.setItem('brisvia_onboarded', '1');
-    finishSetup();
-  } else {
-    msg.hidden = false; msg.className = 'verify-msg err';
-    msg.textContent = r && r.error ? transError(r.error) : T('onboarding.import_err');
-  }
+  msg.hidden = true;
+  importedWords = words;
+  startPassStep('import'); // pedir una contraseña para cifrar la billetera restaurada
 });
 
 function finishSetup() { $('#setup').hidden = true; showView('wallet'); if (window.brisvia.isReal) loadWallet(); }
@@ -227,7 +269,9 @@ async function refreshMine() {
   }
   $('#toggle').textContent = mining ? T('mine.stop') : T('mine.start');
   $('#toggle').className = 'btn giant ' + (mining ? 'mineral' : 'primary');
-  $('#m-blocks').textContent = window.I18N.fmtNum(s.accepted || 0);
+  // Show BRVA mined (more motivating and correct for partial mining) instead of raw block count.
+  // Each accepted block currently pays 50 BRVA on this network.
+  $('#m-blocks').textContent = window.I18N.fmtNum((s.accepted || 0) * 50);
   $('#m-speed').innerHTML = fmtHashrate(mining ? (s.hashrate || 0) : 0);
   const pct = (s.cores > 0) ? Math.round((s.threads / s.cores) * 100) : 0;
   $('#m-cpu').textContent = (mining ? pct : 0) + '%';
@@ -287,10 +331,14 @@ function catLabel(cat) {
   if (cat === 'send') return T('wallet.sent');
   return T('wallet.received');
 }
+let availableBalance = 0; // spendable balance; used by the Send modal and the "use max" button
+let walletEncrypted = false; // whether the Core wallet has a password (new format) vs old unencrypted one
 async function loadWallet() {
   const w = await window.brisvia.wallet.summary();
   // Big number = what can be spent now (available). Maturing (mining rewards) and Incoming (unconfirmed) are
   // shown apart, each only if there is an amount. They are NEVER added into the available number.
+  availableBalance = w.balance || 0;
+  try { const k = await window.brisvia.wallet.kind(); walletEncrypted = !!(k && k.encrypted); } catch {}
   $('#bal-amount').textContent = fmt(w.balance);
   const mat = w.immature || 0, inc = w.incoming || 0;
   $('#bd-maturing-row').hidden = !(mat > 0);
@@ -389,16 +437,49 @@ function fakeQR(seedStr) {
 }
 
 // Enviar
-$('#act-send').addEventListener('click', () => { $('#send-addr').value = ''; $('#send-amount').value = ''; $('#send-msg').hidden = true; openModal('modal-send'); });
+// Accepts the amount with comma OR dot as decimal separator (an es user types "12,5", an en user "12.5").
+// If there is a comma, dots are treated as thousands separators and dropped.
+function parseAmount(str) {
+  if (str == null) return NaN;
+  let s = String(str).trim().replace(/\s/g, '');
+  if (s === '') return NaN;
+  if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
+  const n = Number(s);
+  return Number.isFinite(n) ? n : NaN;
+}
+// Plain decimal (up to 8 places, trailing zeros trimmed, dot separator) that parseAmount can read back.
+function fmtAmountInput(n) {
+  if (!(n > 0)) return '0';
+  return n.toFixed(8).replace(/\.?0+$/, '');
+}
+$('#act-send').addEventListener('click', () => {
+  $('#send-addr').value = ''; $('#send-amount').value = ''; $('#send-pass').value = ''; $('#send-msg').hidden = true;
+  $('#send-avail').textContent = fmt(availableBalance);
+  $('#send-pass-field').hidden = !walletEncrypted; // old unencrypted wallets don't ask for a password
+  const go = $('#send-go'); go.disabled = false; go.classList.remove('is-busy');
+  openModal('modal-send');
+});
+// "Use max": fills the whole available balance. The tiny network fee is taken by the node when it builds
+// the transaction; on the test network it is minimal, so if it doesn't fit the user just lowers the amount.
+$('#send-max').addEventListener('click', () => {
+  $('#send-amount').value = fmtAmountInput(availableBalance);
+  $('#send-msg').hidden = true;
+});
 $('#send-go').addEventListener('click', async () => {
+  const go = $('#send-go');
+  if (go.disabled) return; // already sending: block a double click
   const addr = $('#send-addr').value.trim();
-  const amount = parseFloat($('#send-amount').value);
+  const amount = parseAmount($('#send-amount').value);
+  const pass = $('#send-pass').value;
   const msg = $('#send-msg'); msg.hidden = false; msg.className = 'verify-msg err';
   if (!addr || addr.length < 14 || !addr.toLowerCase().includes('brv')) { msg.textContent = T('send.invalid_addr'); return; }
   if (!(amount > 0)) { msg.textContent = T('send.invalid_amount'); return; }
-  const r = await window.brisvia.wallet.send(addr, amount);
+  if (amount > availableBalance + 1e-8) { msg.textContent = T('send.over_balance'); return; }
+  if (walletEncrypted && !pass) { msg.textContent = T('send.need_pass'); return; }
+  go.disabled = true; go.classList.add('is-busy');
+  const r = await window.brisvia.wallet.send(addr, amount, pass);
   if (r && r.ok) { msg.className = 'verify-msg ok'; msg.textContent = T('send.done'); setTimeout(() => closeModal('modal-send'), 1200); loadWallet(); }
-  else { msg.textContent = r && r.error ? transError(r.error) : T('send.fail'); }
+  else { go.disabled = false; go.classList.remove('is-busy'); msg.textContent = r && r.error ? transError(r.error) : T('send.fail'); }
 });
 
 // ===================== Ajustes =====================
@@ -433,6 +514,8 @@ async function checkForUpdate(manual) {
   try { res = window.brisvia.checkUpdate ? await window.brisvia.checkUpdate() : null; } catch {}
   if (res && res.available) {
     updatePendingVersion = res.version;
+    const cur = ($('#ver-label')?.textContent || '').trim();
+    if ($('#upd-ver')) $('#upd-ver').textContent = T('update.version_line', { v: res.version, cur });
     let dismissed = null; try { dismissed = localStorage.getItem('brv_update_dismissed'); } catch {}
     // On the automatic check, don't nag again if the user already chose "Later" for THIS version.
     if (!manual && dismissed === res.version) { if (btn) { btn.disabled = false; btn.textContent = T('update.check'); } return; }
@@ -447,6 +530,8 @@ async function checkForUpdate(manual) {
 async function installUpdate() {
   const b = $('#upd-ok');
   if (b) { b.disabled = true; b.textContent = T('update.installing'); }
+  // If mining now, remember it so mining resumes automatically after the app restarts with the new version.
+  try { if (mining) localStorage.setItem('brv_resume_mining', '1'); } catch {}
   try { await window.brisvia.installUpdate(); } // downloads, verifies the signature, installs and restarts
   catch { if (b) { b.disabled = false; b.textContent = T('update.install_now'); } }
 }
@@ -457,13 +542,10 @@ if ($('#upd-later')) $('#upd-later').addEventListener('click', () => {
   closeModal('modal-update');
 });
 
-// Ver las 12 palabras: se piden al backend en el momento; no se guardan en ningún archivo.
-$('#sec-view').addEventListener('click', async () => {
-  const words = await window.brisvia.wallet.getSeed();
-  const grid = $('#seed-grid-view'); grid.innerHTML = '';
-  (words || []).forEach((w) => { const li = document.createElement('li'); li.textContent = w; grid.appendChild(li); });
-  closeModal('modal-security'); openModal('modal-seed');
-});
+// The tempting "view my 12 words" button was removed on purpose: the recovery phrase is shown ONLY once,
+// when the wallet is created (with a mandatory backup verification). To re-check a backup afterwards the user
+// uses "Verify my backup" below, which compares what they type WITHOUT ever revealing the phrase again.
+// (A protected "show recovery phrase" behind a wallet password is planned together with wallet encryption for mainnet.)
 // Verificar respaldo: el usuario escribe sus 12 palabras y se comparan con las de la billetera.
 $('#sec-verify').addEventListener('click', () => {
   const grid = $('#vb-grid'); grid.innerHTML = '';
@@ -480,10 +562,38 @@ $('#vb-check').addEventListener('click', async () => {
   const words = [...$('#vb-grid').querySelectorAll('input')].map((i) => i.value.trim().toLowerCase()).filter(Boolean);
   const msg = $('#vb-msg'); msg.hidden = false;
   if (words.length !== 12) { msg.className = 'verify-msg err'; msg.textContent = T('security.verify_len', { n: words.length }); return; }
-  const real = await window.brisvia.wallet.getSeed();
-  const ok = Array.isArray(real) && real.length === 12 && real.every((w, i) => w === words[i]);
+  // Verify by fingerprint (no password, never reveals the stored phrase). Falls back to getSeed in the browser mock.
+  let ok = false;
+  if (window.brisvia.wallet.checkBackup) {
+    const r = await window.brisvia.wallet.checkBackup(words);
+    ok = !!(r && r.ok);
+  } else {
+    const real = await window.brisvia.wallet.getSeed();
+    ok = Array.isArray(real) && real.length === 12 && real.every((w, i) => w === words[i]);
+  }
   msg.className = ok ? 'verify-msg ok' : 'verify-msg err';
   msg.textContent = ok ? T('security.verify_ok') : T('security.verify_bad');
+});
+
+// Mostrar frase (avanzado): pide la contraseña, descifra la frase y la muestra una vez.
+$('#sec-reveal').addEventListener('click', () => {
+  $('#reveal-pass').value = ''; $('#reveal-msg').hidden = true;
+  closeModal('modal-security'); openModal('modal-reveal');
+});
+$('#reveal-go').addEventListener('click', async () => {
+  const pass = $('#reveal-pass').value;
+  const msg = $('#reveal-msg'); msg.hidden = false; msg.className = 'verify-msg err';
+  if (!pass) { msg.textContent = T('security.reveal_need'); return; }
+  const btn = $('#reveal-go'); btn.disabled = true;
+  const r = await window.brisvia.wallet.revealSeed(pass);
+  btn.disabled = false;
+  if (r && Array.isArray(r.words) && r.words.length === 12) {
+    const grid = $('#seed-grid-view'); grid.innerHTML = '';
+    r.words.forEach((w) => { const li = document.createElement('li'); li.textContent = w; grid.appendChild(li); });
+    msg.hidden = true; closeModal('modal-reveal'); openModal('modal-seed');
+  } else {
+    msg.textContent = r && r.error ? transError(r.error) : T('security.reveal_bad');
+  }
 });
 
 // ===================== Modales =====================
@@ -517,7 +627,21 @@ async function pollNet() {
     $('#nr-status').textContent = !connected ? T('net_panel.connecting') : (syncing ? T('net.syncing') : (walletReady ? T('net_panel.connected') : T('net_panel.preparing')));
     $('#nr-height').textContent = connected ? window.I18N.fmtNum(info.blocks ?? 0) : '—';
     $('#nr-peers').textContent = connected ? (info.peers ?? 0) : '—';
-    $('#nr-diff').textContent = (connected && info.difficulty != null) ? window.I18N.fmtNum(info.difficulty, { maximumFractionDigits: 2 }) : '—';
+    // Difficulty on the shared testnet is a tiny number; 2 decimals would round it to "0".
+    // Show it readable: >=1 with 2 decimals, small values with 3 significant digits.
+    $('#nr-diff').textContent = (connected && info.difficulty != null)
+      ? (info.difficulty >= 1 ? window.I18N.fmtNum(info.difficulty, { maximumFractionDigits: 2 })
+         : info.difficulty === 0 ? '0' : info.difficulty.toLocaleString(window.I18N.lang, { maximumSignificantDigits: 3 }))
+      : '—';
+  }
+  // Mining indicator in the network panel, so it's visible on the Wallet view too (not only on Mine).
+  if ($('#nr-mining')) {
+    try {
+      const ms = await window.brisvia.getStatus();
+      const on = !!(ms && ms.mining);
+      $('#nr-mining').textContent = on ? T('net_panel.mining_on') : T('net_panel.mining_off');
+      $('#nr-mining').className = on ? 'nr-on' : 'nr-off';
+    } catch {}
   }
 }
 
@@ -626,6 +750,16 @@ async function init() {
       $('#setup').hidden = true;
       showView('wallet');
       loadWallet();
+      // Offer to protect an OLD wallet (created before password support) with a password.
+      try { const k = await window.brisvia.wallet.kind(); if (k && k.encrypted === false) openProtect(); } catch {}
+      // Resume mining automatically if the app was mining when it restarted for an update.
+      try {
+        if (localStorage.getItem('brv_resume_mining')) {
+          localStorage.removeItem('brv_resume_mining');
+          await window.brisvia.start(currentIntensity());
+          refreshMine();
+        }
+      } catch {}
     } else {
       $('#setup').hidden = false;
       onbStep = 0; renderOnb(); setupStep('welcome');
@@ -648,4 +782,27 @@ async function init() {
     if (window.brisvia.isReal && wv && !wv.hidden) loadWallet();
   }, 4000);
 }
+
+// Proteger una billetera vieja (sin contraseña) — migra a contraseña (encryptwallet + frase cifrada).
+function openProtect() {
+  $('#protect-1').value = ''; $('#protect-2').value = ''; $('#protect-msg').hidden = true;
+  $('#protect-meter').className = 'pass-meter';
+  openModal('modal-protect');
+}
+$('#protect-1').addEventListener('input', () => {
+  const p = $('#protect-1').value;
+  $('#protect-meter').className = 'pass-meter lvl-' + (p ? passStrength(p) : 0);
+});
+$('#protect-go').addEventListener('click', async () => {
+  const p1 = $('#protect-1').value, p2 = $('#protect-2').value;
+  const msg = $('#protect-msg'); msg.hidden = false; msg.className = 'verify-msg err';
+  if (p1.length < 8) { msg.textContent = T('onboarding.pass_weak'); return; }
+  if (p1 !== p2) { msg.textContent = T('onboarding.pass_mismatch'); return; }
+  const btn = $('#protect-go'); btn.disabled = true;
+  const r = await window.brisvia.wallet.migrateEncrypt(p1);
+  btn.disabled = false;
+  if (r && r.ok) { walletEncrypted = true; msg.hidden = true; closeModal('modal-protect'); loadWallet(); }
+  else { msg.textContent = (r && r.error) ? transError(r.error) : T('protect.fail'); }
+});
+
 init();
