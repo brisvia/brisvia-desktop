@@ -72,7 +72,7 @@ window.LOCALES = {
       stale_blocks: 'Trabajo que llegó tarde', stale_hint: 'Normal en una red compartida: otro encontró el bloque primero.',
       session_time: 'Esta sesión', total_time: 'Tiempo total minado',
       unit_min: 'min', unit_h: 'h', unit_s: 's',
-      note: 'No es "producir fichas": es aportar trabajo a una red compartida. Cada bloque que encontrás lo ves acá.',
+      note: 'Estadísticas de esta sesión y de tu actividad total de minado.',
     },
     settings: {
       autostart_title: 'Iniciar con la computadora', autostart_sub: 'Brisvia se abre solo cuando enciendes la computadora.',
@@ -119,7 +119,7 @@ window.LOCALES = {
     },
     receive: {
       title: 'Recibir Brisvia', sub: 'Comparte esta dirección para que te envíen Brisvia. Puedes generar una nueva cuando quieras.',
-      copy_addr: 'Copiar dirección', new_addr: 'Nueva dirección', copied_addr: 'Copiada',
+      copy_addr: 'Copiar dirección', new_addr: 'Nueva dirección', copied_addr: 'Copiada', history: 'Ver mis direcciones',
     },
     send: {
       title: 'Enviar Brisvia', to: 'Dirección de destino', amount: 'Monto (BRVA)', go: 'Enviar', cancel: 'Cancelar',
@@ -218,7 +218,7 @@ window.LOCALES = {
       stale_blocks: 'Work that arrived late', stale_hint: 'Normal on a shared network: someone found the block first.',
       session_time: 'This session', total_time: 'Total mining time',
       unit_min: 'min', unit_h: 'h', unit_s: 's',
-      note: 'This is not "producing tokens": it is contributing work to a shared network. Every block you find shows up here.',
+      note: 'Statistics for this session and your total mining activity.',
     },
     settings: {
       autostart_title: 'Start with the computer', autostart_sub: 'Brisvia opens automatically when you turn on your computer.',
@@ -265,7 +265,7 @@ window.LOCALES = {
     },
     receive: {
       title: 'Receive Brisvia', sub: 'Share this address so people can send you Brisvia. You can generate a new one anytime.',
-      copy_addr: 'Copy address', new_addr: 'New address', copied_addr: 'Copied',
+      copy_addr: 'Copy address', new_addr: 'New address', copied_addr: 'Copied', history: 'View my addresses',
     },
     send: {
       title: 'Send Brisvia', to: 'Destination address', amount: 'Amount (BRVA)', go: 'Send', cancel: 'Cancel',
