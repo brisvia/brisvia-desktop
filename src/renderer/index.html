@@ -93,12 +93,6 @@
     <span id="tb-countdown" class="tb-countdown" hidden></span>
   </div>
 
-  <!-- Aviso de actualización disponible (auto-detectada al iniciar). Un clic instala y reinicia. -->
-  <div id="update-banner" class="update-banner" hidden>
-    <span class="ub-text"><strong data-i18n="update.available_tag"></strong> <span data-i18n="update.available_note"></span></span>
-    <button id="ub-install" class="btn primary xs" data-i18n="update.install_now"></button>
-  </div>
-
   <main class="content">
 
     <!-- ---- Vista Billetera ---- -->
@@ -155,15 +149,21 @@
           <div class="intensity">
             <span class="muted small" data-tip-key="intensity" data-i18n="mine.how_much"></span>
             <div class="seg" role="group" data-i18n-attr="aria-label:mine.how_much">
-              <button class="seg-btn" data-i="suave" data-i18n="mine.soft"></button>
-              <button class="seg-btn active" data-i="equilibrado" data-i18n="mine.balanced"></button>
-              <button class="seg-btn" data-i="intenso" data-i18n="mine.intense"></button>
+              <button class="seg-btn" data-pct="25" data-i18n="mine.soft"></button>
+              <button class="seg-btn active" data-pct="50" data-i18n="mine.balanced"></button>
+              <button class="seg-btn" data-pct="75" data-i18n="mine.high"></button>
+              <button class="seg-btn" data-pct="100" data-i18n="mine.max"></button>
+            </div>
+            <div class="pow-slider">
+              <input type="range" id="pow-range" min="1" max="100" value="50" step="1" data-i18n-attr="aria-label:mine.how_much">
+              <span id="pow-val" class="pow-val">50%</span>
             </div>
           </div>
         </div>
         <aside class="contrib">
           <h3 data-i18n="mine.your_contribution"></h3>
           <div class="metric big" data-tip-key="mine_blocks"><div class="m-val" id="m-blocks">0</div><div class="m-lbl muted" data-i18n="mine.blocks_found"></div></div>
+          <p class="stale-line muted small" id="stale-line" hidden><strong id="m-stale">0</strong> <span data-i18n="mine.stale_blocks"></span> · <span data-i18n="mine.stale_hint"></span></p>
           <div class="metric-row">
             <div class="metric" data-tip-key="mine_speed"><div class="m-val" id="m-speed">0 <span class="unit">H/s</span></div><div class="m-lbl muted" data-i18n="mine.speed"></div></div>
             <div class="metric" data-tip-key="mine_cpu"><div class="m-val" id="m-cpu">0%</div><div class="m-lbl muted" data-i18n="mine.cpu_use"></div></div>
@@ -191,9 +191,10 @@
         <div class="set-row">
           <div><div class="set-title" data-i18n="settings.intensity_title"></div><div class="muted small" data-i18n="settings.intensity_sub"></div></div>
           <div class="seg small-seg" id="set-intensity">
-            <button class="seg-btn" data-i="suave" data-i18n="mine.soft"></button>
-            <button class="seg-btn active" data-i="equilibrado" data-i18n="mine.balanced"></button>
-            <button class="seg-btn" data-i="intenso" data-i18n="mine.intense"></button>
+            <button class="seg-btn" data-pct="25" data-i18n="mine.soft"></button>
+            <button class="seg-btn active" data-pct="50" data-i18n="mine.balanced"></button>
+            <button class="seg-btn" data-pct="75" data-i18n="mine.high"></button>
+            <button class="seg-btn" data-pct="100" data-i18n="mine.max"></button>
           </div>
         </div>
         <div class="set-row">
@@ -307,6 +308,18 @@
       <div class="row-gap">
         <button data-close class="btn ghost" data-i18n="common.close"></button>
         <button id="vb-check" class="btn primary" data-i18n="security.verify_do"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Update available: pop-up when opening the program. OK updates; Later leaves it for later. -->
+  <div id="modal-update" class="overlay" hidden>
+    <div class="card modal">
+      <h2 data-i18n="update.available_tag"></h2>
+      <p class="muted" data-i18n="update.modal_text"></p>
+      <div class="row-gap">
+        <button id="upd-later" class="btn ghost" data-i18n="update.later"></button>
+        <button id="upd-ok" class="btn primary" data-i18n="update.install_now"></button>
       </div>
     </div>
   </div>

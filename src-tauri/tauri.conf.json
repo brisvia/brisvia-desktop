@@ -11,11 +11,12 @@
     "windows": [
       {
         "title": "Brisvia — Miner",
-        "width": 980,
-        "height": 680,
-        "minWidth": 860,
-        "minHeight": 600,
+        "width": 1080,
+        "height": 760,
+        "minWidth": 900,
+        "minHeight": 640,
         "resizable": true,
+        "maximizable": false,
         "backgroundColor": "#0B1117"
       }
     ],

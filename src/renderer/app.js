@@ -232,18 +232,45 @@ async function refreshMine() {
   $('#m-cpu').textContent = (mining ? pct : 0) + '%';
   $('#m-session').innerHTML = fmtDuration(s.secondsMining || 0);
   $('#m-total').innerHTML = fmtDuration(s.totalSeconds || 0);
+  // Work that arrived late (stale): shown only when there is some, with the "this is normal" note.
+  const stale = s.stale || 0;
+  $('#stale-line').hidden = !(stale > 0);
+  if (stale > 0) $('#m-stale').textContent = window.I18N.fmtNum(stale);
+  // Real core count -> power label ("50% · 16 of 32 cores").
+  if (s.cores && s.cores !== POW_CORES) { POW_CORES = s.cores; refreshPowLabel(); }
 }
 $('#toggle').addEventListener('click', async () => {
   if (mining) await window.brisvia.stop();
   else await window.brisvia.start(currentIntensity());
   refreshMine();
 });
-function currentIntensity() { return document.querySelector('.mine-grid .seg-btn.active')?.dataset.i || 'equilibrado'; }
-$$('.mine-grid .seg-btn').forEach((b) => b.addEventListener('click', async () => {
-  $$('.mine-grid .seg-btn').forEach((x) => x.classList.remove('active'));
-  b.classList.add('active');
-  await window.brisvia.setIntensity(b.dataset.i);
-}));
+// Mining power: a percentage (1..100) of the machine's cores. Named shortcuts + a slider for fine control.
+// Maps legacy named settings (suave/equilibrado/intenso) to a percentage for backward compatibility.
+function pctOf(v) { return ({ suave: '25', equilibrado: '50', intenso: '100' })[v] || String(parseInt(v, 10) || 50); }
+function currentIntensity() { return String($('#pow-range')?.value || '50'); }
+let POW_CORES = 0; // real core count, filled from miner_status
+function powThreads(pct) { return POW_CORES > 0 ? Math.max(1, Math.ceil((POW_CORES * pct) / 100)) : 0; }
+function refreshPowLabel() {
+  const lbl = $('#pow-val'); if (!lbl) return;
+  const pct = parseInt($('#pow-range')?.value || '50', 10);
+  lbl.textContent = POW_CORES > 0 ? pct + '% · ' + T('mine.cores_of', { n: powThreads(pct), t: POW_CORES }) : pct + '%';
+}
+function setPower(pct, apply) {
+  pct = Math.max(1, Math.min(100, parseInt(pct, 10) || 50));
+  const r = $('#pow-range'); if (r) r.value = pct;
+  refreshPowLabel();
+  // Highlight the shortcut button only when it matches exactly.
+  $$('.mine-grid .seg-btn').forEach((x) => x.classList.toggle('active', parseInt(x.dataset.pct, 10) === pct));
+  if (apply) window.brisvia.setIntensity(String(pct)); // applies live (backend relaunches the engine)
+}
+$$('.mine-grid .seg-btn').forEach((b) => b.addEventListener('click', () => setPower(b.dataset.pct, true)));
+{
+  const r = $('#pow-range');
+  if (r) {
+    r.addEventListener('input', () => setPower(r.value, false)); // update label while dragging, no relaunch
+    r.addEventListener('change', () => setPower(r.value, true));  // apply once when released
+  }
+}
 
 // ===================== Billetera =====================
 function catLabel(cat) {
@@ -360,7 +387,9 @@ async function loadSettings() {
   const s = await window.brisvia.settings.get();
   $('#set-autostart').checked = !!s.autostart;
   $('#set-tray').checked = s.tray !== false;
-  $$('#set-intensity .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.i === (s.defaultIntensity || 'equilibrado')));
+  { const dp = pctOf(s.defaultIntensity);
+    $$('#set-intensity .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.pct === dp));
+    setPower(parseInt(dp, 10), false); } // sync the Mine slider with the saved default power
   $$('#set-language .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.lang === window.I18N.lang));
 }
 $('#set-autostart').addEventListener('change', (e) => window.brisvia.settings.set('autostart', e.target.checked));
@@ -368,7 +397,8 @@ $('#set-tray').addEventListener('change', (e) => window.brisvia.settings.set('tr
 $$('#set-intensity .seg-btn').forEach((b) => b.addEventListener('click', () => {
   $$('#set-intensity .seg-btn').forEach((x) => x.classList.remove('active'));
   b.classList.add('active');
-  window.brisvia.settings.set('defaultIntensity', b.dataset.i);
+  window.brisvia.settings.set('defaultIntensity', b.dataset.pct);
+  setPower(parseInt(b.dataset.pct, 10), false); // keep the Mine slider in sync with the chosen default
 }));
 // Selector de idioma
 $$('#set-language .seg-btn').forEach((b) => b.addEventListener('click', () => {
@@ -389,7 +419,7 @@ async function checkForUpdate(manual) {
   let res = null;
   try { res = window.brisvia.checkUpdate ? await window.brisvia.checkUpdate() : null; } catch {}
   if (res && res.available) {
-    const banner = $('#update-banner'); if (banner) banner.hidden = false;
+    openModal('modal-update'); // pop-up: OK installs, Later dismisses
     if (btn) { btn.disabled = false; btn.textContent = T('update.check'); }
   } else if (manual && btn) {
     btn.disabled = false;
@@ -398,13 +428,14 @@ async function checkForUpdate(manual) {
   }
 }
 async function installUpdate() {
-  const b = $('#ub-install');
+  const b = $('#upd-ok');
   if (b) { b.disabled = true; b.textContent = T('update.installing'); }
-  try { await window.brisvia.installUpdate(); } // baja, verifica la firma, instala y reinicia el programa
+  try { await window.brisvia.installUpdate(); } // downloads, verifies the signature, installs and restarts
   catch { if (b) { b.disabled = false; b.textContent = T('update.install_now'); } }
 }
 if ($('#set-update')) $('#set-update').addEventListener('click', () => checkForUpdate(true));
-if ($('#ub-install')) $('#ub-install').addEventListener('click', installUpdate);
+if ($('#upd-ok')) $('#upd-ok').addEventListener('click', installUpdate);
+if ($('#upd-later')) $('#upd-later').addEventListener('click', () => closeModal('modal-update'));
 
 // See the 12 words: they are requested from the backend on the spot; they are not saved in any file.
 $('#sec-view').addEventListener('click', async () => {
@@ -474,9 +505,13 @@ async function pollNet() {
 document.addEventListener('langchange', () => {
   renderOnb();
   refreshMine();
+  refreshPowLabel();
   updateTestnetBanner();
   const wv = document.querySelector('.view[data-view="wallet"]');
   if (wv && !wv.hidden) loadWallet();
+  // Re-translate the balance explanation if it's open (it's set on click, so it wouldn't refresh otherwise).
+  const ex = $('#bal-explain');
+  if (ex && !ex.hidden && ex.dataset.k) ex.textContent = T(ex.dataset.k);
   $$('#set-language .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.lang === window.I18N.lang));
 });
 
