@@ -740,6 +740,67 @@ fn set_language(app: AppHandle, state: State<AppState>, lang: String) {
     }
 }
 
+// ---- Auto-updater --------------------------------------------------------
+// Lets an installed copy update itself, so users who already downloaded the miner
+// don't have to re-download it when real mining starts. Updates are signed (minisign);
+// the download step verifies the signature before anything is installed.
+
+// Builds an Updater. Honors BRISVIA_UPDATE_ENDPOINT (end-to-end testing only); otherwise
+// uses the endpoint from tauri.conf (GitHub Releases).
+fn build_updater(app: &tauri::AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    match std::env::var("BRISVIA_UPDATE_ENDPOINT") {
+        Ok(ep) if !ep.is_empty() => {
+            let url = tauri::Url::parse(&ep).map_err(|e| e.to_string())?;
+            app.updater_builder()
+                .endpoints(vec![url])
+                .map_err(|e| e.to_string())?
+                .build()
+                .map_err(|e| e.to_string())
+        }
+        _ => app.updater().map_err(|e| e.to_string()),
+    }
+}
+
+async fn check_update_inner(app: &tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let updater = build_updater(app)?;
+    match updater.check().await {
+        Ok(Some(u)) => Ok(json!({
+            "available": true,
+            "version": u.version,
+            "currentVersion": u.current_version,
+            "notes": u.body,
+        })),
+        Ok(None) => Ok(json!({
+            "available": false,
+            "currentVersion": app.package_info().version.to_string(),
+        })),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+// Frontend: is there a newer signed version available?
+#[tauri::command]
+async fn check_update(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    check_update_inner(&app).await
+}
+
+// Frontend: download the newer version (verifies signature), install it and relaunch.
+#[tauri::command]
+async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
+    let updater = build_updater(&app)?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no update available".to_string())?;
+    update
+        .download_and_install(|_chunk, _total| {}, || {})
+        .await
+        .map_err(|e| e.to_string())?;
+    app.restart();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // data directory next to the user's app data
@@ -782,8 +843,36 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec![]),
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state)
         .setup(|app| {
+            // Headless end-to-end self-test of the updater: check the endpoint and
+            // download + verify the signature WITHOUT installing. Enabled via env var, used to
+            // verify the updater before shipping. Skips node/tray/wallet startup.
+            if std::env::var("BRISVIA_UPDATE_SELFTEST").is_ok() {
+                let h = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut out = String::new();
+                    match build_updater(&h) {
+                        Ok(updater) => match updater.check().await {
+                            Ok(Some(update)) => {
+                                out.push_str(&format!("SELFTEST_CHECK available version={} current={}\n", update.version, update.current_version));
+                                match update.download(|_c, _t| {}, || {}).await {
+                                    Ok(bytes) => out.push_str(&format!("SELFTEST_DOWNLOAD ok signature_valid bytes={}\n", bytes.len())),
+                                    Err(e) => out.push_str(&format!("SELFTEST_DOWNLOAD fail {}\n", e)),
+                                }
+                            }
+                            Ok(None) => out.push_str("SELFTEST_CHECK none already_latest\n"),
+                            Err(e) => out.push_str(&format!("SELFTEST_CHECK error {}\n", e)),
+                        },
+                        Err(e) => out.push_str(&format!("SELFTEST_UPDATER error {}\n", e)),
+                    }
+                    print!("{}", out);
+                    if let Ok(p) = std::env::var("BRISVIA_SELFTEST_OUT") { let _ = std::fs::write(&p, &out); }
+                    h.exit(0);
+                });
+                return Ok(());
+            }
             let handle = app.handle().clone();
             let state = app.state::<AppState>();
             // start the node
@@ -894,7 +983,9 @@ pub fn run() {
             settings_set,
             open_url,
             system_locale,
-            set_language
+            set_language,
+            check_update,
+            install_update
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Brisvia")

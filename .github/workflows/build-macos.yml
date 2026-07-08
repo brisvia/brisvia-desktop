@@ -48,6 +48,8 @@ jobs:
           cargo build --release --manifest-path crates/brisvia-randomx/Cargo.toml --bin mine-once
 
       - name: Stage binaries (no .exe on macOS) and point the config at them
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           mkdir -p src-tauri/binaries
           cp core/build/bin/bitcoind src-tauri/binaries/bitcoind
@@ -56,11 +58,15 @@ jobs:
             cp target/release/mine-once src-tauri/binaries/brisvia-worker
           chmod +x src-tauri/binaries/*
           python3 - <<'PY'
-          import json
+          import json, os
           p = "src-tauri/tauri.conf.json"
           d = json.load(open(p))
           d["bundle"]["resources"] = ["binaries/bitcoind", "binaries/bitcoin-cli", "binaries/brisvia-worker"]
-          d["bundle"]["targets"] = ["dmg"]  # macOS: nsis is Windows-only; produce a .dmg here
+          # macOS: nsis is Windows-only. Sign only if the signing key secret is present:
+          # with a key -> "app" yields the signed updater artifact (.app.tar.gz) + "dmg"; without -> just the "dmg".
+          signing = bool(os.environ.get("TAURI_SIGNING_PRIVATE_KEY"))
+          d["bundle"]["createUpdaterArtifacts"] = signing
+          d["bundle"]["targets"] = ["app", "dmg"] if signing else ["dmg"]
           json.dump(d, open(p, "w"), indent=2)
           PY
 
@@ -72,19 +78,24 @@ jobs:
       - name: Install frontend dependencies
         run: npm install
 
-      - name: Build the Tauri app (.dmg)
+      - name: Build the Tauri app (.dmg + signed updater artifact)
         run: npm run tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
 
       - name: Smoke test the compiled binaries
         run: |
           ./src-tauri/binaries/bitcoind -version | head -1 || echo "bitcoind version check failed"
           file ./src-tauri/binaries/brisvia-worker || true
 
-      - name: Attach the .dmg to the release
+      - name: Attach the .dmg and the signed updater artifact to the release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v0.1.0
           files: |
             src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

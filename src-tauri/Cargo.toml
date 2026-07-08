@@ -28,3 +28,5 @@ sys-locale = "0.3"
 tauri-plugin-autostart = "2"
 # Single instance: prevents opening two windows (and two mining engines) if the program is launched while already open.
 tauri-plugin-single-instance = "2"
+# Self-updater: lets an installed copy update itself (so users don't re-download when real mining starts). Signed with minisign.
+tauri-plugin-updater = "2"
