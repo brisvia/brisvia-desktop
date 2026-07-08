@@ -127,7 +127,7 @@ fn build_candidate(tmpl: &Value, payout_script: &ScriptBuf, extranonce: u64) -> 
 /// appears, it bails out (to avoid mining stale work). Returns (nonce, hashes, stale=bailed out due to new tip).
 #[allow(clippy::too_many_arguments)]
 fn mine_block(cache: Arc<Cache>, dataset: Arc<Dataset>, header: &[u8], target_be: &[u8; 32], threads: usize,
-              max_nonces: u64, url: &str, user: &str, pass: &str, prev_hash: &str) -> (Option<u32>, u64, bool) {
+              max_nonces: u64, url: &str, user: &str, pass: &str, prev_hash: &str, json_mode: bool) -> (Option<u32>, u64, bool) {
     let found = AtomicBool::new(false);
     let stale = AtomicBool::new(false);
     let winner = AtomicU32::new(0);
@@ -135,13 +135,19 @@ fn mine_block(cache: Arc<Cache>, dataset: Arc<Dataset>, header: &[u8], target_be
     std::thread::scope(|s| {
         // Tip watcher: every 1.5s checks whether the best block changed relative to the current template.
         {
-            let (found, stale) = (&found, &stale);
+            let (found, stale, hashes) = (&found, &stale, &hashes);
+            let t_watch = std::time::Instant::now();
             s.spawn(move || {
                 let mut ticks = 0u32;
                 while !found.load(Ordering::Relaxed) {
                     std::thread::sleep(std::time::Duration::from_millis(150)); // responds quickly to "found"
                     ticks += 1;
                     if found.load(Ordering::Relaxed) { break; }
+                    // Live hashrate ~every 2s so the UI shows real-time speed, not only when a block is accepted.
+                    if json_mode && ticks % 13 == 0 {
+                        let hs = hashes.load(Ordering::Relaxed) as f64 / t_watch.elapsed().as_secs_f64().max(0.001);
+                        if hs > 0.0 { println!("{}", json!({"event":"hashrate","hashrate":hs})); }
+                    }
                     if ticks % 10 == 0 { // queries the tip ~every 1.5s
                         if let Ok(best) = rpc(url, user, pass, "getbestblockhash", json!([])) {
                             if best.as_str() != Some(prev_hash) {
@@ -218,11 +224,22 @@ fn main() {
     let mut dataset: Option<Arc<Dataset>> = None;
     let mut total_hashes = 0u64;
     let t_start = Instant::now();
+    let mut consec_err = 0u32; // consecutive RPC errors -> circuit breaker, so a permanent failure stops instead of looping forever
 
     while mined < max_blocks {
         let tmpl = match rpc(url, user, pass, "getblocktemplate", json!([{"rules":["segwit"]}])) {
             Ok(t) => t,
-            Err(e) => { eprintln!("getblocktemplate: {e}"); break; }
+            // Transient RPC hiccup: wait briefly and retry instead of dying (this used to stop the chain from advancing).
+            Err(e) => {
+                consec_err += 1;
+                if consec_err >= 8 {
+                    if json_mode { ev(json!({"event":"fatal","msg":format!("getblocktemplate: {e}")})); } else { eprintln!("stopping after repeated RPC errors: {e}"); }
+                    break;
+                }
+                if json_mode { ev(json!({"event":"error","msg":format!("getblocktemplate: {e}")})); } else { eprintln!("getblocktemplate: {e}"); }
+                std::thread::sleep(std::time::Duration::from_millis((consec_err as u64 * 700).min(5000))); // growing backoff
+                continue;
+            }
         };
         let height = tmpl["height"].as_u64().unwrap();
         let prev_hash = tmpl["previousblockhash"].as_str().unwrap().to_string();
@@ -243,7 +260,7 @@ fn main() {
         let dataset_ref = dataset.clone().unwrap();
 
         let t_block = Instant::now();
-        let (found, hashes, stale) = mine_block(cache_ref, dataset_ref, &header_bytes, &target_be, threads, max_nonces, url, user, pass, &prev_hash);
+        let (found, hashes, stale) = mine_block(cache_ref, dataset_ref, &header_bytes, &target_be, threads, max_nonces, url, user, pass, &prev_hash, json_mode);
         total_hashes += hashes;
 
         if stale {
@@ -257,6 +274,7 @@ fn main() {
                 let block_hex = hex::encode(serialize(&block));
                 match rpc(url, user, pass, "submitblock", json!([block_hex])) {
                     Ok(v) if v.is_null() => {
+                        consec_err = 0;
                         mined += 1;
                         let secs = t_block.elapsed().as_secs_f64();
                         let hs = hashes as f64 / secs.max(0.001);
@@ -264,18 +282,31 @@ fn main() {
                         else { println!("Block {height} ACCEPTED (nonce {nonce}) · {secs:.1}s · {hs:.0} H/s · mined={mined}"); }
                     }
                     Ok(v) => {
+                        // Rejected (often a race: another block took this height). The RPC worked, so reset the counter and retry.
+                        consec_err = 0;
                         if json_mode { ev(json!({"event":"rejected","height":height,"reason":v})); }
-                        else { println!("Block {height} rejected: {v}"); } break;
+                        else { println!("Block {height} rejected: {v}"); }
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                        continue;
                     }
                     Err(e) => {
+                        consec_err += 1;
+                        if consec_err >= 8 {
+                            if json_mode { ev(json!({"event":"fatal","msg":e})); } else { println!("stopping after repeated submit errors: {e}"); }
+                            break;
+                        }
                         if json_mode { ev(json!({"event":"error","msg":e})); }
-                        else { println!("submitblock error: {e}"); } break;
+                        else { println!("submitblock error: {e}"); }
+                        std::thread::sleep(std::time::Duration::from_millis((consec_err as u64 * 700).min(5000)));
+                        continue;
                     }
                 }
             }
             None => {
+                // No nonce found in this batch: grab a fresh template and keep going instead of stopping.
                 if json_mode { ev(json!({"event":"exhausted","height":height})); }
-                else { println!("Block {height}: no nonce found in {max_nonces} attempts"); } break;
+                else { println!("Block {height}: no nonce found in {max_nonces} attempts"); }
+                continue;
             }
         }
     }

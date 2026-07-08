@@ -264,11 +264,37 @@ fn wallet_summary(state: State<AppState>) -> Value {
     })
 }
 
+fn addresses_path(datadir: &PathBuf) -> PathBuf { datadir.join("addresses.txt") }
+// Records each generated receive address once, in order, so the user can review past addresses.
+fn append_address(datadir: &PathBuf, addr: &str) {
+    if addr.is_empty() { return; }
+    let p = addresses_path(datadir);
+    if let Ok(content) = std::fs::read_to_string(&p) {
+        if content.lines().any(|l| l == addr) { return; }
+    }
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+        let _ = writeln!(f, "{}", addr);
+    }
+}
+
+// All receive addresses generated so far, oldest first. Makes sure the current one is recorded too.
+#[tauri::command]
+fn wallet_addresses(state: State<AppState>) -> Value {
+    let cur = state.receive_addr.lock().unwrap().clone();
+    append_address(&state.datadir, &cur);
+    let list: Vec<String> = std::fs::read_to_string(addresses_path(&state.datadir))
+        .unwrap_or_default()
+        .lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    json!(list)
+}
+
 #[tauri::command]
 fn wallet_new_address(state: State<AppState>) -> Result<Value, String> {
     let addr = rpc(&state.datadir, Some(WALLET_NAME), "getnewaddress", json!([]))?;
     let a = addr.as_str().unwrap_or("").to_string();
     *state.receive_addr.lock().unwrap() = a.clone();
+    append_address(&state.datadir, &a);
     Ok(json!({ "address": a }))
 }
 
@@ -525,6 +551,10 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
     .clamp(1, 100);
     let threads = ((cores * pct + 99) / 100).max(1); // ceil(cores * pct / 100), at least 1
     state.miner_threads.store(threads as u64, Ordering::SeqCst);
+    // Tray tooltip: show the mining power on hover over the notification-area icon.
+    if let Some(tray) = state.tray.lock().unwrap().as_ref() {
+        let _ = tray.set_tooltip(Some(&format!("Brisvia — {}% ({}/{})", pct, threads, cores)));
+    }
 
     // Node cookie auth (never exposed in logs): the .cookie file contains "user:password".
     let cookie = std::fs::read_to_string(state.datadir.join(NET_SUBDIR).join(".cookie")).unwrap_or_default();
@@ -597,7 +627,15 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
                                 total += 1;
                                 if let Some(hs) = evt["hashrate"].as_f64() { last_hs = Some(hs); }
                             }
+                            // Periodic live-speed event from the miner (every ~2s), so the UI updates in real time.
+                            Some("hashrate") => {
+                                ready.store(true, Ordering::SeqCst);
+                                if let Some(hs) = evt["hashrate"].as_f64() { last_hs = Some(hs); }
+                            }
                             Some("stale") => { ready.store(true, Ordering::SeqCst); total_stale += 1; }
+                            // Circuit breaker tripped in the miner (repeated hard errors): stop cleanly so the UI
+                            // doesn't keep showing "Mining" forever.
+                            Some("fatal") => { mining.store(false, Ordering::SeqCst); ready.store(false, Ordering::SeqCst); }
                             _ => {}
                         }
                     }
@@ -605,8 +643,9 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
                 if total > prev_total {
                     mined.fetch_add(total - prev_total, Ordering::SeqCst);
                     prev_total = total;
-                    if let Some(hs) = last_hs { *hashrate.lock().unwrap() = hs; }
                 }
+                // Update the shown speed on every pass (from accepted OR periodic hashrate events), not only on new blocks.
+                if let Some(hs) = last_hs { *hashrate.lock().unwrap() = hs; }
                 stale.store(total_stale, Ordering::SeqCst); // recomputed each pass from the current session's log
             }
         });
@@ -995,6 +1034,7 @@ pub fn run() {
             wallet_confirm_backup,
             wallet_summary,
             wallet_new_address,
+            wallet_addresses,
             wallet_send,
             wallet_history,
             miner_start,

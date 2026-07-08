@@ -198,7 +198,8 @@ function fmtDuration(secs) {
 async function refreshMine() {
   const s = await window.brisvia.getStatus();
   mining = s.mining;
-  const preparing = mining && s.preparing;
+  // Suppress the "Preparing…" flash for a few seconds after a live power change (the engine relaunches behind the scenes).
+  const preparing = mining && s.preparing && Date.now() > suppressPreparingUntil;
   const toggle = $('#toggle');
   // While the node catches up with the network (and is not already mining), mining is not allowed yet.
   if (syncing && !mining) {
@@ -249,19 +250,27 @@ $('#toggle').addEventListener('click', async () => {
 function pctOf(v) { return ({ suave: '25', equilibrado: '50', intenso: '100' })[v] || String(parseInt(v, 10) || 50); }
 function currentIntensity() { return String($('#pow-range')?.value || '50'); }
 let POW_CORES = 0; // real core count, filled from miner_status
+let suppressPreparingUntil = 0; // after a live power change, keep showing "Mining" instead of "Preparing…" for a few seconds
 function powThreads(pct) { return POW_CORES > 0 ? Math.max(1, Math.ceil((POW_CORES * pct) / 100)) : 0; }
 function refreshPowLabel() {
   const lbl = $('#pow-val'); if (!lbl) return;
   const pct = parseInt($('#pow-range')?.value || '50', 10);
   lbl.textContent = POW_CORES > 0 ? pct + '% · ' + T('mine.cores_of', { n: powThreads(pct), t: POW_CORES }) : pct + '%';
 }
+// Which named preset the slider value maps to (Light/Balanced/High/Max), by nearest range.
+function nearestPreset(pct) { return pct <= 37 ? 25 : pct <= 62 ? 50 : pct <= 87 ? 75 : 100; }
 function setPower(pct, apply) {
   pct = Math.max(1, Math.min(100, parseInt(pct, 10) || 50));
   const r = $('#pow-range'); if (r) r.value = pct;
   refreshPowLabel();
-  // Highlight the shortcut button only when it matches exactly.
-  $$('.mine-grid .seg-btn').forEach((x) => x.classList.toggle('active', parseInt(x.dataset.pct, 10) === pct));
-  if (apply) window.brisvia.setIntensity(String(pct)); // applies live (backend relaunches the engine)
+  // Auto-select the nearest named preset in BOTH controls (Mine and Settings) so they stay in sync.
+  const np = nearestPreset(pct);
+  $$('.mine-grid .seg-btn, #set-intensity .seg-btn').forEach((x) => x.classList.toggle('active', parseInt(x.dataset.pct, 10) === np));
+  if (apply) {
+    window.brisvia.setIntensity(String(pct)); // applies live (backend relaunches the engine)
+    window.brisvia.settings.set('defaultIntensity', String(pct)); // remember as the default too
+    if (mining) suppressPreparingUntil = Date.now() + 6000; // hide the brief "Preparing…" flash during the relaunch
+  }
 }
 $$('.mine-grid .seg-btn').forEach((b) => b.addEventListener('click', () => setPower(b.dataset.pct, true)));
 {
@@ -350,7 +359,17 @@ $('#recv-copy').addEventListener('click', async () => {
   const addr = $('#recv-addr').textContent;
   try { await navigator.clipboard.writeText(addr); $('#recv-copy').textContent = T('receive.copied_addr'); setTimeout(() => ($('#recv-copy').textContent = T('receive.copy_addr')), 1500); } catch {}
 });
+// History of generated addresses (oldest first, numbered).
+$('#recv-history-toggle').addEventListener('click', async () => {
+  const ol = $('#recv-history');
+  if (!ol.hidden) { ol.hidden = true; return; }
+  const list = (await window.brisvia.wallet.addresses()) || [];
+  ol.innerHTML = '';
+  list.forEach((a) => { const li = document.createElement('li'); li.innerHTML = `<code class="mono">${a}</code>`; ol.appendChild(li); });
+  ol.hidden = false;
+});
 function showReceive(addr) {
+  $('#recv-history').hidden = true;
   $('#recv-addr').textContent = addr || '';
   $('#qr').innerHTML = fakeQR(addr || '');
   openModal('modal-receive');
@@ -387,19 +406,12 @@ async function loadSettings() {
   const s = await window.brisvia.settings.get();
   $('#set-autostart').checked = !!s.autostart;
   $('#set-tray').checked = s.tray !== false;
-  { const dp = pctOf(s.defaultIntensity);
-    $$('#set-intensity .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.pct === dp));
-    setPower(parseInt(dp, 10), false); } // sync the Mine slider with the saved default power
+  setPower(parseInt(pctOf(s.defaultIntensity), 10), false); // sync both power controls with the saved default
   $$('#set-language .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.lang === window.I18N.lang));
 }
 $('#set-autostart').addEventListener('change', (e) => window.brisvia.settings.set('autostart', e.target.checked));
 $('#set-tray').addEventListener('change', (e) => window.brisvia.settings.set('tray', e.target.checked));
-$$('#set-intensity .seg-btn').forEach((b) => b.addEventListener('click', () => {
-  $$('#set-intensity .seg-btn').forEach((x) => x.classList.remove('active'));
-  b.classList.add('active');
-  window.brisvia.settings.set('defaultIntensity', b.dataset.pct);
-  setPower(parseInt(b.dataset.pct, 10), false); // keep the Mine slider in sync with the chosen default
-}));
+$$('#set-intensity .seg-btn').forEach((b) => b.addEventListener('click', () => setPower(parseInt(b.dataset.pct, 10), true)));
 // Selector de idioma
 $$('#set-language .seg-btn').forEach((b) => b.addEventListener('click', () => {
   window.I18N.setLang(b.dataset.lang);
@@ -411,14 +423,19 @@ $$('.social').forEach((b) => b.addEventListener('click', () => window.brisvia.op
 $('#set-security').addEventListener('click', () => openModal('modal-security'));
 
 // ===================== Actualizaciones (auto-actualizador) =====================
-// Al iniciar chequea si hay una versión nueva firmada; si la hay, muestra un aviso con un botón
+// On startup (and every 6h) it checks for a new signed version; if there is one, it shows a pop-up with a button
 // that downloads it, verifies its signature, installs and restarts. It can also be checked manually from Settings.
+let updatePendingVersion = null;
 async function checkForUpdate(manual) {
   const btn = $('#set-update');
   if (manual && btn) { btn.disabled = true; btn.textContent = T('update.checking'); }
   let res = null;
   try { res = window.brisvia.checkUpdate ? await window.brisvia.checkUpdate() : null; } catch {}
   if (res && res.available) {
+    updatePendingVersion = res.version;
+    let dismissed = null; try { dismissed = localStorage.getItem('brv_update_dismissed'); } catch {}
+    // On the automatic check, don't nag again if the user already chose "Later" for THIS version.
+    if (!manual && dismissed === res.version) { if (btn) { btn.disabled = false; btn.textContent = T('update.check'); } return; }
     openModal('modal-update'); // pop-up: OK installs, Later dismisses
     if (btn) { btn.disabled = false; btn.textContent = T('update.check'); }
   } else if (manual && btn) {
@@ -435,7 +452,10 @@ async function installUpdate() {
 }
 if ($('#set-update')) $('#set-update').addEventListener('click', () => checkForUpdate(true));
 if ($('#upd-ok')) $('#upd-ok').addEventListener('click', installUpdate);
-if ($('#upd-later')) $('#upd-later').addEventListener('click', () => closeModal('modal-update'));
+if ($('#upd-later')) $('#upd-later').addEventListener('click', () => {
+  try { if (updatePendingVersion) localStorage.setItem('brv_update_dismissed', updatePendingVersion); } catch {}
+  closeModal('modal-update');
+});
 
 // See the 12 words: they are requested from the backend on the spot; they are not saved in any file.
 $('#sec-view').addEventListener('click', async () => {
@@ -586,6 +606,8 @@ async function init() {
   updateTestnetBanner();
   // Auto-check for updates on startup (non-blocking): if there is a new version, the notice appears.
   setTimeout(() => { checkForUpdate(false); }, 3000);
+  // Also check periodically so someone who leaves the app open for days still gets the update pop-up on its own.
+  setInterval(() => { checkForUpdate(false); }, 6 * 60 * 60 * 1000); // every 6 hours
 
   if (window.brisvia.isReal) {
     $('#setup').hidden = true;

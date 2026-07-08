@@ -31,6 +31,7 @@
         summary: () => call('wallet_summary'),
         history: () => call('wallet_history'),
         newAddress: () => call('wallet_new_address'),
+        addresses: () => call('wallet_addresses'),
         send: (address, amount) => call('wallet_send', { address, amount }),
         txDetail: (txid) => call('tx_detail', { txid }),
         backup: () => call('wallet_backup'),
@@ -108,7 +109,8 @@
         return { balance: 0, immature: 0, incoming: 0, pending: 0, address: w.address || '', backed_up: !!w.backed_up };
       },
       history: async () => [],
-      newAddress: async () => { const w = LS.get('brv_wallet', {}); w.address = genAddress(); LS.set('brv_wallet', w); return { address: w.address }; },
+      newAddress: async () => { const w = LS.get('brv_wallet', {}); const list = LS.get('brv_addrs', []); if (w.address) list.push(w.address); w.address = genAddress(); list.push(w.address); LS.set('brv_addrs', [...new Set(list)]); LS.set('brv_wallet', w); return { address: w.address }; },
+      addresses: async () => { const w = LS.get('brv_wallet', {}); const list = LS.get('brv_addrs', []); if (w.address && !list.includes(w.address)) list.push(w.address); return list; },
       send: async () => ({ ok: false, error: 'ERR:INSUFFICIENT_FUNDS' }),
       txDetail: async () => ({ txid: 'demo', amount: 0, confirmations: 0, blockheight: 0, time: 0 }),
       backup: async () => ({ ok: true, path: 'C:/Users/…/Documents/Brisvia-backups/brisvia-wallet.dat' }),
