@@ -17,7 +17,7 @@ body {
     var(--bg);
   color: var(--text);
   font-family: "IBM Plex Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
-  font-size: 15px; line-height: 1.5; -webkit-font-smoothing: antialiased;
+  font-size: 16px; line-height: 1.55; -webkit-font-smoothing: antialiased;
   display: flex; flex-direction: column; min-height: 100vh; user-select: none;
 }
 .muted { color: var(--muted); }
@@ -153,6 +153,11 @@ h1 { font-size: 26px; line-height: 1.14; letter-spacing: -.02em; max-width: 15ch
 .seg-btn { font: inherit; font-weight: 600; color: var(--muted); background: transparent; border: 0; border-radius: 9px; padding: 8px 16px; cursor: pointer; transition: all .15s ease; }
 .seg-btn.active { background: var(--brand-soft); color: var(--brand); box-shadow: inset 0 0 0 1px rgba(53,191,197,.35); }
 .small-seg .seg-btn { padding: 6px 12px; font-size: 13px; }
+.pow-slider { display: flex; align-items: center; gap: 12px; margin-top: 2px; }
+.pow-slider input[type=range] { flex: 1; -webkit-appearance: none; appearance: none; height: 6px; border-radius: 999px; background: var(--surface); border: 1px solid var(--border); cursor: pointer; }
+.pow-slider input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 18px; height: 18px; border-radius: 50%; background: var(--brand); border: 2px solid #0B1117; cursor: pointer; box-shadow: 0 1px 4px rgba(0,0,0,.4); }
+.pow-slider input[type=range]::-moz-range-thumb { width: 18px; height: 18px; border-radius: 50%; background: var(--brand); border: 2px solid #0B1117; cursor: pointer; }
+.pow-val { min-width: 44px; text-align: right; font-weight: 600; color: var(--text); }
 .contrib { background: linear-gradient(160deg, var(--surface-2), var(--surface)); border: 1px solid var(--border); border-radius: 18px; padding: 20px; box-shadow: var(--shadow); }
 .contrib h3 { margin-bottom: 14px; font-size: 15px; letter-spacing: .02em; }
 .metric { padding: 10px 0; border-bottom: 1px solid rgba(38,54,66,.7); }

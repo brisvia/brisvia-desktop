@@ -31,6 +31,7 @@ struct AppState {
     receive_addr: Arc<Mutex<String>>,
     mining: Arc<AtomicBool>,
     mined: Arc<AtomicU64>,
+    stale: Arc<AtomicU64>, // blocks we found that arrived late (another block won the height) — normal on a shared net
     mine_start: Arc<Mutex<Option<Instant>>>,
     intensity: Arc<Mutex<String>>,
     // The real mining engine process (sidecar brisvia-worker.exe, named differently from the window process so
@@ -512,13 +513,17 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
     *state.hashrate.lock().unwrap() = 0.0;
     state.miner_ready.store(false, Ordering::SeqCst); // starts "preparing" until the engine's first event
 
-    // How many cores, based on the chosen intensity.
+    // How many cores to use. `intensity` is a percentage "1".."100" of the machine's cores (fallback 50%).
+    // Legacy named values (suave/equilibrado/intenso) map to 25/50/100 for backward compatibility.
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
-    let threads = match state.intensity.lock().unwrap().as_str() {
-        "suave" => 1usize,
-        "intenso" => cores,
-        _ => (cores / 2).max(1),
-    };
+    let pct = match state.intensity.lock().unwrap().as_str() {
+        "suave" => 25usize,
+        "equilibrado" => 50,
+        "intenso" => 100,
+        s => s.parse::<usize>().unwrap_or(50),
+    }
+    .clamp(1, 100);
+    let threads = ((cores * pct + 99) / 100).max(1); // ceil(cores * pct / 100), at least 1
     state.miner_threads.store(threads as u64, Ordering::SeqCst);
 
     // Node cookie auth (never exposed in logs): the .cookie file contains "user:password".
@@ -568,6 +573,7 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
     // Thread that follows the events file and updates accepted contributions + real hashrate.
     {
         let mined = state.mined.clone();
+        let stale = state.stale.clone();
         let hashrate = state.hashrate.clone();
         let mining = state.mining.clone();
         let ready = state.miner_ready.clone();
@@ -579,6 +585,7 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
                 std::thread::sleep(Duration::from_millis(500));
                 let f = match std::fs::File::open(&events_path) { Ok(f) => f, Err(_) => continue };
                 let mut total = 0u64;
+                let mut total_stale = 0u64;
                 let mut last_hs: Option<f64> = None;
                 for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
                     if let Ok(evt) = serde_json::from_str::<Value>(&line) {
@@ -590,6 +597,7 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
                                 total += 1;
                                 if let Some(hs) = evt["hashrate"].as_f64() { last_hs = Some(hs); }
                             }
+                            Some("stale") => { ready.store(true, Ordering::SeqCst); total_stale += 1; }
                             _ => {}
                         }
                     }
@@ -599,6 +607,7 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
                     prev_total = total;
                     if let Some(hs) = last_hs { *hashrate.lock().unwrap() = hs; }
                 }
+                stale.store(total_stale, Ordering::SeqCst); // recomputed each pass from the current session's log
             }
         });
     }
@@ -628,8 +637,18 @@ fn miner_stop(state: State<AppState>) -> Value {
 }
 
 #[tauri::command]
-fn miner_set_intensity(state: State<AppState>, intensity: String) -> Value {
+fn miner_set_intensity(app: AppHandle, state: State<AppState>, intensity: String) -> Value {
     *state.intensity.lock().unwrap() = intensity.clone();
+    // If mining right now, apply the new setting live: stop the current engine and relaunch it with the
+    // new thread count. Without this, changing intensity mid-mining had no effect until the next stop/start.
+    if state.mining.load(Ordering::SeqCst) {
+        if let Some(mut child) = state.miner_child.lock().unwrap().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        state.mining.store(false, Ordering::SeqCst);
+        return miner_start(app, state, Some(intensity));
+    }
     json!({ "intensity": intensity })
 }
 
@@ -650,6 +669,7 @@ fn miner_status(state: State<AppState>) -> Value {
         "mining": mining,
         "preparing": preparing,
         "accepted": state.mined.load(Ordering::SeqCst),
+        "stale": state.stale.load(Ordering::SeqCst),
         "secondsMining": if mining { secs } else { 0 },
         // REAL hashrate reported by the miner (CPU hashes per second)
         "hashrate": if mining { *state.hashrate.lock().unwrap() } else { 0.0 },
@@ -815,6 +835,7 @@ pub fn run() {
         receive_addr: Arc::new(Mutex::new(String::new())),
         mining: Arc::new(AtomicBool::new(false)),
         mined: Arc::new(AtomicU64::new(0)),
+        stale: Arc::new(AtomicU64::new(0)),
         mine_start: Arc::new(Mutex::new(None)),
         intensity: Arc::new(Mutex::new("equilibrado".to_string())),
         miner_child: Arc::new(Mutex::new(None)),
@@ -874,11 +895,19 @@ pub fn run() {
                 return Ok(());
             }
             let handle = app.handle().clone();
-            let state = app.state::<AppState>();
-            // start the node
-            if let Err(e) = start_node(&handle, &state) {
-                eprintln!("[brisvia] could not start the node: {}", e);
+            // Start the node in the background, shortly after the window is up, so the UI becomes interactive
+            // first and Windows doesn't flag the window as "not responding" while the node spins up.
+            {
+                let node_handle = handle.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(700));
+                    let state = node_handle.state::<AppState>();
+                    if let Err(e) = start_node(&node_handle, &state) {
+                        eprintln!("[brisvia] could not start the node: {}", e);
+                    }
+                });
             }
+            let state = app.state::<AppState>();
             // System tray: notification-area icon + menu (Open / Exit).
             {
                 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
