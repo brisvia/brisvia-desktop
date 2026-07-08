@@ -29,7 +29,12 @@
     "category": "Utility",
     "publisher": "Brisvia",
     "shortDescription": "Mine Brisvia with your CPU and join the network.",
-    "icon": ["icons/icon.png"],
-    "resources": ["binaries/bitcoind.exe", "binaries/bitcoin-cli.exe", "binaries/brisvia-worker.exe"]
+    "icon": ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"],
+    "resources": ["binaries/bitcoind.exe", "binaries/bitcoin-cli.exe", "binaries/brisvia-worker.exe"],
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico"
+      }
+    }
   }
 }
