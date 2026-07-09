@@ -136,8 +136,8 @@
     openUrl: async (url) => { window.open(url, '_blank'); },
     systemLocale: async () => navigator.language || 'en',
     setLanguage: async () => ({ ok: true }),
-    appVersion: async () => '0.4.0',
-    checkUpdate: async () => ({ available: false, currentVersion: '0.1.0' }),
+    appVersion: async () => '0.4.1',
+    checkUpdate: async () => ({ available: false, currentVersion: '0.4.1' }),
     installUpdate: async () => ({ ok: true }),
     // Preview-only achievements: same 50 definitions as the backend, with a demo unlocked count per family so the
     // Achievements view renders in a plain browser without Tauri. The real backend derives these from the wallet.

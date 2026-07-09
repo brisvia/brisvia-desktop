@@ -73,7 +73,7 @@ window.LOCALES = {
       speed: 'Velocidad', blocks_found: 'BRVA minados', cpu_use: 'Uso del procesador',
       stale_blocks: 'Trabajo que llegó tarde', stale_hint: 'Normal en una red compartida: otro encontró el bloque primero.',
       session_time: 'Esta sesión', total_time: 'Tiempo total minado',
-      unit_min: 'min', unit_h: 'h', unit_s: 's',
+      unit_d: 'd', unit_min: 'min', unit_h: 'h', unit_s: 's',
       note: 'Estadísticas de esta sesión y de tu actividad total de minado.',
     },
     ach: {
@@ -307,7 +307,7 @@ window.LOCALES = {
       speed: 'Speed', blocks_found: 'BRVA mined', cpu_use: 'Processor usage',
       stale_blocks: 'Work that arrived late', stale_hint: 'Normal on a shared network: someone found the block first.',
       session_time: 'This session', total_time: 'Total mining time',
-      unit_min: 'min', unit_h: 'h', unit_s: 's',
+      unit_d: 'd', unit_min: 'min', unit_h: 'h', unit_s: 's',
       note: 'Statistics for this session and your total mining activity.',
     },
     ach: {
