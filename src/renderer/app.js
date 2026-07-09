@@ -231,12 +231,19 @@ function fmtHashrate(hs) {
   if (hs >= 1000) return `${(hs / 1000).toFixed(2)} <span class="unit">kH/s</span>`;
   return `${Math.round(hs)} <span class="unit">H/s</span>`;
 }
+// Mining time, broken down into days / hours / minutes / seconds. Once there are days, all four levels
+// are shown; below a day we start at the largest non-zero unit so we never print leading "0d 0h".
 function fmtDuration(secs) {
   secs = Math.floor(secs || 0);
-  const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), s = secs % 60;
-  if (h > 0) return `${h} <span class="unit">${T('mine.unit_h')}</span> ${m} <span class="unit">${T('mine.unit_min')}</span>`;
-  if (m > 0) return `${m} <span class="unit">${T('mine.unit_min')}</span> ${s} <span class="unit">${T('mine.unit_s')}</span>`;
-  return `${s} <span class="unit">${T('mine.unit_s')}</span>`;
+  const d = Math.floor(secs / 86400);
+  const h = Math.floor((secs % 86400) / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = secs % 60;
+  const u = (val, key) => `${val} <span class="unit">${T('mine.' + key)}</span>`;
+  if (d > 0) return `${u(d, 'unit_d')} ${u(h, 'unit_h')} ${u(m, 'unit_min')} ${u(s, 'unit_s')}`;
+  if (h > 0) return `${u(h, 'unit_h')} ${u(m, 'unit_min')} ${u(s, 'unit_s')}`;
+  if (m > 0) return `${u(m, 'unit_min')} ${u(s, 'unit_s')}`;
+  return u(s, 'unit_s');
 }
 async function refreshMine() {
   const s = await window.brisvia.getStatus();
@@ -360,7 +367,9 @@ async function loadWallet() {
 // ---- Movements with pagination (no long scroll: N per page + ‹ 1 2 3 › controls) ----
 let walletHistory = [];
 let historyPage = 0;
-const HIST_PER_PAGE = 8;
+// 6 per page keeps the whole Wallet view scroll-free at the default window size (with the testnet banner on top)
+// and keeps the Activity column about the same height as the balance + network panels on the left.
+const HIST_PER_PAGE = 6;
 function renderHistoryPage() {
   const list = $('#history-list'), empty = $('#history-empty'), pager = $('#history-pager');
   list.innerHTML = '';
@@ -382,33 +391,45 @@ function renderHistoryPage() {
   renderPager(pager, Math.ceil(walletHistory.length / HIST_PER_PAGE));
 }
 // Renders ‹ 1 2 3 › — a windowed set of page numbers around the current page (with gaps), plus prev/next arrows.
+// The arrows are anchored to the edges and the numbers live in a centered block with a RESERVED (fixed) width,
+// so the ‹ and › buttons never shift when the middle numbers change width between pages.
 function renderPager(pager, total) {
   if (!pager) return;
   pager.innerHTML = '';
   if (total <= 1) { pager.hidden = true; return; }
   pager.hidden = false;
   const go = (p) => { historyPage = Math.max(0, Math.min(total - 1, p)); renderHistoryPage(); };
-  const addBtn = (label, page, opts = {}) => {
+  const mkBtn = (label, page, opts = {}) => {
     const b = document.createElement('button');
     b.textContent = label;
     if (opts.active) b.classList.add('active');
     if (opts.disabled) b.disabled = true;
     if (opts.aria) b.setAttribute('aria-label', opts.aria);
-    if (!opts.disabled) b.addEventListener('click', () => go(page));
-    pager.appendChild(b);
+    if (!opts.disabled && page != null) b.addEventListener('click', () => go(page));
+    return b;
   };
-  const addGap = () => { const s = document.createElement('span'); s.className = 'pager-gap'; s.textContent = '…'; pager.appendChild(s); };
-  addBtn('‹', historyPage - 1, { disabled: historyPage === 0, aria: T('wallet.prev_page') });
+  // Previous arrow (fixed left position).
+  pager.appendChild(mkBtn('‹', historyPage - 1, { disabled: historyPage === 0, aria: T('wallet.prev_page') }));
+  // Centered numbers block. Its width is reserved for this list's worst case (5 numbers + up to 2 gaps),
+  // matching the CSS metrics (32px per number, 18px per gap, 4px flex gaps), so it never grows or shrinks
+  // as the page changes and the arrows stay put.
+  const nums = document.createElement('div');
+  nums.className = 'pager-nums';
+  const btnCount = Math.min(total, 5);
+  const gapCount = total <= 5 ? 0 : (total === 6 ? 1 : 2);
+  nums.style.width = (btnCount * 32 + gapCount * 18 + Math.max(0, btnCount + gapCount - 1) * 4) + 'px';
   // Window of pages: always show first and last, plus current ±1, with gaps in between.
-  const nums = new Set([0, total - 1, historyPage, historyPage - 1, historyPage + 1]);
-  const shown = [...nums].filter((n) => n >= 0 && n < total).sort((a, b) => a - b);
+  const set = new Set([0, total - 1, historyPage, historyPage - 1, historyPage + 1]);
+  const shown = [...set].filter((n) => n >= 0 && n < total).sort((a, b) => a - b);
   let prev = -1;
   shown.forEach((n) => {
-    if (n - prev > 1) addGap();
-    addBtn(String(n + 1), n, { active: n === historyPage });
+    if (n - prev > 1) { const s = document.createElement('span'); s.className = 'pager-gap'; s.textContent = '…'; nums.appendChild(s); }
+    nums.appendChild(mkBtn(String(n + 1), n, { active: n === historyPage }));
     prev = n;
   });
-  addBtn('›', historyPage + 1, { disabled: historyPage === total - 1, aria: T('wallet.next_page') });
+  pager.appendChild(nums);
+  // Next arrow (fixed right position).
+  pager.appendChild(mkBtn('›', historyPage + 1, { disabled: historyPage === total - 1, aria: T('wallet.next_page') }));
 }
 function fmt(n) { return window.I18N.fmtNum(n, { maximumFractionDigits: 8, useGrouping: false }); }
 function fmtDate(epoch) { return window.I18N.fmtDate(epoch); }

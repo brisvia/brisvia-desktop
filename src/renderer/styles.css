@@ -50,10 +50,15 @@ h1, h2, h3 { margin: 0; }
 
 /* Content / views */
 .content { flex: 1; padding: 24px 26px; max-width: 1120px; width: 100%; margin: 0 auto; }
-/* On wide screens (when maximized) the Wallet uses 2 columns to avoid empty areas. */
+/* On wide screens (when maximized) the Wallet uses 2 columns to avoid empty areas.
+   Both columns stretch to the same height so their bottom borders line up; the Activity panel
+   becomes a flex column and pins its pager to the bottom edge. */
 @media (min-width: 920px) {
-  .view[data-view="wallet"] { display: grid; grid-template-columns: 400px 1fr; gap: 22px; align-items: start; }
-  .view[data-view="wallet"] .movimientos { margin-top: 0; height: 100%; }
+  .view[data-view="wallet"] { display: grid; grid-template-columns: 400px 1fr; gap: 22px; align-items: stretch; }
+  .view[data-view="wallet"] .movimientos { margin-top: 0; height: 100%; display: flex; flex-direction: column; }
+  .view[data-view="wallet"] .movimientos .pager { margin-top: auto; padding-top: 12px; }
+  /* The network panel grows to fill the leftover height so the left column bottom reaches the same line. */
+  .view[data-view="wallet"] .wallet-left .net-panel { flex: 1 1 auto; }
 }
 .wallet-left { display: flex; flex-direction: column; gap: 18px; }
 .wallet-left .balance-card, .wallet-left .panel { margin-top: 0; }
@@ -347,13 +352,17 @@ h1 { font-size: 26px; line-height: 1.14; letter-spacing: -.02em; max-width: 15ch
 .ach-toast-tag { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--brand); }
 .ach-toast-name { font-size: 13.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .02em; }
 
-/* ---- Activity pagination ---- */
-.pager { display: flex; align-items: center; justify-content: center; gap: 4px; margin-top: 12px; flex-wrap: wrap; }
-.pager button { font: inherit; font-size: 12.5px; font-weight: 600; min-width: 30px; height: 30px; padding: 0 8px; color: var(--muted); background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; transition: all .12s ease; }
+/* ---- Activity pagination ----
+   Arrows sit at the edges; the numbers live in a centered, fixed-width block (.pager-nums) so the
+   ‹ › buttons never move when the middle numbers change width between pages. Fixed-width buttons +
+   tabular-nums keep every digit slot identical, so the reserved width is exact. */
+.pager { display: flex; align-items: center; justify-content: center; gap: 4px; margin-top: 12px; }
+.pager-nums { display: flex; align-items: center; justify-content: center; gap: 4px; }
+.pager button { font: inherit; font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; width: 32px; height: 30px; padding: 0; color: var(--muted); background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; transition: all .12s ease; }
 .pager button:hover:not(:disabled) { color: var(--brand); border-color: var(--brand); }
 .pager button.active { background: var(--brand-soft); color: var(--brand); border-color: var(--brand); }
 .pager button:disabled { opacity: .4; cursor: not-allowed; }
-.pager .pager-gap { color: var(--muted); padding: 0 2px; align-self: center; font-size: 12.5px; }
+.pager .pager-gap { color: var(--muted); width: 18px; text-align: center; align-self: center; font-size: 12.5px; }
 
 /* Compact adjustments for narrow / minimum-size windows (keeps every view scroll-free). */
 @media (max-width: 860px) {
