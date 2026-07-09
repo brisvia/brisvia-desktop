@@ -395,9 +395,26 @@ fn node_info(state: State<AppState>) -> Value {
 #[tauri::command]
 fn tx_detail(state: State<AppState>, txid: String) -> Result<Value, String> {
     let tx = rpc(&state.datadir, Some(WALLET_NAME), "gettransaction", json!([txid]))?;
+    // A mined (coinbase) block reports amount 0 at the top level until it matures; the real reward lives in "details".
+    let details = tx["details"].as_array();
+    let is_coinbase = details
+        .map(|d| d.iter().any(|x| matches!(x["category"].as_str(), Some("immature") | Some("generate"))))
+        .unwrap_or(false);
+    let amount = if is_coinbase {
+        details
+            .map(|d| {
+                d.iter()
+                    .filter(|x| matches!(x["category"].as_str(), Some("immature") | Some("generate")))
+                    .filter_map(|x| x["amount"].as_f64())
+                    .sum::<f64>()
+            })
+            .unwrap_or(0.0)
+    } else {
+        tx["amount"].as_f64().unwrap_or(0.0)
+    };
     Ok(json!({
         "txid": tx["txid"],
-        "amount": tx["amount"],
+        "amount": amount,
         "confirmations": tx["confirmations"],
         "blockhash": tx["blockhash"],
         "blockheight": tx["blockheight"],
@@ -708,6 +725,36 @@ mod seed_crypto_tests {
     }
 }
 
+// Update the notification-area tooltip so it always matches the current language and mining state.
+// Called on start/stop/intensity change AND on language change, so it never gets stuck in the wrong language.
+fn refresh_tooltip(state: &AppState) {
+    let tray_guard = state.tray.lock().unwrap();
+    let tray = match tray_guard.as_ref() {
+        Some(t) => t,
+        None => return,
+    };
+    let lang = state.lang.lock().unwrap().clone();
+    let tip = if state.mining.load(Ordering::SeqCst) {
+        let pct = match state.intensity.lock().unwrap().as_str() {
+            "suave" => 25usize,
+            "equilibrado" => 50,
+            "intenso" => 100,
+            s => s.parse::<usize>().unwrap_or(50),
+        }
+        .clamp(1, 100);
+        let threads = state.miner_threads.load(Ordering::SeqCst);
+        let cores = state.cores;
+        if lang == "es" {
+            format!("Brisvia — Minando al {}% · {} de {} núcleos", pct, threads, cores)
+        } else {
+            format!("Brisvia — Mining at {}% · {} of {} cores", pct, threads, cores)
+        }
+    } else {
+        "Brisvia".to_string()
+    };
+    let _ = tray.set_tooltip(Some(&tip));
+}
+
 #[tauri::command]
 fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>) -> Value {
     if let Some(i) = intensity {
@@ -736,16 +783,8 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
     .clamp(1, 100);
     let threads = ((cores * pct + 99) / 100).max(1); // ceil(cores * pct / 100), at least 1
     state.miner_threads.store(threads as u64, Ordering::SeqCst);
-    // Tray tooltip: show the mining power in plain words on hover over the notification-area icon.
-    if let Some(tray) = state.tray.lock().unwrap().as_ref() {
-        let lang = state.lang.lock().unwrap().clone();
-        let tip = if lang == "es" {
-            format!("Brisvia — Minando al {}% · {} de {} núcleos", pct, threads, cores)
-        } else {
-            format!("Brisvia — Mining at {}% · {} of {} cores", pct, threads, cores)
-        };
-        let _ = tray.set_tooltip(Some(&tip));
-    }
+    // Tray tooltip: show the mining power in plain words, in the current language.
+    refresh_tooltip(&state);
 
     // Node cookie auth (never exposed in logs): the .cookie file contains "user:password".
     let cookie = std::fs::read_to_string(state.datadir.join(NET_SUBDIR).join(".cookie")).unwrap_or_default();
@@ -863,6 +902,7 @@ fn miner_stop(state: State<AppState>) -> Value {
     }
     *state.hashrate.lock().unwrap() = 0.0;
     state.miner_ready.store(false, Ordering::SeqCst);
+    refresh_tooltip(&state); // mining stopped → tooltip goes back to plain "Brisvia"
     json!({ "mining": false })
 }
 
@@ -989,6 +1029,7 @@ fn set_language(app: AppHandle, state: State<AppState>, lang: String) {
             let _ = tray.set_menu(Some(menu));
         }
     }
+    refresh_tooltip(&state); // keep the notification-area tooltip in sync with the new language
 }
 
 // ---- Auto-updater --------------------------------------------------------

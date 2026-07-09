@@ -96,7 +96,7 @@ jobs:
       - name: Attach the .dmg and the signed updater artifact to the release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.2.0
+          tag_name: v0.3.0
           files: |
             src-tauri/target/release/bundle/dmg/*.dmg
             Brisvia-Miner-macOS.dmg

@@ -600,7 +600,13 @@ $('#reveal-go').addEventListener('click', async () => {
 function openModal(id) { $('#' + id).hidden = false; }
 function closeModal(id) { $('#' + id).hidden = true; }
 $$('[data-close]').forEach((b) => b.addEventListener('click', (e) => { const ov = e.target.closest('.overlay'); if (ov) ov.hidden = true; }));
-$$('.overlay').forEach((ov) => ov.addEventListener('click', (e) => { if (e.target === ov && ov.id !== 'setup') ov.hidden = true; }));
+// Los pop-ups NO se cierran al tocar afuera (persisten, para no cerrarlos por accidente y perder lo escrito):
+// se cierran solo con la X, con los botones (Cancelar/etc.) o con la tecla Escape.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const open = $$('.overlay').filter((ov) => ov.id !== 'setup' && !ov.hidden).pop();
+  if (open) open.hidden = true;
+});
 
 // ===================== Estado de red (modo nodo real) =====================
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
