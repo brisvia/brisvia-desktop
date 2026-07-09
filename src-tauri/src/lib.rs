@@ -53,6 +53,32 @@ struct AppState {
     miner_threads: Arc<AtomicU64>,
     // Lifetime mining time in seconds, persisted to disk so the total survives restarts.
     total_mined_secs: Arc<Mutex<u64>>,
+    // Short-lived cache of the wallet metrics used to compute achievements. Scanning every transaction on each
+    // poll would be wasteful, so the expensive scan is reused for a few seconds; the unlocked/notified logic on
+    // top of it is always evaluated fresh.
+    ach_cache: Arc<Mutex<Option<(Instant, WalletMetrics)>>>,
+}
+
+// Real-mining start on the main network: 2026-08-01 15:00:00 UTC (12:00 Argentina). Kept in sync with the
+// frontend countdown. Used to award the "pioneer" milestone achievements from the chain (they travel with the seed).
+const MAINNET_START: i64 = 1_785_596_400;
+const ONE_DAY: i64 = 86_400;
+const HALVING_HEIGHT: i64 = 1_000_000;
+
+// Wallet numbers behind the 50 achievements. Everything is derived from the wallet/chain (never from the local
+// machine) so the achievements come back on their own when the 12 words are restored on another computer.
+#[derive(Clone, Default)]
+struct WalletMetrics {
+    blocks: u64,        // coinbase transactions (blocks this wallet mined)
+    balance: f64,       // spendable (trusted) balance in BRVA
+    sends: u64,         // outgoing payments
+    receives: u64,      // incoming payments (never coinbase)
+    first_time: i64,    // unix time of the wallet's earliest transaction (0 if none)
+    before_halving: bool, // mined a block below the first-halving height
+    first_day: bool,    // mined a block during the network's first day
+    first_week: bool,   // mined a block during the network's first week
+    first_month: bool,  // mined a block during the network's first month
+    after_year: bool,   // mined a block after the network's first year
 }
 
 // ---- dependency-free base64 (for the cookie's Basic auth header) ----
@@ -341,7 +367,8 @@ fn wallet_is_encrypted(datadir: &PathBuf) -> bool {
 
 #[tauri::command]
 fn wallet_history(state: State<AppState>) -> Value {
-    let txs = rpc(&state.datadir, Some(WALLET_NAME), "listtransactions", json!(["*", 25, 0]))
+    // Fetch a larger recent window (200) so the UI can paginate it (N per page) instead of one long scroll.
+    let txs = rpc(&state.datadir, Some(WALLET_NAME), "listtransactions", json!(["*", 200, 0]))
         .unwrap_or_else(|_| json!([]));
     let arr = txs.as_array().cloned().unwrap_or_default();
     // The UI localizes the label from `category`; this string is only a fallback.
@@ -951,6 +978,210 @@ fn miner_status(state: State<AppState>) -> Value {
     })
 }
 
+// ================= achievements (50, account-only, computed from the wallet) =================
+// All 50 achievements are derived from the wallet/chain, so they travel with the 12 words. The backend returns
+// only ids + numbers; the UI translates every text via i18n. See LOGROS-50-DISENO.md for the full spec.
+
+// Reads every wallet transaction (paged) plus the balance, and folds them into the metrics the achievements need.
+fn scan_wallet_metrics(datadir: &PathBuf) -> WalletMetrics {
+    let mut m = WalletMetrics::default();
+    if let Ok(bal) = rpc(datadir, Some(WALLET_NAME), "getbalances", json!([])) {
+        m.balance = bal["mine"]["trusted"].as_f64().unwrap_or(0.0);
+    }
+    // Page through listtransactions. count=1000 per page, capped at 200 pages (200k txs) as a safety limit; the
+    // largest threshold (10000 blocks / 250 sends) is well within that, so the counts stay correct.
+    let page: i64 = 1000;
+    let max_pages = 200;
+    let mut skip: i64 = 0;
+    let mut first_time = i64::MAX;
+    for i in 0..max_pages {
+        let txs = match rpc(datadir, Some(WALLET_NAME), "listtransactions", json!(["*", page, skip])) {
+            Ok(v) => v,
+            Err(_) => break,
+        };
+        let arr = txs.as_array().cloned().unwrap_or_default();
+        let n = arr.len() as i64;
+        for t in &arr {
+            let cat = t["category"].as_str().unwrap_or("");
+            let time = t["time"].as_i64().unwrap_or(0);
+            if time > 0 && time < first_time {
+                first_time = time;
+            }
+            match cat {
+                "generate" | "immature" => {
+                    m.blocks += 1;
+                    let height = t["blockheight"].as_i64().unwrap_or(i64::MAX);
+                    let btime = t["blocktime"].as_i64().unwrap_or(0);
+                    if height < HALVING_HEIGHT {
+                        m.before_halving = true;
+                    }
+                    if btime >= MAINNET_START && btime < MAINNET_START + ONE_DAY {
+                        m.first_day = true;
+                    }
+                    if btime >= MAINNET_START && btime < MAINNET_START + 7 * ONE_DAY {
+                        m.first_week = true;
+                    }
+                    if btime >= MAINNET_START && btime < MAINNET_START + 30 * ONE_DAY {
+                        m.first_month = true;
+                    }
+                    if btime >= MAINNET_START + 365 * ONE_DAY {
+                        m.after_year = true;
+                    }
+                }
+                "send" => m.sends += 1,
+                "receive" => m.receives += 1,
+                _ => {}
+            }
+        }
+        skip += page;
+        if n < page {
+            break;
+        }
+        if i == max_pages - 1 {
+            eprintln!("[brisvia] achievement scan hit the page cap; block counts may be truncated");
+        }
+    }
+    if first_time != i64::MAX {
+        m.first_time = first_time;
+    }
+    m
+}
+
+// Builds the full 50-item list (id, family, tier, unlocked, current, threshold) from the metrics. The order here
+// is the display order the UI relies on (family by family, medal by ascending tier).
+fn compute_achievements(m: &WalletMetrics) -> Vec<Value> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let age = if m.first_time > 0 { (now - m.first_time).max(0) } else { 0 };
+    let mut out: Vec<Value> = Vec::with_capacity(50);
+    let mut push = |id: String, family: &str, tier: &str, unlocked: bool, current: f64, threshold: f64| {
+        out.push(json!({
+            "id": id, "family": family, "tier": tier,
+            "unlocked": unlocked, "current": current, "threshold": threshold
+        }));
+    };
+
+    // A · MINED BLOCKS (12)
+    let blocks_th: [u64; 12] = [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000];
+    let blocks_tier = ["bronze", "bronze", "bronze", "silver", "silver", "gold", "gold", "gold", "emerald", "emerald", "diamond", "diamond"];
+    for i in 0..12 {
+        let th = blocks_th[i] as f64;
+        push(format!("blocks_{}", blocks_th[i]), "blocks", blocks_tier[i], m.blocks as f64 >= th, m.blocks as f64, th);
+    }
+    // B · BALANCE (10)
+    let bal_th: [u64; 10] = [50, 100, 250, 500, 1000, 2500, 5000, 10000, 50000, 100000];
+    let bal_tier = ["bronze", "bronze", "silver", "silver", "gold", "gold", "emerald", "emerald", "diamond", "diamond"];
+    for i in 0..10 {
+        let th = bal_th[i] as f64;
+        push(format!("balance_{}", bal_th[i]), "balance", bal_tier[i], m.balance >= th, m.balance, th);
+    }
+    // C · SENT (8)
+    let send_th: [u64; 8] = [1, 3, 5, 10, 25, 50, 100, 250];
+    let send_tier = ["bronze", "bronze", "silver", "silver", "gold", "gold", "emerald", "diamond"];
+    for i in 0..8 {
+        let th = send_th[i] as f64;
+        push(format!("sends_{}", send_th[i]), "sends", send_tier[i], m.sends as f64 >= th, m.sends as f64, th);
+    }
+    // D · RECEIVED (6)
+    let recv_th: [u64; 6] = [1, 3, 5, 10, 25, 50];
+    let recv_tier = ["bronze", "bronze", "silver", "silver", "gold", "diamond"];
+    for i in 0..6 {
+        let th = recv_th[i] as f64;
+        push(format!("receives_{}", recv_th[i]), "receives", recv_tier[i], m.receives as f64 >= th, m.receives as f64, th);
+    }
+    // E · NETWORK AGE (6)
+    let age_ids = ["age_week", "age_month", "age_3months", "age_6months", "age_year", "age_2years"];
+    let age_th: [i64; 6] = [7 * ONE_DAY, 30 * ONE_DAY, 90 * ONE_DAY, 180 * ONE_DAY, 365 * ONE_DAY, 730 * ONE_DAY];
+    let age_tier = ["bronze", "silver", "gold", "gold", "emerald", "diamond"];
+    for i in 0..6 {
+        push(age_ids[i].to_string(), "age", age_tier[i], m.first_time > 0 && age >= age_th[i], age as f64, age_th[i] as f64);
+    }
+    // F · PIONEER / NETWORK MILESTONES (5) — ordered by ascending tier for a clean progression.
+    let bool_num = |b: bool| if b { 1.0 } else { 0.0 };
+    push("first_month".into(), "pioneer", "silver", m.first_month, bool_num(m.first_month), 1.0);
+    push("pioneer".into(), "pioneer", "gold", m.first_day, bool_num(m.first_day), 1.0);
+    push("founder".into(), "pioneer", "gold", m.first_week, bool_num(m.first_week), 1.0);
+    push("before_halving".into(), "pioneer", "emerald", m.before_halving, bool_num(m.before_halving), 1.0);
+    push("guardian".into(), "pioneer", "diamond", m.after_year, bool_num(m.after_year), 1.0);
+    // G · RANK (3)
+    push("rank_active".into(), "rank", "silver", m.blocks >= 10, m.blocks as f64, 10.0);
+    let trio = m.blocks >= 1 && m.sends >= 1 && m.receives >= 1;
+    push("rank_trio".into(), "rank", "gold", trio, bool_num(trio), 1.0);
+    let legend = m.blocks >= 1000 && m.balance >= 10000.0;
+    push("rank_legend".into(), "rank", "diamond", legend, bool_num(legend), 1.0);
+
+    out
+}
+
+fn achievements_file(datadir: &PathBuf) -> PathBuf {
+    datadir.join("achievements.json")
+}
+
+// Returns the 50 achievements plus the ids that just unlocked (for a one-time toast). The first time this runs
+// for this version, everything already achieved is seeded silently (no toast burst); afterwards only genuinely
+// new unlocks are reported once and remembered in achievements.json.
+#[tauri::command]
+fn achievements(state: State<AppState>) -> Value {
+    // Until a wallet is actually loaded, return everything locked WITHOUT creating/seeding achievements.json.
+    // This makes the silent seed happen on the first call with a real wallet (so restoring a wallet with history
+    // does not fire a burst of toasts for everything it already achieved).
+    if !state.wallet_loaded.load(Ordering::SeqCst) {
+        let list = compute_achievements(&WalletMetrics::default());
+        return json!({ "list": list, "justUnlocked": [] });
+    }
+    let metrics = {
+        let mut cache = state.ach_cache.lock().unwrap();
+        let fresh = cache.as_ref().map(|(t, _)| t.elapsed() < Duration::from_secs(10)).unwrap_or(false);
+        if fresh {
+            cache.as_ref().unwrap().1.clone()
+        } else {
+            let m = scan_wallet_metrics(&state.datadir);
+            *cache = Some((Instant::now(), m.clone()));
+            m
+        }
+    };
+    let list = compute_achievements(&metrics);
+    let unlocked_ids: Vec<String> = list
+        .iter()
+        .filter(|a| a["unlocked"].as_bool().unwrap_or(false))
+        .filter_map(|a| a["id"].as_str().map(|s| s.to_string()))
+        .collect();
+
+    let path = achievements_file(&state.datadir);
+    let existed = path.exists();
+    let mut notified: Vec<String> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let mut just_unlocked: Vec<String> = Vec::new();
+
+    if !existed {
+        // First run for this version: adopt everything already achieved without announcing it.
+        notified = unlocked_ids.clone();
+        let _ = std::fs::write(&path, serde_json::to_string(&notified).unwrap_or_default());
+    } else {
+        for id in &unlocked_ids {
+            if !notified.iter().any(|x| x == id) {
+                notified.push(id.clone());
+                just_unlocked.push(id.clone());
+            }
+        }
+        if !just_unlocked.is_empty() {
+            let _ = std::fs::write(&path, serde_json::to_string(&notified).unwrap_or_default());
+        }
+    }
+
+    json!({ "list": list, "justUnlocked": just_unlocked })
+}
+
+// The real app version, resolved at compile time from Cargo.toml (so the UI never shows a stale hard-coded number).
+#[tauri::command]
+fn app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 // ================= settings =================
 #[tauri::command]
 fn settings_get(app: AppHandle, state: State<AppState>) -> Value {
@@ -1133,6 +1364,7 @@ pub fn run() {
         cores,
         miner_threads: Arc::new(AtomicU64::new(0)),
         total_mined_secs: Arc::new(Mutex::new(total_secs_initial)),
+        ach_cache: Arc::new(Mutex::new(None)),
     };
 
     let mut builder = tauri::Builder::default();
@@ -1306,7 +1538,9 @@ pub fn run() {
             system_locale,
             set_language,
             check_update,
-            install_update
+            install_update,
+            achievements,
+            app_version
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Brisvia")

@@ -185,12 +185,6 @@ h1 { font-size: 26px; line-height: 1.14; letter-spacing: -.02em; max-width: 15ch
 .set-row:last-child { border-bottom: 0; }
 .set-title { font-weight: 600; }
 .foot-note { text-align: center; margin-top: 16px; }
-/* Community / social */
-.community { margin-top: 18px; }
-.social-grid { display: flex; flex-wrap: wrap; gap: 8px; }
-.social { display: inline-flex; align-items: center; gap: 7px; font: inherit; font-size: 13px; font-weight: 600; color: var(--brand); background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; padding: 8px 15px; cursor: pointer; transition: all .15s ease; }
-.social svg { width: 15px; height: 15px; fill: currentColor; flex-shrink: 0; }
-.social:hover { border-color: var(--brand); background: var(--brand-soft); }
 /* switch */
 .switch { position: relative; display: inline-block; width: 46px; height: 26px; flex-shrink: 0; }
 .switch input { opacity: 0; width: 0; height: 0; }
@@ -288,4 +282,86 @@ h1 { font-size: 26px; line-height: 1.14; letter-spacing: -.02em; max-width: 15ch
   .mine-grid { grid-template-columns: 1fr; }
   .nav-btn { padding: 7px 11px; }
   .content { padding: 18px; }
+}
+
+/* ---- Header: version chip + social icons (visible from any view) ---- */
+.ver-chip { font-size: 11px; font-weight: 700; color: var(--muted); background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; padding: 2px 8px; letter-spacing: .02em; }
+.topbar-right { display: flex; align-items: center; gap: 14px; margin-left: auto; }
+.topbar-right .net { margin-left: 0; }
+.header-social { display: flex; align-items: center; gap: 4px; }
+.hsocial { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; padding: 0; color: var(--muted); background: transparent; border: 1px solid transparent; border-radius: 9px; cursor: pointer; transition: color .15s ease, background .15s ease, border-color .15s ease; }
+.hsocial svg { width: 16px; height: 16px; fill: currentColor; }
+.hsocial:hover { color: var(--brand); background: var(--brand-soft); border-color: var(--border); }
+/* Name shown on hover (no JS): sober tooltip below the icon. */
+.hsocial::after { content: attr(data-name); position: absolute; top: calc(100% + 8px); left: 50%; transform: translateX(-50%); white-space: nowrap; background: #0C1419; color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 5px 9px; font-size: 11.5px; font-weight: 600; opacity: 0; pointer-events: none; transition: opacity .14s ease; box-shadow: 0 10px 26px -12px rgba(0,0,0,.85); z-index: 40; }
+.hsocial:hover::after, .hsocial:focus-visible::after { opacity: 1; }
+
+/* ---- Achievements view ---- */
+.ach-sub { margin: 0 0 8px; line-height: 1.35; }
+.ach-families { display: flex; flex-direction: column; gap: 7px; }
+.ach-fam { display: flex; align-items: center; gap: 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 7px 14px; }
+.ach-fam-info { display: flex; align-items: center; gap: 9px; width: 210px; flex-shrink: 0; }
+.ach-fam-icon { width: 24px; height: 24px; color: var(--brand); flex-shrink: 0; display: inline-flex; }
+.ach-fam-icon svg { width: 100%; height: 100%; fill: currentColor; }
+.ach-fam-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.ach-fam-name { font-weight: 700; font-size: 11.5px; letter-spacing: .04em; text-transform: uppercase; line-height: 1.15; }
+.ach-fam-count { font-size: 11.5px; font-weight: 700; color: var(--muted); }
+.ach-medals { display: flex; align-items: center; gap: 10px; overflow-x: auto; overflow-y: hidden; padding: 3px 2px; flex: 1; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+.ach-medals::-webkit-scrollbar { height: 6px; }
+.ach-medals::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
+.ach-tile { flex: 0 0 auto; position: relative; cursor: default; outline: none; }
+.ach-medal { position: relative; width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; background: radial-gradient(circle at 34% 26%, var(--m-lo), var(--m-hi)); box-shadow: 0 4px 9px rgba(0,0,0,.4), inset 0 2px 3px rgba(255,255,255,.5), inset 0 -4px 7px rgba(0,0,0,.4); border: 3px solid var(--m-ring); }
+.ach-medal .ach-ico { width: 52%; height: 52%; fill: var(--m-ico); color: var(--m-ico); filter: drop-shadow(0 1px 1px rgba(0,0,0,.35)); position: relative; z-index: 2; }
+.ach-medal::before { content: ""; position: absolute; inset: 0; border-radius: 50%; z-index: 3; pointer-events: none; background: linear-gradient(115deg, transparent 42%, rgba(255,255,255,.55) 50%, transparent 58%); }
+.ach-tile:focus-visible .ach-medal { box-shadow: 0 0 0 2px var(--brand), 0 4px 9px rgba(0,0,0,.4); }
+/* Metal tiers: bronze -> silver -> gold -> emerald -> diamond */
+.t-bronze { --m-lo:#e6a86a; --m-hi:#a2582a; --m-ring:#7c4218; --m-ico:#3f2410; }
+.t-silver { --m-lo:#f2f4f8; --m-hi:#9aa0ad; --m-ring:#7b818e; --m-ico:#3b414a; }
+.t-gold { --m-lo:#ffe888; --m-hi:#e0a600; --m-ring:#b7850a; --m-ico:#6a4c00; }
+.t-emerald { --m-lo:#8af2cf; --m-hi:#12a37c; --m-ring:#0b7658; --m-ico:#053b2c; }
+.t-diamond { --m-lo:#d9f4ff; --m-hi:#57b6ea; --m-ring:#2e8ec6; --m-ico:#0d4b6c; }
+.ach-tile.unlocked .ach-medal::before { animation: ach-sheen 3s ease-in-out infinite; }
+.ach-tile.unlocked .ach-medal .ach-ico { animation: ach-float 3.4s ease-in-out infinite; }
+.ach-tile.unlocked .ach-medal::after { content: ""; position: absolute; inset: -6px; border-radius: 50%; z-index: -1; background: radial-gradient(circle, color-mix(in srgb, var(--m-hi) 45%, transparent), transparent 68%); animation: ach-halo 3.6s ease-in-out infinite; }
+@keyframes ach-sheen { 0%,100%{opacity:.2;transform:translateX(-6%)} 50%{opacity:.9;transform:translateX(6%)} }
+@keyframes ach-float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-2px)} }
+@keyframes ach-halo { 0%,100%{opacity:.4;transform:scale(.95)} 50%{opacity:.85;transform:scale(1.06)} }
+.ach-tile.locked .ach-medal { --m-lo:#3a434e; --m-hi:#232b34; --m-ring:#1d242c; --m-ico:#0e131a; filter: grayscale(1); box-shadow: 0 3px 7px rgba(0,0,0,.35), inset 0 1px 2px rgba(255,255,255,.12), inset 0 -3px 6px rgba(0,0,0,.4); }
+.ach-tile.locked .ach-medal .ach-ico { opacity: .3; animation: none; }
+.ach-lock { position: absolute; z-index: 4; width: 15px; height: 15px; fill: #c3ccd6; filter: drop-shadow(0 1px 1px rgba(0,0,0,.7)); opacity: .92; }
+.ach-tile.unlocked .ach-lock { display: none; }
+@media (prefers-reduced-motion: reduce) { .ach-medal::before, .ach-medal .ach-ico, .ach-medal::after { animation: none !important; } }
+
+/* Floating achievement tooltip (name + description + progress), body-level so the medal strip never clips it. */
+.ach-tooltip { position: fixed; z-index: 60; max-width: 230px; background: #0C1419; color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 9px 12px; box-shadow: 0 14px 34px -14px rgba(0,0,0,.85); pointer-events: none; opacity: 0; transform: translateY(-3px); transition: opacity .14s ease, transform .14s ease; display: flex; flex-direction: column; gap: 3px; }
+.ach-tooltip.on { opacity: 1; transform: none; }
+.ach-tooltip strong { font-size: 12.5px; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; }
+.ach-tooltip span { font-size: 12px; line-height: 1.4; color: var(--muted); }
+.ach-tooltip .ach-tt-prog { color: var(--brand); font-weight: 700; }
+.ach-tooltip .ach-tt-locked { color: var(--sand); font-weight: 700; text-transform: uppercase; font-size: 11px; letter-spacing: .04em; }
+
+/* Achievement unlocked toast (sober, no emoji, bottom-right). */
+.ach-toasts { position: fixed; right: 18px; bottom: 18px; z-index: 70; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; pointer-events: none; }
+.ach-toast { display: flex; flex-direction: column; gap: 2px; background: var(--surface); border: 1px solid var(--brand); border-left: 3px solid var(--brand); border-radius: 12px; padding: 10px 16px; box-shadow: var(--shadow); opacity: 0; transform: translateX(20px); transition: opacity .35s ease, transform .35s ease; min-width: 210px; }
+.ach-toast.show { opacity: 1; transform: none; }
+.ach-toast-tag { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--brand); }
+.ach-toast-name { font-size: 13.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .02em; }
+
+/* ---- Activity pagination ---- */
+.pager { display: flex; align-items: center; justify-content: center; gap: 4px; margin-top: 12px; flex-wrap: wrap; }
+.pager button { font: inherit; font-size: 12.5px; font-weight: 600; min-width: 30px; height: 30px; padding: 0 8px; color: var(--muted); background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; transition: all .12s ease; }
+.pager button:hover:not(:disabled) { color: var(--brand); border-color: var(--brand); }
+.pager button.active { background: var(--brand-soft); color: var(--brand); border-color: var(--brand); }
+.pager button:disabled { opacity: .4; cursor: not-allowed; }
+.pager .pager-gap { color: var(--muted); padding: 0 2px; align-self: center; font-size: 12.5px; }
+
+/* Compact adjustments for narrow / minimum-size windows (keeps every view scroll-free). */
+@media (max-width: 860px) {
+  .ach-fam-info { width: 158px; }
+  .ach-fam-name { font-size: 10.5px; letter-spacing: .02em; }
+}
+@media (max-width: 720px) {
+  .topbar { gap: 10px; }
+  .header-social { gap: 2px; }
+  .hsocial { width: 28px; height: 28px; }
 }
