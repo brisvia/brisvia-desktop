@@ -18,6 +18,8 @@
       openUrl: (url) => call('open_url', { url }),
       systemLocale: () => call('system_locale'),
       setLanguage: (lang) => call('set_language', { lang }),
+      appVersion: () => call('app_version'),
+      achievements: () => call('achievements'),
       checkUpdate: () => call('check_update'),
       installUpdate: () => invoke('install_update'),
       getStatus: () => invoke('miner_status'),
@@ -134,7 +136,33 @@
     openUrl: async (url) => { window.open(url, '_blank'); },
     systemLocale: async () => navigator.language || 'en',
     setLanguage: async () => ({ ok: true }),
+    appVersion: async () => '0.4.0',
     checkUpdate: async () => ({ available: false, currentVersion: '0.1.0' }),
     installUpdate: async () => ({ ok: true }),
+    // Preview-only achievements: same 50 definitions as the backend, with a demo unlocked count per family so the
+    // Achievements view renders in a plain browser without Tauri. The real backend derives these from the wallet.
+    achievements: async () => {
+      const defs = [
+        ['blocks', [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000], ['bronze', 'bronze', 'bronze', 'silver', 'silver', 'gold', 'gold', 'gold', 'emerald', 'emerald', 'diamond', 'diamond']],
+        ['balance', [50, 100, 250, 500, 1000, 2500, 5000, 10000, 50000, 100000], ['bronze', 'bronze', 'silver', 'silver', 'gold', 'gold', 'emerald', 'emerald', 'diamond', 'diamond']],
+        ['sends', [1, 3, 5, 10, 25, 50, 100, 250], ['bronze', 'bronze', 'silver', 'silver', 'gold', 'gold', 'emerald', 'diamond']],
+        ['receives', [1, 3, 5, 10, 25, 50], ['bronze', 'bronze', 'silver', 'silver', 'gold', 'diamond']],
+      ];
+      const list = [];
+      defs.forEach(([family, ths, tiers]) => {
+        ths.forEach((th, i) => {
+          const unlocked = i < Math.ceil(ths.length / 2);
+          list.push({ id: family + '_' + th, family, tier: tiers[i], unlocked, current: unlocked ? th : 0, threshold: th });
+        });
+      });
+      const ageIds = ['age_week', 'age_month', 'age_3months', 'age_6months', 'age_year', 'age_2years'];
+      const ageTiers = ['bronze', 'silver', 'gold', 'gold', 'emerald', 'diamond'];
+      ageIds.forEach((id, i) => list.push({ id, family: 'age', tier: ageTiers[i], unlocked: i < 2, current: 0, threshold: 1 }));
+      [['first_month', 'silver', false], ['pioneer', 'gold', false], ['founder', 'gold', false], ['before_halving', 'emerald', true], ['guardian', 'diamond', false]]
+        .forEach(([id, tier, unlocked]) => list.push({ id, family: 'pioneer', tier, unlocked, current: unlocked ? 1 : 0, threshold: 1 }));
+      [['rank_active', 'silver', true], ['rank_trio', 'gold', false], ['rank_legend', 'diamond', false]]
+        .forEach(([id, tier, unlocked]) => list.push({ id, family: 'rank', tier, unlocked, current: unlocked ? 1 : 0, threshold: 1 }));
+      return { list, justUnlocked: [] };
+    },
   };
 })();

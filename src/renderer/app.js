@@ -25,6 +25,7 @@ function showView(name) {
   $$('.nav-btn').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
   if (name === 'wallet') loadWallet();
   if (name === 'settings') loadSettings();
+  if (name === 'achievements') loadAchievements();
 }
 $$('.nav-btn').forEach((b) => b.addEventListener('click', () => showView(b.dataset.view)));
 
@@ -348,21 +349,66 @@ async function loadWallet() {
   $('#bal-incoming-wrap').hidden = !(mat > 0 || inc > 0);
   if (!(mat > 0 || inc > 0)) $('#bal-explain').hidden = true;
   const hist = await window.brisvia.wallet.history();
-  const list = $('#history-list'), empty = $('#history-empty');
+  walletHistory = Array.isArray(hist) ? hist : [];
+  // Keep the current page valid after a refresh (new movements can add pages, deletions can remove them).
+  const pages = Math.max(1, Math.ceil(walletHistory.length / HIST_PER_PAGE));
+  if (historyPage >= pages) historyPage = pages - 1;
+  if (historyPage < 0) historyPage = 0;
+  renderHistoryPage();
+}
+
+// ---- Movements with pagination (no long scroll: N per page + ‹ 1 2 3 › controls) ----
+let walletHistory = [];
+let historyPage = 0;
+const HIST_PER_PAGE = 8;
+function renderHistoryPage() {
+  const list = $('#history-list'), empty = $('#history-empty'), pager = $('#history-pager');
   list.innerHTML = '';
-  if (!hist || hist.length === 0) { empty.hidden = false; list.hidden = true; }
-  else {
-    empty.hidden = true; list.hidden = false;
-    hist.forEach((h) => {
-      const li = document.createElement('li');
-      const inc = h.amount >= 0;
-      const label = h.category ? catLabel(h.category) : (inc ? T('wallet.received') : T('wallet.sent'));
-      li.innerHTML = `<div><div>${label}</div><div class="muted small">${fmtDate(h.time)}</div></div>
-        <div class="hist-amount ${inc ? 'in' : 'out'}">${inc ? '+' : ''}${fmt(h.amount)} BRVA</div>`;
-      if (h.txid) li.addEventListener('click', () => openTxDetail(h));
-      list.appendChild(li);
-    });
+  if (!walletHistory.length) {
+    empty.hidden = false; list.hidden = true; if (pager) pager.hidden = true;
+    return;
   }
+  empty.hidden = true; list.hidden = false;
+  const start = historyPage * HIST_PER_PAGE;
+  walletHistory.slice(start, start + HIST_PER_PAGE).forEach((h) => {
+    const li = document.createElement('li');
+    const inc = h.amount >= 0;
+    const label = h.category ? catLabel(h.category) : (inc ? T('wallet.received') : T('wallet.sent'));
+    li.innerHTML = `<div><div>${label}</div><div class="muted small">${fmtDate(h.time)}</div></div>
+      <div class="hist-amount ${inc ? 'in' : 'out'}">${inc ? '+' : ''}${fmt(h.amount)} BRVA</div>`;
+    if (h.txid) li.addEventListener('click', () => openTxDetail(h));
+    list.appendChild(li);
+  });
+  renderPager(pager, Math.ceil(walletHistory.length / HIST_PER_PAGE));
+}
+// Renders ‹ 1 2 3 › — a windowed set of page numbers around the current page (with gaps), plus prev/next arrows.
+function renderPager(pager, total) {
+  if (!pager) return;
+  pager.innerHTML = '';
+  if (total <= 1) { pager.hidden = true; return; }
+  pager.hidden = false;
+  const go = (p) => { historyPage = Math.max(0, Math.min(total - 1, p)); renderHistoryPage(); };
+  const addBtn = (label, page, opts = {}) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    if (opts.active) b.classList.add('active');
+    if (opts.disabled) b.disabled = true;
+    if (opts.aria) b.setAttribute('aria-label', opts.aria);
+    if (!opts.disabled) b.addEventListener('click', () => go(page));
+    pager.appendChild(b);
+  };
+  const addGap = () => { const s = document.createElement('span'); s.className = 'pager-gap'; s.textContent = '…'; pager.appendChild(s); };
+  addBtn('‹', historyPage - 1, { disabled: historyPage === 0, aria: T('wallet.prev_page') });
+  // Window of pages: always show first and last, plus current ±1, with gaps in between.
+  const nums = new Set([0, total - 1, historyPage, historyPage - 1, historyPage + 1]);
+  const shown = [...nums].filter((n) => n >= 0 && n < total).sort((a, b) => a - b);
+  let prev = -1;
+  shown.forEach((n) => {
+    if (n - prev > 1) addGap();
+    addBtn(String(n + 1), n, { active: n === historyPage });
+    prev = n;
+  });
+  addBtn('›', historyPage + 1, { disabled: historyPage === total - 1, aria: T('wallet.next_page') });
 }
 function fmt(n) { return window.I18N.fmtNum(n, { maximumFractionDigits: 8, useGrouping: false }); }
 function fmtDate(epoch) { return window.I18N.fmtDate(epoch); }
@@ -498,10 +544,136 @@ $$('#set-language .seg-btn').forEach((b) => b.addEventListener('click', () => {
   window.I18N.setLang(b.dataset.lang);
   if (window.brisvia.setLanguage) window.brisvia.setLanguage(b.dataset.lang); // rebuilds the tray menu
 }));
-$$('.social').forEach((b) => b.addEventListener('click', () => window.brisvia.openUrl(b.dataset.url)));
+// Social links live in the header now (visible from any view); open them in the system browser.
+$$('.hsocial').forEach((b) => b.addEventListener('click', () => window.brisvia.openUrl(b.dataset.url)));
 
 // Seguridad y respaldo
 $('#set-security').addEventListener('click', () => openModal('modal-security'));
+
+// ===================== Logros =====================
+// The 50 badges come from the wallet (they travel with the 12 words). The backend returns only ids + numbers;
+// the texts are translated here via i18n. Badge style ported from the approved preview.
+const ACH_FAM_ORDER = ['blocks', 'balance', 'sends', 'receives', 'age', 'pioneer', 'rank'];
+// game-icons paths (embedded inline; one icon per family, per the design spec).
+const ACH_ICONS = {
+  blocks: '<path fill="currentColor" d="M256 24.585L51.47 118.989L256 213.394l204.53-94.405zM38.998 133.054v258.353L247 487.415V229.063zm434.004 0L265 229.062v258.353l208.002-96.008z"/>',
+  balance: '<path fill="currentColor" d="M431.1 23.53c-9.5 17.34-25.4 23.34-49.6 14.15c17.9 10.24 28.5 24.99 24.6 48.64c12.4-21.29 29.2-24.49 49.4-14.11c-18.3-11.28-33.4-24.22-24.4-48.68M206 45.39c-3.4 27.17-10.8 51.2-46.9 52.1c27.4 3.11 44.3 19.11 46.9 52.21c2.3-26.1 14.6-45.7 46.8-52.21c-34.1-4.65-48-23.18-46.8-52.1M85.7 101.2c-5.5 22-19 32.5-43.2 27.8c20.4 12.6 24.5 30.3 20.4 50.6c9-24.3 24-32.3 43.4-28c-24.4-9.4-24.2-29.2-20.6-50.4m310.4.8c3.6 21.2 3.8 41-20.5 50.4c19.3-4.3 34.3 3.7 43.3 28c-4.1-20.2 0-38 20.4-50.6c-24.2 4.7-37.7-5.8-43.2-27.8m-139.4 52c-9.6 0-18.1 2.4-23.7 5.8c-5.5 3.4-7.3 6.7-7.3 9.3s1.8 5.9 7.3 9.3c5.6 3.3 14.1 5.7 23.7 5.7c3.9 0 7.7-.4 11.1-1.1c5.5-6.1 12.5-10.2 19.7-12.6c.6-4.9-4.7-9.1-7.1-10.6c-5.6-3.4-14.1-5.8-23.7-5.8m-45.1 28.2c-6.2.9-9.1 3.1-10.2 5.4c-1.9 12.5 13 22.2 22.1 26.5c8.7 3.9 17.5 5.2 23.9 4.5s9.4-3.1 10.5-5.4c1.1-2.4.8-6.1-2.6-11.1c-12-.2-22.8-3.1-31.5-8.3c-4.9-3-9.3-6.9-12.2-11.6m98.6 2.6c-9.6 0-18.1 2.4-23.7 5.7c-5.5 3.4-7.3 6.7-7.3 9.3s1.8 5.9 7.3 9.3c5.6 3.3 14.1 5.7 23.7 5.7s18.1-2.4 23.7-5.7c5.5-3.4 7.3-6.7 7.3-9.3s-1.8-5.9-7.3-9.3c-5.6-3.3-14.1-5.7-23.7-5.7m48.8 12.3c5.1 10.4-10.3 23.8-17.6 28.4c1.4.7 3.2 1.3 5.5 1.8c6.4 1.2 15.2.6 24.2-2.7c7.7-2.8 14.1-7 18.4-11.3c.4-5.7 1.2-11 4.7-15c-10.5-6.9-24.8-5.1-35.2-1.2m-202-1.5c-9.6 0-18.1 2.4-23.7 5.7c4.6 6.3 5.7 13.2 4.5 20.8c5.2 2.1 11.9 3.5 19.2 3.5c9.6 0 18.1-2.4 23.7-5.7c5.5-3.4 7.3-6.7 7.3-9.3s-1.8-5.9-7.3-9.3c-5.6-3.3-14.1-5.7-23.7-5.7m251.1 14.2c-2.7 12.2 11.8 23 20.5 27.7c8.5 4.4 17.1 6.2 23.6 5.9c6.4-.4 9.6-2.5 10.8-4.8s1.2-6.1-2.2-11.6s-9.8-11.6-18.3-16.1c-6.5-3.1-28.9-11.1-34.4-1.1m-302.5-.9c-5.9-.1-13.1 1.2-20.3 4.2c-8.8 3.7-15.7 9.2-19.5 14.4c-3.8 5.3-4.2 9-3.2 11.4s4 4.8 10.4 5.8c6.3.9 15.1-.2 24-4c8.9-3.7 15.8-9.2 19.6-14.4c3.8-5.3 4.2-9 3.2-11.4c-4.3-4.9-8.5-6-14.2-6m168 13.1c-3.1 5.8-8.3 9.8-14.4 12.1c6.4 3.9 11.5 9.7 13.1 17.2c2.2 10.5-3 20.4-10.7 27.5c-7.7 7.2-18.2 12.4-30.5 14.9c-12.2 2.6-24 2.1-33.9-1.3s-18.6-10.4-20.8-20.8c-2.2-10.5 2.9-20.4 10.6-27.5c7.1-6.6 16.7-11.6 27.7-14.3c-4.4-2-8.4-4.4-12-7.1c-2.9 5.2-7.5 9.4-12.8 12.6c-9 5.4-20.4 8.3-32.9 8.3c-9.9 0-19.1-1.8-27-5.3c-6.1 7.9-15.2 14.5-26 19c-10.5 4.4-21 6.3-30.6 5.5c-3.8 7.5-11.4 12.4-19.6 15c-10.1 3.1-21.9 3.2-34 .2c-.3-.1-.6-.1-.8-.2V324c2.8-1.5 5.9-2.6 9-3.3c3.4-.8 7-1.2 10.7-1.3v-.2c-2.9-10.3 1.7-20.5 8.9-28.1s17.4-13.5 29.5-16.8c11.56-3 23.1-3.7 33.9-.8c10.1 2.8 19.3 9.2 22.1 19.5c2.9 10.3-1.6 20.5-8.9 28.1c-7.2 7.6-17.4 13.4-29.5 16.8c-1.8.5-3.7.9-5.6 1.3c7.46 8.4 11.8 21.7 9.3 30.2c-3.3 10.1-12.7 16.1-22.9 18.5c-10.3 2.4-22 1.6-33.9-2.2c-8.7-2.8-16.4-6.9-22.6-12.1v113.9h77.2c-4-10.7 3.9-11.4-7.2-16.1c-11.6-4.7-21-11.8-27.3-20.2s-9.5-19.1-5.5-29c4.1-9.8 13.9-15.1 24.3-16.7c10.4-1.5 22.1.1 33.6 4.9c11.6 4.7 21 11.8 27.3 20.2c2.3 3.1 4.2 6.4 5.5 9.9c8.4-.6 16.4.4 23.5 2.8c9.9 3.4 18.6 10.4 20.8 20.8c1.8 8.6-1.3 16.8-6.7 23.4h256.1c-6.3-7.3-10-16.6-7.4-26.2c2.8-10.3 11.9-16.7 22-19.6s21.9-2.7 33.9.6c1.7.5 3.3 1 4.9 1.6V342.7c-11 1.8-21.6 1.1-30.6-2c-9.9-3.4-18.6-10.4-20.8-20.8c-2.2-10.5 2.9-20.4 10.6-27.5c13.2-10.1 25.8-15.4 40.8-16.3V275c-15 .2-35.9-5.5-44.9-13.6c-9.3-.2-19.2-2.9-28.9-8c-10.7-5.6-19.1-13.1-24.6-21.7c-5.3 4-11.5 7.3-18.3 9.8c-11.8 4.3-23.5 5.5-33.8 3.5c-8.6-1.7-16.7-5.9-21.3-13.1c-3.8.6-7.9.9-12 .9c-12.5 0-23.9-2.9-32.9-8.3c-1.3-.8-2.5-1.6-3.7-2.5m207 5.9c1.9 11.1.3 19.9-8 26.7c7.8 2.2 14.2 2.9 21.4 2.4v-29.6c-4.5-.3-9.3-.2-13.4.5M18 229.7v28.9c9.44 3.2 21.18 4.7 30.4 2c3.3-1 5.5-2.2 7-3.6c-7.21-5.3-11.24-12.3-11.3-20.7c-3.7-2-8-3.7-12.8-4.9c-4.6-1.1-9.2-1.7-13.3-1.7m203.2 17.1c-9.4 2-17.2 6.1-22 10.4c-4.7 4.5-5.7 8.1-5.2 10.7c.5 2.5 3 5.4 9.1 7.5s14.9 2.7 24.3.7s17.2-6.1 22-10.4c4.7-4.5 5.8-8.1 5.3-10.6c-.6-2.6-3-5.4-9.1-7.6c-8.3-2.4-16.6-2.4-24.4-.7M81.9 291.6c-9.3 2.6-16.9 7.2-21.3 11.8c-4.4 4.8-5.3 8.4-4.6 11c.7 2.5 3.3 5.1 9.6 7c6.1 1.7 15 1.7 24.3-.9c9.2-2.5 16.9-7.1 21.3-11.8s5.3-8.4 4.6-10.9s-3.4-5.2-9.6-7c-7.91-2-16.83-1.3-24.3.8m261 .1c6.5.1 12.6 1.1 18.2 3c10 3.5 18.7 10.4 20.9 20.9c1 4.9.4 9.8-1.4 14.3c9.9 3.4 18.3 8.6 24.6 15c7.2 7.6 11.8 17.8 9 28.1s-11.9 16.8-22 19.6c-10.1 2.9-21.8 2.7-33.9-.6c-12.1-3.2-22.3-9-29.6-16.6c-4.4-4.6-7.9-10.1-9.2-16.1c-4.4-.4-8.7-1.3-12.6-2.7c-9.9-3.4-18.6-10.3-20.8-20.8s3-20.3 10.7-27.5c7.6-7.1 18.2-12.3 30.4-14.9c5.4-1.1 10.6-1.7 15.7-1.7m151.1 2.4c-2.2.2-4.4.5-6.6 1c-9.4 2-17.2 6.1-22 10.4c-4.7 4.5-5.7 8.1-5.2 10.7c.5 2.5 3 5.4 9 7.5c6.2 2.1 15 2.7 24.4.7c.1 0 .3-.1.4-.1zM330.9 311c-9.3 2-17.2 6.1-22 10.5c-4.6 4.4-5.7 8-5.2 10.6c.5 2.5 3 5.4 9.1 7.6c6.1 2.1 14.9 2.7 24.3.7s17.3-6.1 22-10.5c4.7-4.5 5.8-8.1 5.3-10.6c-.6-2.5-3-5.4-9.1-7.6c-8.3-2.4-16.6-2.4-24.4-.7m-133.4 5.7c12.2 2.6 22.7 7.9 30.4 15.1c7.6 7.2 12.8 17.1 10.5 27.5c-2.3 10.5-11 17.4-21 20.8c-9.9 3.3-21.7 3.8-33.9 1.1c-12.2-2.6-22.7-7.9-30.4-15c-7.6-7.2-12.8-17.1-10.5-27.6s11-17.4 21-20.7c11.5-3.6 23-3.4 33.9-1.2m-28.2 18.2c-6.1 2.1-8.6 5-9.1 7.5c-.6 2.6.5 6.2 5.2 10.6c4.7 4.5 12.5 8.6 21.9 10.6c9.4 2.1 18.2 1.5 24.4-.5c6.1-2.2 8.5-5 9.1-7.6c.5-2.5-.5-6.1-5.2-10.6c-4.8-4.4-12.6-8.6-21.9-10.6c-8-1.5-16.7-1.8-24.4.6M32 338.2c-6.2 1.5-9 4.1-9.8 6.6s-.1 6.1 4.1 11.1c4.3 4.8 11.7 9.7 20.8 12.7c9.2 2.9 18 3.3 24.3 1.8s9-4.1 9.8-6.6c.8-2.4.1-6.1-4.1-11.1c-4.3-4.8-11.6-9.7-20.8-12.7c-8.27-2.3-16.36-3.4-24.3-1.8m336.9 7c-10.3 6.9-20.1 11.5-30.6 13.3c5.3 8.5 16.8 14 24.7 16.2c9.3 2.5 18.1 2.4 24.4.7c6.2-1.9 8.8-4.6 9.5-7.1c.6-2.5-.2-6.2-4.7-10.9c-7.7-6.2-15.2-10.4-23.3-12.2m-53.7 34.9c9.9 3.4 18.6 10.3 20.8 20.8s-3 20.4-10.7 27.5c-7.6 7.1-18.2 12.3-30.4 14.9c-12.3 2.6-24 2.1-33.9-1.3c-10-3.5-18.7-10.4-20.9-20.9c-2.2-10.4 3-20.3 10.7-27.5c7.7-7.1 18.2-12.3 30.4-14.9c11.1-2.3 23.6-2.2 34 1.4M285 396.3c-9.4 2-17.3 6.1-22 10.5c-4.7 4.5-5.8 8.1-5.3 10.6c.6 2.6 3 5.4 9.1 7.6c6.1 2.1 15 2.7 24.4.7c9.3-2 17.2-6.1 22-10.5c4.6-4.4 5.7-8 5.2-10.6c-.5-2.5-3-5.4-9.1-7.6c-8.1-2.3-16.3-2.3-24.3-.7m-201.8 27c-6.4 1-9.3 3.4-10.3 5.8s-.6 6.1 3.2 11.4c3.9 5.2 10.9 10.6 19.7 14.3c9 3.6 17.7 4.6 24.2 3.7c6.3-1 9.3-3.4 10.3-5.8c.9-2.4.5-6.1-3.3-11.4c-3.9-5.2-10.8-10.6-19.7-14.3c-8.15-2.8-16.13-4.7-24.1-3.7m387.9 34.5c-6.5.1-18.5 1-20.5 8.2c-.1 12.5 16 19.8 25.6 22.5H494v-25.3c-7.3-3.4-15.2-5.2-22.9-5.4m-323.8.8c-4.3 9.9-16.3 16.3-24.7 17.7c-3 .4-6.1.6-9.3.5c-1.9 6.1 5.6 10.3 9.7 11.7h25.2c8.6-2 15.7-6 20.1-10c4.7-4.5 5.9-8.1 5.3-10.6c-.5-2.6-3-5.4-9.1-7.6c-6.2-1.6-11.4-2.4-17.2-1.7"/>',
+  sends: '<path fill="currentColor" d="M298.9 24.31c-14.9.3-25.6 3.2-32.7 8.4l-97.3 52.1l-54.1 73.59c-11.4 17.6-3.3 51.6 32.3 29.8l39-51.4c49.5-42.69 150.5-23.1 102.6 62.6c-23.5 49.6-12.5 73.8 17.8 84l13.8-46.4c23.9-53.8 68.5-63.5 66.7-106.9l107.2 7.7l-1-112.09zM244.8 127.7c-17.4-.3-34.5 6.9-46.9 17.3l-39.1 51.4c10.7 8.5 21.5 3.9 32.2-6.4c12.6 6.4 22.4-3.5 30.4-23.3c3.3-13.5 8.2-23 23.4-39m-79.6 96c-.4 0-.9 0-1.3.1c-3.3.7-7.2 4.2-9.8 12.2c-2.7 8-3.3 19.4-.9 31.6c2.4 12.1 7.4 22.4 13 28.8c5.4 6.3 10.4 8.1 13.7 7.4c3.4-.6 7.2-4.2 9.8-12.1c2.7-8 3.4-19.5 1-31.6c-2.5-12.2-7.5-22.5-13-28.8c-4.8-5.6-9.2-7.6-12.5-7.6m82.6 106.8c-7.9.1-17.8 2.6-27.5 7.3c-11.1 5.5-19.8 13.1-24.5 20.1c-4.7 6.9-5.1 12.1-3.6 15.2c1.5 3 5.9 5.9 14.3 6.3c8.4.5 19.7-1.8 30.8-7.3s19.8-13 24.5-20c4.7-6.9 5.1-12.2 3.6-15.2c-1.5-3.1-5.9-5.9-14.3-6.3c-1.1-.1-2.1-.1-3.3-.1m-97.6 95.6c-4.7.1-9 .8-12.8 1.9c-8.5 2.5-13.4 7-15 12.3c-1.7 5.4 0 11.8 5.7 18.7c5.8 6.8 15.5 13.3 27.5 16.9c11.9 3.6 23.5 3.5 32.1.9c8.6-2.5 13.5-7 15.1-12.3c1.6-5.4 0-11.8-5.8-18.7c-5.7-6.8-15.4-13.3-27.4-16.9c-6.8-2-13.4-2.9-19.4-2.8"/>',
+  receives: '<path fill="currentColor" d="M258 21.89c-.5 0-1.2 0-1.8.12c-4.6.85-10.1 5.1-13.7 14.81c-3.8 9.7-4.6 23.53-1.3 38.34c3.4 14.63 10.4 27.24 18.2 34.94c7.6 7.7 14.5 9.8 19.1 9c4.8-.7 10.1-5.1 13.7-14.7c3.8-9.64 4.8-23.66 1.4-38.35c-3.5-14.8-10.4-27.29-18.2-34.94c-6.6-6.8-12.7-9.22-17.4-9.22M373.4 151.4c-11 .3-24.9 3.2-38.4 8.9c-15.6 6.8-27.6 15.9-34.2 24.5c-6.6 8.3-7.2 14.6-5.1 18.3c2.2 3.7 8.3 7.2 20 7.7c11.7.7 27.5-2.2 43-8.8c15.5-6.7 27.7-15.9 34.3-24.3c6.6-8.3 7.1-14.8 5-18.5c-2.1-3.8-8.3-7.1-20-7.5c-1.6-.3-3-.3-4.6-.3m-136.3 92.9c-6.6.1-12.6.9-18 2.3c-11.8 3-18.6 8.4-20.8 14.9c-2.5 6.5 0 14.3 7.8 22.7c8.2 8.2 21.7 16.1 38.5 20.5c16.7 4.4 32.8 4.3 44.8 1.1c12.1-3.1 18.9-8.6 21.1-15c2.3-6.5 0-14.2-8.1-22.7c-7.9-8.2-21.4-16.1-38.2-20.4c-9.5-2.5-18.8-3.5-27.1-3.4m160.7 58.1L336 331.7c4.2.2 14.7.5 14.7.5l6.6 8.7l54.7-28.5zm-54.5.1l-57.4 27.2c5.5.3 18.5.5 23.7.8l49.8-23.6zm92.6 10.8l-70.5 37.4l14.5 18.7l74.5-44.6zm-278.8 9.1a40.3 40.3 0 0 0-9 1c-71.5 16.5-113.7 17.9-126.2 17.9H18v107.5s11.6-1.7 30.9-1.8c37.3 0 103 6.4 167 43.8c3.4 2.1 10.7 2.9 19.8 2.9c24.3 0 61.2-5.8 69.7-9C391 452.6 494 364.5 494 364.5l-32.5-28.4s-79.8 50.9-89.9 55.8c-91.1 44.7-164.9 16.8-164.9 16.8s119.9 3 158.4-27.3l-22.6-34s-82.8-2.3-112.3-6.2c-15.4-2-48.7-18.8-73.1-18.8"/>',
+  age: '<path fill="currentColor" d="M92.656 19.188v41.5h331.72v-41.5zM119.5 79.374V433.53h22.28V79.376H119.5zm46.594 0c3.212 43.324 13.312 82.022 27.78 110.906c17.685 35.304 40.845 54.75 64.064 54.75s46.346-19.446 64.03-54.75c14.47-28.883 24.57-67.58 27.782-110.905H166.094zm209.156 0V433.53h22.28V79.376h-22.28zm-117.313 185.22c-23.218 0-46.378 19.415-64.062 54.717c-14.835 29.614-25.098 69.562-28.03 114.22H350c-2.933-44.658-13.197-84.606-28.03-114.22c-17.686-35.302-40.814-54.718-64.033-54.718zM92.657 452.218v41.467h331.718V452.22H92.655z"/>',
+  pioneer: '<path fill="currentColor" d="m375.7 20.11l-15.6 3.53c5.5 24.18 10.9 48.4 16.4 72.61c-12.4-1.91-22.7-3.61-34-5.36l6.5 28.91c12.4 1.6 22.6 3.6 34 5.3l7.6 33.6c9.4 41.6 18.9 83.3 28.3 124.9c-12.4-1.9-22.6-3.7-34-5.4l6.5 28.8c12.3 2.1 22.7 3.4 34 5.4c13.6 59.8 27 119.7 40.6 179.5l15.6-3.7c-37.4-162.5-73.8-328.9-105.9-468.09M391.4 307c-12.9-1.9-23.9-3.4-33.7-4l7.4 32.9h.4c12.2 1.3 22.5 3.1 33.5 4.7zm-33.7-4l-6.7-29.5c-14.4-1.5-24.2-1.5-32.7.3l7 31.3c10.4-2.4 20.6-2.9 32.4-2.1m-32.4 2.1c-10.3 2.4-19.7 6.3-30.1 12l7.4 32.7c9.8-5.2 20.1-11.2 29.8-13.4zm-30.1 12l-6.6-29.5c-7.8 4.8-17.2 11.1-28.6 18.8l6.5 28.9c10.8-7.4 20.2-13.4 28.7-18.2m-28.7 18.2c-10.3 7-18.9 13-28.4 19.5l7.6 33.2c10-7.2 18.8-13.1 28.3-19.6zm-28.4 19.5l-6.5-28.9c-10.8 7.4-20.1 13.4-28.7 18.2l6.7 29.5c7.8-4.8 17.2-11.1 28.5-18.8m-28.5 18.8c-12.3 7.5-21.2 11.7-29.7 13.7l7 31.2c10.4-2.4 19.8-6.4 30.1-12.1zm-29.7 13.7l-7.1-31.2c-10.3 2.3-20.5 2.8-32.3 2.1l6.7 29.5c14.3 1.5 24.1 1.5 32.7-.4m-32.7.4c-9.1-.9-20.3-2.6-33.9-4.7l7.6 33.6s16 2.9 33.7 4zm-33.9-4.7l-6.5-28.8c-12.35-2-22.71-3.4-34.02-5.4l6.53 28.8c12.36 1.8 22.69 3.8 33.99 5.4m-6.5-28.8c12.9 1.9 23.9 3.4 33.7 4l-7.5-32.9c-9.1-1-20.2-2.6-33.8-4.7zm-7.6-33.6l-6.52-28.9c-12.39-1.8-22.66-3.7-34.02-5.3l6.52 28.8c12.35 2 22.71 3.4 34.02 5.4m-6.52-28.9c12.82 2 23.92 3.5 33.72 4.1l-7.5-32.9c-9.07-.9-20.22-2.5-33.84-4.7zm-7.6-33.6l-6.52-28.8c-12.33-2.1-22.71-3.3-34.02-5.3l6.52 28.9c12.36 1.9 22.66 3.6 34.02 5.2m-6.52-28.8c12.89 2 23.93 3.5 33.72 4l-7.45-32.9c-11.72-2.1-24.9-3.3-33.87-4.7zm33.72 4l6.64 29.5c14.4 1.6 24.2 1.5 32.7-.4l-7-31.2c-10.4 2.4-20.6 2.9-32.34 2.1m32.24-2.1c10.4-2.3 19.8-6.3 30.2-12l-7.5-32.9c-12.3 7.5-21.2 11.7-29.7 13.7zm37.2 19.2l6.6 29.5c7.8-4.8 17.2-11 28.6-18.8l-6.6-28.8c-10.7 7.3-20.1 13.4-28.6 18.1m28.6-18.1c10.3-7 18.9-13.1 28.5-19.4l-7.6-33.66c-10.4 7.05-19 13.01-28.5 19.56zm28.5-19.4l6.5 28.7c10.8-7.3 20.1-13.4 28.7-18.1l-6.7-29.5c-7.8 4.8-17.2 11.1-28.5 18.9m28.5-18.9c12.3-7.55 21.2-11.74 29.7-13.68l-7-31.2c-11.1 3-21.8 7.36-30.1 11.95zm29.7-13.68l7.1 31.28c10.3-2.4 20.5-2.9 32.3-2.2l-6.7-29.53c-14.3-1.51-24.1-1.48-32.7.45m32.7-.45c9.1.97 20.3 2.59 33.9 4.72l-7.6-33.59s-16.1-2.91-33.7-4.03zm6.7 29.53l7.4 32.8c9.2 1 20.3 2.6 33.9 4.8l-7.6-33.5c-12.9-2-23.9-3.5-33.7-4.1m41.3 37.6l6.5 28.8c12.4 1.9 22.7 3.7 34.1 5.3l-6.6-28.8c-12.4-1.9-22.7-3.7-34-5.3m6.5 28.8c-12.8-2-23.9-3.5-33.7-4l7.5 33c9.1.9 20.2 2.5 33.8 4.6zm7.6 33.6l6.6 28.9c12.4 2 22.7 3.4 34 5.3l-6.5-28.9c-12.4-1.8-22.7-3.7-34.1-5.3m6.6 28.9c-12.9-2-24-3.5-33.8-4l7.5 32.9c9.1.8 20.2 2.6 33.9 4.7zm-33.8-4l-6.6-29.5c-14.4-1.6-24.2-1.5-32.7.4l7 31.1c10.3-2.3 20.6-2.8 32.3-2m-32.3 2c-10.3 2.5-19.8 6.4-30.1 12l7.5 33c12.3-7.5 21.1-11.8 29.7-13.8zm-30.1 12l-6.7-29.5c-7.8 4.9-17.1 11-28.5 18.9l6.5 28.8c10.8-7.3 20.1-13.5 28.7-18.2m-28.7 18.2c-10.5 6.9-18.7 13.2-28.4 19.5l7.6 33.6c10.4-7 19-13 28.4-19.5zM224 292.2l-6.5-28.8c-10.8 7.3-20.1 13.4-28.7 18.2l6.7 29.5c7.8-4.8 17.1-11.1 28.5-18.9m-28.5 18.9c-12.3 7.5-21.2 11.7-29.7 13.6l7 31.4c10.3-2.4 19.8-6.4 30.1-12zm-29.7 13.6l-7.1-31.1c-10.3 2.3-20.5 2.8-32.2 2.1l6.5 29.5c14.4 1.5 24.2 1.5 32.8-.5m-7.1-31.1c10.3-2.4 19.8-6.2 30.1-11.9l-7.4-33.1c-12.3 7.7-21.2 11.9-29.8 13.7zm-7.1-31.3l-7-31.2c-10.3 2.4-20.5 3-32.2 2.2l6.6 29.5c14.3 1.5 24.1 1.5 32.6-.5m-7-31.2c10.3-2.3 19.7-6.3 30.1-12l-7.5-32.9c-12.3 7.6-21.1 11.9-29.7 13.7zm30.1-12l6.7 29.5c7.8-4.6 17.1-11 28.5-18.8l-6.5-28.8c-10.8 7.3-20.1 13.4-28.7 18.1m28.7-18c10.2-7.2 18.9-13 28.4-19.5l-7.6-33.7c-10.3 7.2-19 13.1-28.4 19.6zm28.4-19.5l6.5 28.8c10.8-7.3 20.1-13.4 28.7-18.1l-6.7-29.5c-7.8 4.7-17.1 11-28.5 18.8m28.5-18.9c12.3-7.6 21.2-11.8 29.7-13.6l-7-31.2c-10.3 2.2-19.8 6.1-30.1 11.8zm29.7-13.6l7.1 31.1c10.3-2.3 20.5-2.9 32.3-2.1l-6.7-29.5c-14.3-1.6-24.1-1.5-32.7.5m7.1 31.1c-10.3 2.4-19.8 6.4-30.1 12l7.4 32.9c12.3-7.5 21.2-11.8 29.8-13.6zm-58.8 30.1c-10.3 7.1-19 13-28.4 19.5l7.6 33.7c10.3-7.2 18.9-13 28.4-19.5z"/>',
+  rank: '<path fill="currentColor" d="M140.5 19.156V192.28l21.813 28.532h15.53V19.156zm56.03 0v201.656h122.064V19.156zm140.75 0v201.656h12.345l22.094-28.53V19.155zM173.94 239.5v18.125h164.09V239.5zm30.78 36.813l8.032 10.53c-25.262 12.014-45.128 33.46-55.094 59.813l65.03 47.47l5.47 3.968l-2.094 6.437l-17.312 53.69l45.656-33.064l5.5-3.97l5.47 3.97l62.468 45.22c24.872-19.957 40.78-50.6 40.78-85.063c0-6.494-.573-12.854-1.655-19.032l-58.845 42.94l-11-15.095L361.688 347c-10.683-28.55-32.932-51.392-61.125-62.78l6.125-7.908h-38.813l-25.5 78l-17.75-5.812l23.594-72.188h-43.5zm-52.374 89.625a110 110 0 0 0-1.72 19.375c0 32.163 13.84 61.008 35.907 80.937l19.69-61.03l-53.876-39.283zm107.562 78.343l-51.53 37.314c15.266 8.124 32.707 12.72 51.25 12.72c18.673-.002 36.218-4.676 51.562-12.908l-51.282-37.125z"/>',
+};
+const ACH_LOCK = '<svg class="ach-lock" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 1a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-9a2 2 0 0 0-2-2h-1V6a5 5 0 0 0-5-5zm3 8H9V6a3 3 0 0 1 6 0z"/></svg>';
+function achIcon(fam) { return `<svg class="ach-ico" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">${ACH_ICONS[fam] || ''}</svg>`; }
+// Progress text ("current / threshold") for the count families; the rest show no number (milestone/combo).
+function achProgress(a) {
+  if (a.family === 'blocks' || a.family === 'sends' || a.family === 'receives') {
+    return window.I18N.fmtNum(Math.min(a.current, a.threshold)) + ' / ' + window.I18N.fmtNum(a.threshold);
+  }
+  if (a.family === 'balance') {
+    return window.I18N.fmtNum(Math.min(Math.floor(a.current), a.threshold)) + ' / ' + window.I18N.fmtNum(a.threshold) + ' BRVA';
+  }
+  return '';
+}
+let achData = null;
+async function fetchAchievements() {
+  let r = null;
+  try { r = window.brisvia.achievements ? await window.brisvia.achievements() : null; } catch {}
+  if (!r || !Array.isArray(r.list)) return null;
+  achData = r;
+  if (Array.isArray(r.justUnlocked)) r.justUnlocked.forEach((id) => showAchievementToast(id));
+  const av = document.querySelector('.view[data-view="achievements"]');
+  if (av && !av.hidden) renderAchievements(r.list);
+  return r;
+}
+async function loadAchievements() {
+  if (achData) renderAchievements(achData.list); // paint the cached state immediately, then refresh
+  const r = await fetchAchievements();
+  if (!r && !achData) renderAchievements(null);
+}
+function renderAchievements(list) {
+  const wrap = $('#ach-families'), empty = $('#ach-empty');
+  if (!list || !list.length) {
+    wrap.innerHTML = ''; wrap.hidden = true; if (empty) empty.hidden = false;
+    return;
+  }
+  wrap.hidden = false; if (empty) empty.hidden = true;
+  const byFam = {};
+  list.forEach((a) => { (byFam[a.family] = byFam[a.family] || []).push(a); });
+  wrap.innerHTML = '';
+  ACH_FAM_ORDER.forEach((fam) => {
+    const items = byFam[fam];
+    if (!items) return;
+    const unlocked = items.filter((a) => a.unlocked).length;
+    const row = document.createElement('div');
+    row.className = 'ach-fam';
+    const info = document.createElement('div');
+    info.className = 'ach-fam-info';
+    info.innerHTML = `<span class="ach-fam-icon">${achIcon(fam)}</span>
+      <span class="ach-fam-text">
+        <span class="ach-fam-name">${T('ach.fam.' + fam)}</span>
+        <span class="ach-fam-count">${window.I18N.fmtNum(unlocked)} / ${window.I18N.fmtNum(items.length)}</span>
+      </span>`;
+    const strip = document.createElement('div');
+    strip.className = 'ach-medals';
+    items.forEach((a) => {
+      const tile = document.createElement('div');
+      tile.className = 'ach-tile ' + (a.unlocked ? 'unlocked' : 'locked');
+      tile.tabIndex = 0;
+      tile.dataset.name = T('ach.names.' + a.id);
+      tile.dataset.desc = T('ach.descs.' + a.id);
+      tile.dataset.prog = achProgress(a);
+      tile.innerHTML = `<div class="ach-medal t-${a.tier}">${achIcon(fam)}${ACH_LOCK}</div>`;
+      strip.appendChild(tile);
+    });
+    row.appendChild(info);
+    row.appendChild(strip);
+    wrap.appendChild(row);
+  });
+}
+// Floating tooltip for medals (body-level, so the horizontal medal strip never clips it).
+(function initAchTooltip() {
+  let el = null, timer = null;
+  function box() { if (!el) { el = document.createElement('div'); el.className = 'ach-tooltip'; document.body.appendChild(el); } return el; }
+  function show(t) {
+    const name = t.dataset.name || '', desc = t.dataset.desc || '', prog = t.dataset.prog || '';
+    const locked = t.classList.contains('locked');
+    const b = box();
+    b.innerHTML = `<strong>${name}</strong>${desc ? `<span>${desc}</span>` : ''}${prog ? `<span class="ach-tt-prog">${prog}</span>` : ''}${locked ? `<span class="ach-tt-locked">${T('ach.locked')}</span>` : ''}`;
+    b.classList.add('on');
+    const r = t.getBoundingClientRect();
+    let left = r.left + r.width / 2 - b.offsetWidth / 2;
+    left = Math.max(8, Math.min(left, window.innerWidth - 8 - b.offsetWidth));
+    let top = r.bottom + 8;
+    if (top + b.offsetHeight > window.innerHeight - 8) top = r.top - b.offsetHeight - 8;
+    b.style.left = left + 'px';
+    b.style.top = top + 'px';
+  }
+  function hide() { if (timer) { clearTimeout(timer); timer = null; } if (el) el.classList.remove('on'); }
+  document.addEventListener('mouseover', (e) => { const t = e.target.closest('.ach-tile'); if (!t) return; hide(); timer = setTimeout(() => show(t), 120); });
+  document.addEventListener('mouseout', (e) => { if (e.target.closest('.ach-tile')) hide(); });
+  document.addEventListener('focusin', (e) => { const t = e.target.closest('.ach-tile'); if (t) show(t); });
+  document.addEventListener('focusout', hide);
+  document.addEventListener('click', hide);
+  window.addEventListener('scroll', hide, true);
+})();
+// Sober toast when a medal unlocks (no emoji, no alert).
+function achToastContainer() {
+  let c = document.getElementById('ach-toasts');
+  if (!c) { c = document.createElement('div'); c.id = 'ach-toasts'; c.className = 'ach-toasts'; document.body.appendChild(c); }
+  return c;
+}
+function showAchievementToast(id) {
+  const name = T('ach.names.' + id);
+  const c = achToastContainer();
+  const el = document.createElement('div');
+  el.className = 'ach-toast';
+  el.innerHTML = `<span class="ach-toast-tag">${T('ach.toast')}</span><span class="ach-toast-name">${name}</span>`;
+  c.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('show'));
+  setTimeout(() => { el.classList.remove('show'); setTimeout(() => el.remove(), 400); }, 4500);
+}
 
 // ===================== Actualizaciones (auto-actualizador) =====================
 // On startup (and every 6h) it checks for a new signed version; if there is one, it shows a pop-up with a button
@@ -659,6 +831,9 @@ document.addEventListener('langchange', () => {
   updateTestnetBanner();
   const wv = document.querySelector('.view[data-view="wallet"]');
   if (wv && !wv.hidden) loadWallet();
+  // Re-render the achievements (names, descriptions, family labels) in the new language if the view is open.
+  const av = document.querySelector('.view[data-view="achievements"]');
+  if (av && !av.hidden && achData) renderAchievements(achData.list);
   // Re-translate the balance explanation if it's open (it's set on click, so it wouldn't refresh otherwise).
   const ex = $('#bal-explain');
   if (ex && !ex.hidden && ex.dataset.k) ex.textContent = T(ex.dataset.k);
@@ -734,6 +909,15 @@ async function init() {
   window.I18N.setLang(lang);
   if (window.brisvia.setLanguage) window.brisvia.setLanguage(lang);
   updateTestnetBanner();
+  // Real version (from app_version), shown in the header chip and in the Settings footer — never a hard-coded number.
+  try {
+    const v = window.brisvia.appVersion ? await window.brisvia.appVersion() : null;
+    if (v) {
+      const label = 'v' + v;
+      const chip = $('#ver-chip'); if (chip) chip.textContent = label;
+      const foot = $('#ver-label'); if (foot) foot.textContent = label;
+    }
+  } catch {}
   // Auto-check for updates on startup (non-blocking): if there is a new version, the notice appears.
   setTimeout(() => { checkForUpdate(false); }, 3000);
   // Also check periodically so someone who leaves the app open for days still gets the update pop-up on its own.
@@ -787,6 +971,9 @@ async function init() {
     const wv = document.querySelector('.view[data-view="wallet"]');
     if (window.brisvia.isReal && wv && !wv.hidden) loadWallet();
   }, 4000);
+  // Achievements: an initial read plus a periodic poll so the unlock toast can appear from any view.
+  fetchAchievements();
+  setInterval(fetchAchievements, 20000);
 }
 
 // Protect an old wallet (no password) -- migrate to a password (encryptwallet + encrypted phrase).
