@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="es">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:">
@@ -8,11 +8,11 @@
 </head>
 <body>
 
-  <!-- ============ PRIMER ARRANQUE (onboarding + crear billetera + respaldo de semilla) ============ -->
+  <!-- ============ FIRST RUN (onboarding + create wallet + seed backup) ============ -->
   <div id="setup" class="overlay" hidden>
     <div class="card setup-card">
 
-      <!-- Paso: bienvenida (3 slides) -->
+      <!-- Step: welcome (3 slides) -->
       <section class="step" data-step="welcome">
         <img class="logo lg" src="assets/logo.png" alt="Brisvia">
         <h2 id="onb-title"></h2>
@@ -21,7 +21,7 @@
         <button id="onb-next" class="btn primary block"></button>
       </section>
 
-      <!-- Paso: crear o importar -->
+      <!-- Step: create or import -->
       <section class="step" data-step="choose" hidden>
         <img class="logo lg" src="assets/logo.png" alt="Brisvia">
         <h2 data-i18n="onboarding.choose_t"></h2>
@@ -30,7 +30,7 @@
         <button id="btn-import" class="btn ghost block" data-i18n="onboarding.import"></button>
       </section>
 
-      <!-- Paso: elegir contraseña (para crear o importar) -->
+      <!-- Step: choose password (for create or import) -->
       <section class="step" data-step="pass" hidden>
         <h2 data-i18n="onboarding.pass_t"></h2>
         <p class="muted" data-i18n="onboarding.pass_x"></p>
@@ -48,7 +48,7 @@
         </div>
       </section>
 
-      <!-- Paso: mostrar semilla -->
+      <!-- Step: show seed -->
       <section class="step" data-step="seed" hidden>
         <h2 data-i18n="onboarding.seed_t"></h2>
         <p class="muted" data-i18n="onboarding.seed_x"></p>
@@ -58,7 +58,7 @@
         <button id="seed-next" class="btn primary block" disabled data-i18n="common.continue"></button>
       </section>
 
-      <!-- Paso: verificar respaldo -->
+      <!-- Step: verify backup -->
       <section class="step" data-step="verify" hidden>
         <h2 data-i18n="onboarding.verify_t"></h2>
         <p class="muted" data-i18n="onboarding.verify_x"></p>
@@ -71,7 +71,7 @@
         </div>
       </section>
 
-      <!-- Paso: importar frase -->
+      <!-- Step: import phrase -->
       <section class="step" data-step="import" hidden>
         <h2 data-i18n="onboarding.import_t"></h2>
         <p class="muted" data-i18n="onboarding.import_x"></p>
@@ -86,7 +86,7 @@
     </div>
   </div>
 
-  <!-- ============ APP PRINCIPAL ============ -->
+  <!-- ============ MAIN APP ============ -->
   <header class="topbar">
     <div class="brand">
       <img class="logo sm" src="assets/logo.png" alt="Brisvia">
@@ -100,7 +100,7 @@
       <button class="nav-btn" data-view="settings" data-i18n="nav.settings"></button>
     </nav>
     <div class="topbar-right">
-      <!-- Redes sociales: visibles desde cualquier pestaña. Íconos chicos; el nombre aparece al pasar el mouse. -->
+      <!-- Social links: visible from any tab. Small icons; the name appears on hover. -->
       <div class="header-social" id="header-social">
         <button class="hsocial" data-url="https://brisvia.com" data-name="brisvia.com" aria-label="brisvia.com"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg></button>
         <button class="hsocial" data-url="https://x.com/brisviacoin" data-name="X · @brisviacoin" aria-label="X @brisviacoin"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg></button>
@@ -112,7 +112,7 @@
     </div>
   </header>
 
-  <!-- Aviso de red de prueba (testnet): sin recompensa + hasta 14 jul + billetera sirve para la real + cuenta regresiva al minado real (1 ago) -->
+  <!-- Test network (testnet) notice: no reward + until Jul 14 + the wallet also works on mainnet + countdown to real mining (Aug 1) -->
   <div id="testnet-banner" class="testnet-banner" hidden>
     <div class="tb-main">
       <strong data-i18n="testnet.tag"></strong>
@@ -127,7 +127,7 @@
 
   <main class="content">
 
-    <!-- ---- Vista Billetera ---- -->
+    <!-- ---- Wallet view ---- -->
     <section class="view" data-view="wallet">
       <div class="wallet-left">
         <div class="balance-card">
@@ -172,7 +172,7 @@
       </div>
     </section>
 
-    <!-- ---- Vista Minar ---- -->
+    <!-- ---- Mine view ---- -->
     <section class="view" data-view="mine" hidden>
       <div class="mine-grid">
         <div class="hero">
@@ -211,7 +211,7 @@
       </div>
     </section>
 
-    <!-- ---- Vista Logros ---- -->
+    <!-- ---- Achievements view ---- -->
     <section class="view" data-view="achievements" hidden>
       <p class="ach-sub muted small" data-i18n="ach.subtitle"></p>
       <div id="ach-families" class="ach-families"></div>
@@ -221,7 +221,7 @@
       </div>
     </section>
 
-    <!-- ---- Vista Ajustes ---- -->
+    <!-- ---- Settings view ---- -->
     <section class="view" data-view="settings" hidden>
       <div class="panel settings-panel">
         <div class="set-row">
@@ -266,7 +266,7 @@
     </section>
   </main>
 
-  <!-- ============ MODALES ============ -->
+  <!-- ============ MODALS ============ -->
   <div id="modal-receive" class="overlay" hidden>
     <div class="card modal">
       <button class="modal-x" data-close data-i18n-attr="aria-label:common.close">×</button>
@@ -316,7 +316,7 @@
     </div>
   </div>
 
-  <!-- Detalle de un movimiento -->
+  <!-- Movement detail -->
   <div id="modal-txdetail" class="overlay" hidden>
     <div class="card modal">
       <button class="modal-x" data-close data-i18n-attr="aria-label:common.close">×</button>
@@ -325,7 +325,7 @@
     </div>
   </div>
 
-  <!-- Seguridad y respaldo -->
+  <!-- Security and backup -->
   <div id="modal-security" class="overlay" hidden>
     <div class="card modal">
       <button class="modal-x" data-close data-i18n-attr="aria-label:common.close">×</button>
@@ -339,7 +339,7 @@
     </div>
   </div>
 
-  <!-- Mostrar frase (avanzado): pide la contraseña de la billetera -->
+  <!-- Show phrase (advanced): asks for the wallet password -->
   <div id="modal-reveal" class="overlay" hidden>
     <div class="card modal">
       <button class="modal-x" data-close data-i18n-attr="aria-label:common.close">×</button>
@@ -356,7 +356,7 @@
     </div>
   </div>
 
-  <!-- Proteger una billetera vieja (sin contraseña) al abrirla -->
+  <!-- Protect an old wallet (no password) when opening it -->
   <div id="modal-protect" class="overlay" hidden>
     <div class="card modal">
       <h2 data-i18n="protect.title"></h2>
@@ -375,7 +375,7 @@
     </div>
   </div>
 
-  <!-- Verificar respaldo (escribir las 12 palabras) -->
+  <!-- Verify backup (type the 12 words) -->
   <div id="modal-verify-backup" class="overlay" hidden>
     <div class="card modal">
       <button class="modal-x" data-close data-i18n-attr="aria-label:common.close">×</button>
@@ -390,7 +390,7 @@
     </div>
   </div>
 
-  <!-- Actualización disponible: pop-up al abrir el programa. OK actualiza; Más tarde lo deja para después. -->
+  <!-- Update available: pop-up when the app opens. OK updates; Later dismisses it. -->
   <div id="modal-update" class="overlay" hidden>
     <div class="card modal">
       <h2 data-i18n="update.available_tag"></h2>

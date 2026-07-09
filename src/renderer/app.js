@@ -29,7 +29,7 @@ function showView(name) {
 }
 $$('.nav-btn').forEach((b) => b.addEventListener('click', () => showView(b.dataset.view)));
 
-// ===================== Primer arranque (onboarding + billetera + semilla) =====================
+// ===================== First run (onboarding + wallet + seed) =====================
 const ONB = ['welcome1', 'welcome2', 'welcome3'];
 let onbStep = 0;
 function setupStep(name) { $$('#setup .step').forEach((s) => (s.hidden = s.dataset.step !== name)); }
@@ -44,13 +44,13 @@ $('#onb-next').addEventListener('click', () => {
   else setupStep('choose');
 });
 
-// -- Crear billetera (genera las 12 palabras reales en el backend) --
+// -- Create wallet (the backend generates the real 12 words) --
 let currentSeed = [];
 $('#btn-create').addEventListener('click', () => startPassStep('create'));
 $('#btn-import').addEventListener('click', () => { buildImportGrid(); setupStep('import'); });
 function alertInline(msg) { const t = $('#onb-text'); if (t) t.textContent = msg; }
 
-// -- Paso de contraseña: cifra la billetera (Core) y la frase de 12 palabras. Sirve para crear e importar. --
+// -- Password step: encrypts the wallet (Core) and the 12-word phrase. Used for both create and import. --
 let passMode = 'create';
 let importedWords = [];
 function startPassStep(mode) {
@@ -61,7 +61,7 @@ function startPassStep(mode) {
   setupStep('pass');
   $('#pass-1').focus();
 }
-// Fuerza 0..4: largo + variedad. Guía visual, no un bloqueo estricto (el respaldo real son las 12 palabras).
+// Strength 0..4: length + variety. A visual guide, not a hard block (the real backup is the 12 words).
 function passStrength(p) {
   let s = 0;
   if (p.length >= 8) s++;
@@ -102,7 +102,7 @@ $('#pass-next').addEventListener('click', async () => {
   }
 });
 
-// 12 casilleros para importar la frase (uno por palabra). Pegar las 12 juntas en el primero las distribuye.
+// 12 boxes to import the phrase (one per word). Pasting all 12 at once into the first box spreads them out.
 function buildImportGrid() {
   const grid = $('#import-grid');
   grid.innerHTML = '';
@@ -204,7 +204,7 @@ async function checkVerify() {
 $('#verify-reset').addEventListener('click', buildVerify);
 $('#verify-back').addEventListener('click', showSeedStep);
 
-// -- Importar --
+// -- Import --
 $('#import-back').addEventListener('click', () => setupStep('choose'));
 $('#import-ok').addEventListener('click', async () => {
   const words = [...$('#import-grid').querySelectorAll('input')].map((i) => i.value.trim().toLowerCase()).filter(Boolean);
@@ -216,12 +216,12 @@ $('#import-ok').addEventListener('click', async () => {
   }
   msg.hidden = true;
   importedWords = words;
-  startPassStep('import'); // pedir una contraseña para cifrar la billetera restaurada
+  startPassStep('import'); // ask for a password to encrypt the restored wallet
 });
 
 function finishSetup() { $('#setup').hidden = true; showView('wallet'); if (window.brisvia.isReal) loadWallet(); }
 
-// ===================== Minado =====================
+// ===================== Mining =====================
 let mining = false;
 // Formats a hashrate (H/s) with the right unit, and a duration (seconds) in a human, non-technical way.
 function fmtHashrate(hs) {
@@ -256,7 +256,7 @@ async function refreshMine() {
     return;
   }
   toggle.disabled = false;
-  // Tres estados: detenido / preparando (armando el dataset, unos segundos) / participando.
+  // Three states: stopped / preparing (building the dataset, a few seconds) / participating.
   if (preparing) {
     $('#state-badge').textContent = T('mine.preparing');
     $('#state-badge').className = 'badge prep';
@@ -326,7 +326,7 @@ $$('.mine-grid .seg-btn').forEach((b) => b.addEventListener('click', () => setPo
   }
 }
 
-// ===================== Billetera =====================
+// ===================== Wallet =====================
 function catLabel(cat) {
   if (cat === 'generate' || cat === 'immature') return T('wallet.mined');
   if (cat === 'send') return T('wallet.sent');
@@ -413,7 +413,7 @@ function renderPager(pager, total) {
 function fmt(n) { return window.I18N.fmtNum(n, { maximumFractionDigits: 8, useGrouping: false }); }
 function fmtDate(epoch) { return window.I18N.fmtDate(epoch); }
 
-// Detalle de un movimiento (click en la lista)
+// Movement detail (click on the list)
 async function openTxDetail(h) {
   $('#txd-rows').innerHTML = `<div class="dr"><span class="muted">${T('common.loading')}</span></div>`;
   openModal('modal-txdetail');
@@ -435,7 +435,7 @@ async function openTxDetail(h) {
   if (cp) cp.addEventListener('click', async () => { try { await navigator.clipboard.writeText(d.txid); cp.textContent = T('common.copied'); } catch {} });
 }
 
-// Chips de saldo (Madurando / En camino): al tocarlos, explican por qué esa parte no se puede usar todavía.
+// Balance chips (Maturing / Incoming): tapping them explains why that part can't be used yet.
 $$('.bal-chip').forEach((c) => c.addEventListener('click', () => {
   const ex = $('#bal-explain');
   const key = c.classList.contains('mat') ? 'wallet.maturing_note' : 'wallet.incoming_note';
@@ -443,7 +443,7 @@ $$('.bal-chip').forEach((c) => c.addEventListener('click', () => {
   ex.textContent = T(key); ex.dataset.k = key; ex.hidden = false;
 }));
 
-// Recibir
+// Receive
 $('#act-receive').addEventListener('click', async () => {
   const w = await window.brisvia.wallet.summary();
   showReceive(w.address);
@@ -482,7 +482,7 @@ function fakeQR(seedStr) {
   return `<svg viewBox="0 0 ${N} ${N}" fill="#0B1117" shape-rendering="crispEdges">${rects}</svg>`;
 }
 
-// Enviar
+// Send
 // Accepts the amount with comma OR dot as decimal separator (an es user types "12,5", an en user "12.5").
 // If there is a comma, dots are treated as thousands separators and dropped.
 function parseAmount(str) {
@@ -528,7 +528,7 @@ $('#send-go').addEventListener('click', async () => {
   else { go.disabled = false; go.classList.remove('is-busy'); msg.textContent = r && r.error ? transError(r.error) : T('send.fail'); }
 });
 
-// ===================== Ajustes =====================
+// ===================== Settings =====================
 async function loadSettings() {
   const s = await window.brisvia.settings.get();
   $('#set-autostart').checked = !!s.autostart;
@@ -539,7 +539,7 @@ async function loadSettings() {
 $('#set-autostart').addEventListener('change', (e) => window.brisvia.settings.set('autostart', e.target.checked));
 $('#set-tray').addEventListener('change', (e) => window.brisvia.settings.set('tray', e.target.checked));
 $$('#set-intensity .seg-btn').forEach((b) => b.addEventListener('click', () => setPower(parseInt(b.dataset.pct, 10), true)));
-// Selector de idioma
+// Language selector
 $$('#set-language .seg-btn').forEach((b) => b.addEventListener('click', () => {
   window.I18N.setLang(b.dataset.lang);
   if (window.brisvia.setLanguage) window.brisvia.setLanguage(b.dataset.lang); // rebuilds the tray menu
@@ -547,12 +547,12 @@ $$('#set-language .seg-btn').forEach((b) => b.addEventListener('click', () => {
 // Social links live in the header now (visible from any view); open them in the system browser.
 $$('.hsocial').forEach((b) => b.addEventListener('click', () => window.brisvia.openUrl(b.dataset.url)));
 
-// Seguridad y respaldo
+// Security and backup
 $('#set-security').addEventListener('click', () => openModal('modal-security'));
 
-// ===================== Logros =====================
-// Las 50 medallas salen de la billetera (viajan con las 12 palabras). El backend devuelve solo ids + números;
-// los textos se traducen acá por i18n. Estilo de medallas portado del preview aprobado.
+// ===================== Achievements =====================
+// The 50 medals come from the wallet (they travel with the 12 words). The backend returns only ids + numbers;
+// the texts are translated here via i18n. Medal styling ported from the approved preview.
 const ACH_FAM_ORDER = ['blocks', 'balance', 'sends', 'receives', 'age', 'pioneer', 'rank'];
 // game-icons paths (embedded inline; one icon per family, per the design spec).
 const ACH_ICONS = {
@@ -675,9 +675,9 @@ function showAchievementToast(id) {
   setTimeout(() => { el.classList.remove('show'); setTimeout(() => el.remove(), 400); }, 4500);
 }
 
-// ===================== Actualizaciones (auto-actualizador) =====================
-// Al iniciar (y cada 6 h) chequea si hay una versión nueva firmada; si la hay, muestra un pop-up con un botón
-// que la baja, verifica su firma, instala y reinicia. También se puede buscar a mano desde Ajustes.
+// ===================== Updates (self-updater) =====================
+// On startup (and every 6 h) it checks for a newer signed version; if there is one, it shows a pop-up with a button
+// that downloads it, verifies its signature, installs and restarts. It can also be checked manually from Settings.
 let updatePendingVersion = null;
 async function checkForUpdate(manual) {
   const btn = $('#set-update');
@@ -718,7 +718,7 @@ if ($('#upd-later')) $('#upd-later').addEventListener('click', () => {
 // when the wallet is created (with a mandatory backup verification). To re-check a backup afterwards the user
 // uses "Verify my backup" below, which compares what they type WITHOUT ever revealing the phrase again.
 // (A protected "show recovery phrase" behind a wallet password is planned together with wallet encryption for mainnet.)
-// Verificar respaldo: el usuario escribe sus 12 palabras y se comparan con las de la billetera.
+// Verify backup: the user types their 12 words and they are compared against the wallet's.
 $('#sec-verify').addEventListener('click', () => {
   const grid = $('#vb-grid'); grid.innerHTML = '';
   for (let i = 0; i < 12; i++) {
@@ -747,7 +747,7 @@ $('#vb-check').addEventListener('click', async () => {
   msg.textContent = ok ? T('security.verify_ok') : T('security.verify_bad');
 });
 
-// Mostrar frase (avanzado): pide la contraseña, descifra la frase y la muestra una vez.
+// Show phrase (advanced): asks for the password, decrypts the phrase and shows it once.
 $('#sec-reveal').addEventListener('click', () => {
   $('#reveal-pass').value = ''; $('#reveal-msg').hidden = true;
   closeModal('modal-security'); openModal('modal-reveal');
@@ -768,19 +768,19 @@ $('#reveal-go').addEventListener('click', async () => {
   }
 });
 
-// ===================== Modales =====================
+// ===================== Modals =====================
 function openModal(id) { $('#' + id).hidden = false; }
 function closeModal(id) { $('#' + id).hidden = true; }
 $$('[data-close]').forEach((b) => b.addEventListener('click', (e) => { const ov = e.target.closest('.overlay'); if (ov) ov.hidden = true; }));
-// Los pop-ups NO se cierran al tocar afuera (persisten, para no cerrarlos por accidente y perder lo escrito):
-// se cierran solo con la X, con los botones (Cancelar/etc.) o con la tecla Escape.
+// Pop-ups do NOT close on an outside click (they persist, so they aren't dismissed by accident and lose typed input):
+// they close only via the X, the buttons (Cancel/etc.) or the Escape key.
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   const open = $$('.overlay').filter((ov) => ov.id !== 'setup' && !ov.hidden).pop();
   if (open) open.hidden = true;
 });
 
-// ===================== Estado de red (modo nodo real) =====================
+// ===================== Network status (real node mode) =====================
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function setNet(connected, key) {
   const dot = document.querySelector('.net-dot');
@@ -840,8 +840,8 @@ document.addEventListener('langchange', () => {
   $$('#set-language .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.lang === window.I18N.lang));
 });
 
-// ===================== Tooltips (explicaciones al pasar el mouse) =====================
-// Cualquier elemento con data-tip-key="X" muestra el texto tips.X a los ~0,5s de dejar el mouse encima.
+// ===================== Tooltips (hover explanations) =====================
+// Any element with data-tip-key="X" shows the tips.X text ~0.5s after the mouse rests on it.
 // Explains in plain words terms a non-technical user may not know (Blocks, Difficulty, etc.).
 (function initTooltips() {
   let el = null, timer = null;
@@ -877,15 +877,15 @@ document.addEventListener('langchange', () => {
   document.addEventListener('click', hide);
 })();
 
-// ===================== Red de prueba (testnet): aviso + cuenta regresiva al minado real =====================
+// ===================== Test network (testnet): notice + countdown to real mining =====================
 // Real mining start (mainnet). Fixed in code so the whole "test network" notice — including this
 // countdown — hides ITSELF the moment real mining begins, with no update required.
-const MAINNET_START = Date.UTC(2026, 7, 1, 15, 0, 0); // sáb 1 ago 2026, 12:00 Argentina = 15:00 UTC
+const MAINNET_START = Date.UTC(2026, 7, 1, 15, 0, 0); // Sat 1 Aug 2026, 12:00 Argentina = 15:00 UTC
 function updateTestnetBanner() {
   const banner = $('#testnet-banner');
   if (!banner) return;
   const diff = MAINNET_START - Date.now();
-  if (diff <= 0) { banner.hidden = true; return; } // ya arrancó el minado real: el aviso desaparece solo
+  if (diff <= 0) { banner.hidden = true; return; } // real mining already started: the notice hides itself
   banner.hidden = false;
   const cd = $('#tb-countdown');
   if (!cd) return;
@@ -894,11 +894,11 @@ function updateTestnetBanner() {
   cd.hidden = false;
   cd.textContent = days >= 1 ? T('testnet.mainnet_in', { d: days, h: hours }) : T('testnet.mainnet_soon');
 }
-setInterval(updateTestnetBanner, 60000); // refresca el contador cada minuto
+setInterval(updateTestnetBanner, 60000); // refresh the countdown every minute
 
-// ===================== Arranque =====================
+// ===================== Startup =====================
 async function init() {
-  // Idioma: el guardado; o el del SO la primera vez (systemLocale del backend real; navigator.language en preview).
+  // Language: the saved one; or the OS one on first run (systemLocale from the real backend; navigator.language in preview).
   let lang = null;
   try { lang = localStorage.getItem('brv_lang'); } catch {}
   if (!lang) {
@@ -918,7 +918,7 @@ async function init() {
       const foot = $('#ver-label'); if (foot) foot.textContent = label;
     }
   } catch {}
-  // Auto-chequeo de actualizaciones al iniciar (no bloqueante): si hay una versión nueva, aparece el aviso.
+  // Auto-check for updates on startup (non-blocking): if there is a newer version, the notice appears.
   setTimeout(() => { checkForUpdate(false); }, 3000);
   // Also check periodically so someone who leaves the app open for days still gets the update pop-up on its own.
   setInterval(() => { checkForUpdate(false); }, 6 * 60 * 60 * 1000); // every 6 hours
@@ -976,7 +976,7 @@ async function init() {
   setInterval(fetchAchievements, 20000);
 }
 
-// Proteger una billetera vieja (sin contraseña) — migra a contraseña (encryptwallet + frase cifrada).
+// Protect an old wallet (no password) — migrates to a password (encryptwallet + encrypted phrase).
 function openProtect() {
   $('#protect-1').value = ''; $('#protect-2').value = ''; $('#protect-msg').hidden = true;
   $('#protect-meter').className = 'pass-meter';
