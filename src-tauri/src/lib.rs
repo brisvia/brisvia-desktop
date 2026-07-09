@@ -740,14 +740,14 @@ mod seed_crypto_tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let phrase = "legal winner thank year wave sausage worth useful legal winner thank yellow";
-        encrypt_phrase_file(&dir, phrase, "clave-correcta-123").unwrap();
+        encrypt_phrase_file(&dir, phrase, "correct-key-123").unwrap();
         // The file must NOT contain the phrase in plaintext.
         let raw = std::fs::read(dir.join("wallet_seed.enc")).unwrap();
         assert!(!String::from_utf8_lossy(&raw).contains("winner"), "the phrase leaked in plaintext");
         // Correct password decrypts to the same phrase.
-        assert_eq!(decrypt_phrase_file(&dir, "clave-correcta-123").unwrap(), phrase);
+        assert_eq!(decrypt_phrase_file(&dir, "correct-key-123").unwrap(), phrase);
         // Wrong password fails (AES-GCM auth tag mismatch).
-        assert!(decrypt_phrase_file(&dir, "clave-incorrecta").is_err());
+        assert!(decrypt_phrase_file(&dir, "wrong-key").is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

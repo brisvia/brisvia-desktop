@@ -16,6 +16,18 @@ The coin itself (the node and consensus code) lives in the core repository:
   syncs and validates on its own.
 - **Bilingual** — the interface is available in Spanish and English, and follows the system language by default.
 
+## Download
+
+Ready-to-run installers for each release are on the
+[Releases page](https://github.com/brisvia/brisvia-desktop/releases/latest):
+
+- **Windows** — `Brisvia-Miner-Windows.exe` (installer)
+- **macOS** — `Brisvia-Miner-macOS.dmg`
+
+After installing, open Brisvia Miner, create or restore a wallet from your 12 words, and press **Start** to
+mine — no configuration and no command line required. The app updates itself when a new signed version is
+available. Learn more at [brisvia.com](https://brisvia.com).
+
 ## How it works
 
 Brisvia Desktop is built with [Tauri](https://tauri.app): a Rust backend (`src-tauri`) drives the system

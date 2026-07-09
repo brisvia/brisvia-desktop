@@ -27,3 +27,9 @@ I18N_SPEC.md
 PLAN.md
 crates/brisvia-randomx/README.md
 MEJORAS-PENDIENTES.md
+PENDIENTES-SIN-PUBLICAR.md
+LOGROS-50-DISENO.md
+
+# Release/updater manifests generated locally (published as release assets, not versioned)
+latest.json
+latest_*.json

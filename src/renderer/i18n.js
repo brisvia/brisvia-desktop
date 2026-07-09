@@ -11,13 +11,13 @@ window.I18N = (function () {
     return key.split('.').reduce((o, k) => (o && o[k] != null ? o[k] : null), obj);
   }
 
-  // t('clave', {count: 3, amount: '5'}) -> texto traducido con variables y plural.
+  // t('key', {count: 3, amount: '5'}) -> translated text with variables and plural.
   function t(key, vars) {
     let val = resolve(dict, key);
     if (val == null) val = resolve(fallback(), key);
     if (val == null) return `[${key}]`;
     if (val && typeof val === 'object') {
-      // plural: { one, other } (y opcionalmente many/few/two/zero)
+      // plural: { one, other } (and optionally many/few/two/zero)
       if (vars && vars.count != null) {
         const cat = new Intl.PluralRules(lang).select(vars.count);
         val = val[cat] != null ? val[cat] : (val.other != null ? val.other : val.one);
@@ -31,7 +31,7 @@ window.I18N = (function () {
     return val;
   }
 
-  // Aplica traducciones a todo el DOM: [data-i18n]=textContent, [data-i18n-attr]="attr:clave;attr2:clave".
+  // Applies translations across the DOM: [data-i18n]=textContent, [data-i18n-attr]="attr:key;attr2:key".
   function applyDom(root) {
     const r = root || document;
     r.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.getAttribute('data-i18n')); });
