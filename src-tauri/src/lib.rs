@@ -581,14 +581,29 @@ fn wallet_kind(state: State<AppState>) -> Value {
 }
 
 // ================= BIP39: real 12-word backup =================
+// Network whose EXT prefix is used to serialize the extended private key of the wallet descriptors.
+// In production it is WALLET_NETWORK (tprv on the test build, xprv on the mainnet build), so the local
+// node accepts the wpkh() descriptor. But under the e2e feature the node is redirected to regtest; a
+// mainnet build would then derive an xprv key that a regtest node rejects ("key ... is not valid").
+// So, ONLY in e2e builds redirected to regtest, derive with the regtest (tprv) prefix to match the node.
+// This branch is compiled out of the public binary (the env read only exists under the e2e feature),
+// so production key derivation is unchanged.
+fn wallet_network() -> bitcoin::Network {
+    #[cfg(feature = "e2e")]
+    if std::env::var("BRISVIA_E2E_CHAIN").map(|c| c == "regtest").unwrap_or(false) {
+        return bitcoin::Network::Regtest;
+    }
+    WALLET_NETWORK
+}
+
 // Derives the (external, internal) descriptors WITHOUT checksum from a mnemonic.
-// The extended private key is serialized with WALLET_NETWORK's EXT prefix (tprv on the test build,
-// xprv on the mainnet build) so the local node's wpkh() descriptor accepts it. Derivation coin type
-// stays 1' (path 84h/1h/0h) on both builds: it does not affect the EXT prefix nor descriptor validation.
+// The extended private key is serialized with wallet_network()'s EXT prefix (tprv on the test build,
+// xprv on the mainnet build; regtest tprv under e2e) so the local node's wpkh() descriptor accepts it.
+// Derivation coin type stays 1' (path 84h/1h/0h) on both builds: it does not affect the EXT prefix.
 fn descriptors_from_mnemonic(mnemonic: &Mnemonic) -> Result<(String, String, String), String> {
     let seed = mnemonic.to_seed("");
     let secp = Secp256k1::new();
-    let master = Xpriv::new_master(WALLET_NETWORK, &seed).map_err(|e| e.to_string())?;
+    let master = Xpriv::new_master(wallet_network(), &seed).map_err(|e| e.to_string())?;
     let fp = master.fingerprint(&secp);
     let path = DerivationPath::from_str("84h/1h/0h").map_err(|e| e.to_string())?; // coin 1' = test
     let account = master.derive_priv(&secp, &path).map_err(|e| e.to_string())?;
