@@ -1,0 +1,34 @@
+diff --git a/node_modules/@wdio/tauri-service/dist/cjs/index.js b/node_modules/@wdio/tauri-service/dist/cjs/index.js
+index 199d9ee..c023782 100644
+--- a/node_modules/@wdio/tauri-service/dist/cjs/index.js
++++ b/node_modules/@wdio/tauri-service/dist/cjs/index.js
+@@ -3900,6 +3900,12 @@ class TauriWorkerService {
+         }
+     }
+     async beforeCommand(commandName, _args) {
++        // BRISVIA E2E PATCH: this is a single-window Tauri app, so per-command window-focus
++        // management is unnecessary. The upstream helper polls a Tauri "wdio" plugin that this
++        // app does not register, spending ~8s per focus command before failing — which exhausts
++        // the mocha budget on interaction-heavy specs. No-op the whole hook.
++        return;
++        // eslint-disable-next-line no-unreachable
+         if (!this.browser || this.browser.isMultiremote) {
+             return;
+         }
+diff --git a/node_modules/@wdio/tauri-service/dist/esm/index.js b/node_modules/@wdio/tauri-service/dist/esm/index.js
+index 96bcb93..226359d 100644
+--- a/node_modules/@wdio/tauri-service/dist/esm/index.js
++++ b/node_modules/@wdio/tauri-service/dist/esm/index.js
+@@ -3896,6 +3896,12 @@ class TauriWorkerService {
+         }
+     }
+     async beforeCommand(commandName, _args) {
++        // BRISVIA E2E PATCH: this is a single-window Tauri app, so per-command window-focus
++        // management is unnecessary. The upstream helper polls a Tauri "wdio" plugin that this
++        // app does not register, spending ~8s per focus command before failing — which exhausts
++        // the mocha budget on interaction-heavy specs. No-op the whole hook.
++        return;
++        // eslint-disable-next-line no-unreachable
+         if (!this.browser || this.browser.isMultiremote) {
+             return;
+         }
