@@ -1,6 +1,6 @@
 [package]
 name = "brisvia-miner"
-version = "0.5.0"
+version = "1.0.0"
 description = "Brisvia (BRVA) desktop miner"
 authors = ["Brisvia"]
 edition = "2021"
@@ -13,6 +13,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 # Build the app against the real network (mainnet). Without this flag the app targets
 # the shared test network (testnet). Only three network constants differ between builds.
 mainnet = []
+# Test-only build for the real end-to-end suite (layers 3 and 4). NEVER shipped in the public binary.
+# It unlocks a handful of env-var hooks used ONLY by the automated tests:
+#   - BRISVIA_E2E_CHAIN / BRISVIA_E2E_SUBDIR: point the node at an isolated regtest chain.
+#   - BRISVIA_E2E_NOW: freeze the webview clock (Date.now) to test the pre-launch wait mode.
+# Without this feature the code compiles those hooks out entirely, so production behaviour is untouched.
+e2e = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

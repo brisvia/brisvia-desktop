@@ -13,58 +13,58 @@
     <div class="card setup-card">
 
       <!-- Step: welcome (3 slides) -->
-      <section class="step" data-step="welcome">
+      <section class="step" data-step="welcome" data-testid="onb-welcome">
         <img class="logo lg" src="assets/logo.png" alt="Brisvia">
         <h2 id="onb-title"></h2>
         <p id="onb-text" class="muted"></p>
         <div class="onb-dots"><span class="dot on"></span><span class="dot"></span><span class="dot"></span></div>
-        <button id="onb-next" class="btn primary block"></button>
+        <button id="onb-next" class="btn primary block" data-testid="onb-next"></button>
       </section>
 
       <!-- Step: create or import -->
-      <section class="step" data-step="choose" hidden>
+      <section class="step" data-step="choose" data-testid="onb-choose" hidden>
         <img class="logo lg" src="assets/logo.png" alt="Brisvia">
         <h2 data-i18n="onboarding.choose_t"></h2>
         <p class="muted" data-i18n="onboarding.choose_x"></p>
-        <button id="btn-create" class="btn primary block" data-i18n="onboarding.create"></button>
+        <button id="btn-create" class="btn primary block" data-testid="onb-create" data-i18n="onboarding.create"></button>
         <button id="btn-import" class="btn ghost block" data-i18n="onboarding.import"></button>
       </section>
 
       <!-- Step: choose password (for create or import) -->
-      <section class="step" data-step="pass" hidden>
+      <section class="step" data-step="pass" data-testid="onb-pass" hidden>
         <h2 data-i18n="onboarding.pass_t"></h2>
         <p class="muted" data-i18n="onboarding.pass_x"></p>
         <label class="field"><span class="muted small" data-i18n="onboarding.pass_label"></span>
-          <input id="pass-1" type="password" autocomplete="new-password" spellcheck="false"></label>
+          <input id="pass-1" type="password" autocomplete="new-password" spellcheck="false" data-testid="pass-1"></label>
         <div id="pass-meter" class="pass-meter"><i></i></div>
         <label class="field"><span class="muted small" data-i18n="onboarding.pass_confirm"></span>
-          <input id="pass-2" type="password" autocomplete="new-password" spellcheck="false"></label>
+          <input id="pass-2" type="password" autocomplete="new-password" spellcheck="false" data-testid="pass-2"></label>
         <label class="check"><input type="checkbox" id="pass-show"> <span data-i18n="onboarding.pass_show"></span></label>
         <div class="warn" data-i18n="onboarding.pass_warn"></div>
-        <p id="pass-msg" class="verify-msg" hidden></p>
+        <p id="pass-msg" class="verify-msg" data-testid="pass-msg" hidden></p>
         <div class="row-gap">
           <button id="pass-back" class="btn ghost" data-i18n="common.back"></button>
-          <button id="pass-next" class="btn primary" data-i18n="common.continue"></button>
+          <button id="pass-next" class="btn primary" data-testid="pass-next" data-i18n="common.continue"></button>
         </div>
       </section>
 
       <!-- Step: show seed -->
-      <section class="step" data-step="seed" hidden>
+      <section class="step" data-step="seed" data-testid="onb-seed" hidden>
         <h2 data-i18n="onboarding.seed_t"></h2>
         <p class="muted" data-i18n="onboarding.seed_x"></p>
         <div class="warn" data-i18n="onboarding.seed_warn"></div>
-        <ol id="seed-grid" class="seed-grid"></ol>
-        <label class="check"><input type="checkbox" id="seed-ack"> <span data-i18n="onboarding.seed_ack"></span></label>
-        <button id="seed-next" class="btn primary block" disabled data-i18n="common.continue"></button>
+        <ol id="seed-grid" class="seed-grid" data-testid="seed-grid"></ol>
+        <label class="check"><input type="checkbox" id="seed-ack" data-testid="seed-ack"> <span data-i18n="onboarding.seed_ack"></span></label>
+        <button id="seed-next" class="btn primary block" disabled data-testid="seed-next" data-i18n="common.continue"></button>
       </section>
 
       <!-- Step: verify backup -->
-      <section class="step" data-step="verify" hidden>
+      <section class="step" data-step="verify" data-testid="onb-verify" hidden>
         <h2 data-i18n="onboarding.verify_t"></h2>
         <p class="muted" data-i18n="onboarding.verify_x"></p>
-        <div id="verify-slots" class="verify-slots"></div>
-        <div id="verify-bank" class="verify-bank"></div>
-        <p id="verify-msg" class="verify-msg" hidden></p>
+        <div id="verify-slots" class="verify-slots" data-testid="verify-slots"></div>
+        <div id="verify-bank" class="verify-bank" data-testid="verify-bank"></div>
+        <p id="verify-msg" class="verify-msg" data-testid="verify-msg" hidden></p>
         <div class="row-gap">
           <button id="verify-back" class="btn ghost" data-i18n="onboarding.verify_back"></button>
           <button id="verify-reset" class="btn ghost" data-i18n="common.retry"></button>
@@ -91,11 +91,11 @@
     <div class="brand">
       <img class="logo sm" src="assets/logo.png" alt="Brisvia">
       <span class="brand-name">Brisvia</span>
-      <span class="ver-chip" id="ver-chip"></span>
+      <span class="ver-chip" id="ver-chip" data-testid="ver-chip"></span>
     </div>
     <nav class="nav" role="tablist">
-      <button class="nav-btn active" data-view="wallet" data-i18n="nav.wallet"></button>
-      <button class="nav-btn" data-view="mine" data-i18n="nav.mine"></button>
+      <button class="nav-btn active" data-view="wallet" data-testid="nav-wallet" data-i18n="nav.wallet"></button>
+      <button class="nav-btn" data-view="mine" data-testid="nav-mine" data-i18n="nav.mine"></button>
       <button class="nav-btn" data-view="achievements" data-i18n="nav.achievements"></button>
       <button class="nav-btn" data-view="settings" data-i18n="nav.settings"></button>
     </nav>
@@ -116,22 +116,22 @@
   </header>
 
   <!-- Test network (testnet) notice: no reward + until Jul 14 + the wallet also works on mainnet + countdown to real mining (Aug 1) -->
-  <div id="testnet-banner" class="testnet-banner" hidden>
+  <div id="testnet-banner" class="testnet-banner" data-testid="testnet-banner" hidden>
     <div class="tb-main">
-      <strong data-i18n="testnet.tag"></strong>
-      <span data-i18n="testnet.note"></span>
+      <strong id="tb-tag" data-testid="tb-tag" data-i18n="testnet.tag"></strong>
+      <span id="tb-note" data-i18n="testnet.note"></span>
       <span class="tb-until" data-i18n="testnet.until"></span>
     </div>
     <div class="tb-sub">
       <span class="tb-wallet" data-i18n="testnet.wallet_note"></span>
-      <span id="tb-countdown" class="tb-countdown" hidden></span>
+      <span id="tb-countdown" class="tb-countdown" data-testid="tb-countdown" hidden></span>
     </div>
   </div>
 
   <main class="content">
 
     <!-- ---- Wallet view ---- -->
-    <section class="view" data-view="wallet">
+    <section class="view" data-view="wallet" data-testid="view-wallet">
       <div class="wallet-left">
         <div class="balance-card">
           <div class="bal-lbl muted small" data-tip-key="balance"><span data-i18n="wallet.balance_available"></span></div>
@@ -146,7 +146,7 @@
           </div>
           <p class="bal-explain muted small" id="bal-explain" hidden></p>
           <div class="bal-actions">
-            <button id="act-receive" class="btn primary" data-i18n="wallet.receive"></button>
+            <button id="act-receive" class="btn primary" data-testid="act-receive" data-i18n="wallet.receive"></button>
             <button id="act-send" class="btn mineral" data-i18n="wallet.send"></button>
           </div>
           <div class="bal-trust muted small" data-i18n="wallet.trust"></div>
@@ -155,11 +155,11 @@
         <div class="panel net-panel">
           <div class="panel-head"><h3 data-i18n="net_panel.title"></h3></div>
           <div class="net-rows">
-            <div class="nr"><span class="muted" data-tip-key="network" data-i18n="net_panel.network"></span><span id="nr-network">—</span></div>
+            <div class="nr"><span class="muted" data-tip-key="network" data-i18n="net_panel.network"></span><span id="nr-network" data-testid="nr-network">—</span></div>
             <div class="nr"><span class="muted" data-tip-key="mode" data-i18n="net_panel.mode"></span><span id="nr-mode">—</span></div>
-            <div class="nr"><span class="muted" data-tip-key="status" data-i18n="net_panel.status"></span><span id="nr-status"></span></div>
-            <div class="nr"><span class="muted" data-tip-key="mining_status" data-i18n="net_panel.mining"></span><span id="nr-mining">—</span></div>
-            <div class="nr"><span class="muted" data-tip-key="blocks" data-i18n="net_panel.height"></span><span id="nr-height">—</span></div>
+            <div class="nr"><span class="muted" data-tip-key="status" data-i18n="net_panel.status"></span><span id="nr-status" data-testid="nr-status"></span></div>
+            <div class="nr"><span class="muted" data-tip-key="mining_status" data-i18n="net_panel.mining"></span><span id="nr-mining" data-testid="nr-mining">—</span></div>
+            <div class="nr"><span class="muted" data-tip-key="blocks" data-i18n="net_panel.height"></span><span id="nr-height" data-testid="nr-height">—</span></div>
             <div class="nr"><span class="muted" data-tip-key="peers" data-i18n="net_panel.peers"></span><span id="nr-peers">—</span></div>
             <div class="nr"><span class="muted" data-tip-key="difficulty" data-i18n="net_panel.difficulty"></span><span id="nr-diff">—</span></div>
           </div>
@@ -178,13 +178,13 @@
     </section>
 
     <!-- ---- Mine view ---- -->
-    <section class="view" data-view="mine" hidden>
+    <section class="view" data-view="mine" data-testid="view-mine" hidden>
       <div class="mine-grid">
         <div class="hero">
-          <div class="state-line"><span id="state-badge" class="badge off"></span></div>
-          <h1 id="hero-title"></h1>
+          <div class="state-line"><span id="state-badge" class="badge off" data-testid="state-badge"></span></div>
+          <h1 id="hero-title" data-testid="hero-title"></h1>
           <p id="hero-sub" class="muted"></p>
-          <button id="toggle" class="btn giant primary"></button>
+          <button id="toggle" class="btn giant primary" data-testid="mine-toggle"></button>
           <div class="intensity">
             <span class="muted small" data-tip-key="intensity" data-i18n="mine.how_much"></span>
             <div class="seg" role="group" data-i18n-attr="aria-label:mine.how_much">
@@ -202,8 +202,7 @@
         <aside class="contrib">
           <h3 data-i18n="mine.your_contribution"></h3>
           <p class="contrib-sub muted small" data-i18n="mine.note"></p>
-          <div class="metric big" data-tip-key="mine_blocks"><div class="m-val" id="m-blocks">0</div><div class="m-lbl muted" data-i18n="mine.blocks_found"></div></div>
-          <p class="stale-line muted small" id="stale-line" hidden><strong id="m-stale">0</strong> <span data-i18n="mine.stale_blocks"></span> · <span data-i18n="mine.stale_hint"></span></p>
+          <div class="metric big" data-tip-key="mine_blocks"><div class="m-val" id="m-blocks" data-testid="m-blocks">0</div><div class="m-lbl muted" data-i18n="mine.blocks_found"></div></div>
           <div class="metric-row">
             <div class="metric" data-tip-key="mine_speed"><div class="m-val" id="m-speed">0 <span class="unit">H/s</span></div><div class="m-lbl muted" data-i18n="mine.speed"></div></div>
             <div class="metric" data-tip-key="mine_cpu"><div class="m-val" id="m-cpu">0%</div><div class="m-lbl muted" data-i18n="mine.cpu_use"></div></div>
@@ -238,7 +237,7 @@
           <label class="switch"><input type="checkbox" id="set-tray"><span class="slider"></span></label>
         </div>
         <div class="set-row">
-          <div><div class="set-title" data-i18n="settings.mining_mode_title"></div><div class="muted small" data-i18n="settings.mining_mode_sub"></div></div>
+          <div><div class="set-title" data-i18n="settings.mining_mode_title"></div><div class="muted small" data-i18n="settings.mining_mode_sub"></div><div class="muted small set-mode-desc" id="mining-mode-desc"></div></div>
           <div class="seg small-seg" id="set-mining-mode">
             <button class="seg-btn active" data-mode="solo" data-i18n="settings.mode_solo"></button>
             <button class="seg-btn" data-mode="pool" data-i18n="settings.mode_pool"></button>
@@ -283,13 +282,13 @@
   </main>
 
   <!-- ============ MODALS ============ -->
-  <div id="modal-receive" class="overlay" hidden>
+  <div id="modal-receive" class="overlay" data-testid="modal-receive" hidden>
     <div class="card modal">
       <button class="modal-x" data-close data-i18n-attr="aria-label:common.close">×</button>
       <h2 data-i18n="receive.title"></h2>
       <p class="muted" data-i18n="receive.sub"></p>
       <div id="qr" class="qr" aria-hidden="true"></div>
-      <div class="addr-box"><code id="recv-addr"></code></div>
+      <div class="addr-box"><code id="recv-addr" data-testid="recv-addr"></code></div>
       <div class="row-gap">
         <button id="recv-copy" class="btn primary" data-i18n="receive.copy_addr"></button>
         <button id="recv-new" class="btn ghost" data-i18n="receive.new_addr"></button>

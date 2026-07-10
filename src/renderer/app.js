@@ -251,6 +251,19 @@ async function refreshMine() {
   // Suppress the "Preparing…" flash for a few seconds after a live power change (the engine relaunches behind the scenes).
   const preparing = mining && s.preparing && Date.now() > suppressPreparingUntil;
   const toggle = $('#toggle');
+  // WAIT MODE (real-network build, before the Aug 1, 2026 15:00 UTC launch): the wallet works normally,
+  // but the "Mine" button stays disabled until the network opens. Fully automatic by date; nothing to toggle.
+  // This is a UX convenience only — the real guarantee is the network consensus.
+  if (isWaitMode()) {
+    $('#state-badge').textContent = T('wait.badge');
+    $('#state-badge').className = 'badge prep';
+    $('#hero-title').textContent = T('wait.title');
+    $('#hero-sub').textContent = T('wait.sub') + ' — ' + launchCountdownText();
+    toggle.textContent = T('mine.start');
+    toggle.className = 'btn giant primary';
+    toggle.disabled = true;
+    return;
+  }
   // While the node catches up with the network (and is not already mining), mining is not allowed yet.
   if (syncing && !mining) {
     $('#state-badge').textContent = T('net.syncing');
@@ -285,14 +298,11 @@ async function refreshMine() {
   $('#m-cpu').textContent = (mining ? pct : 0) + '%';
   $('#m-session').innerHTML = fmtDuration(s.secondsMining || 0);
   $('#m-total').innerHTML = fmtDuration(s.totalSeconds || 0);
-  // Work that arrived late (stale): shown only when there is some, with the "this is normal" note.
-  const stale = s.stale || 0;
-  $('#stale-line').hidden = !(stale > 0);
-  if (stale > 0) $('#m-stale').textContent = window.I18N.fmtNum(stale);
   // Real core count -> power label ("50% · 16 of 32 cores").
   if (s.cores && s.cores !== POW_CORES) { POW_CORES = s.cores; refreshPowLabel(); }
 }
 $('#toggle').addEventListener('click', async () => {
+  if (isWaitMode()) { refreshMine(); return; } // wait mode: the button is disabled; ignore any click
   if (mining) await window.brisvia.stop();
   else await window.brisvia.start(currentIntensity());
   refreshMine();
@@ -480,7 +490,16 @@ $('#recv-history-toggle').addEventListener('click', async () => {
   if (!ol.hidden) { ol.hidden = true; return; }
   const list = (await window.brisvia.wallet.addresses()) || [];
   ol.innerHTML = '';
-  list.forEach((a) => { const li = document.createElement('li'); li.innerHTML = `<code class="mono">${a}</code>`; ol.appendChild(li); });
+  // Each row: the address plus the BRVA currently held at it (informational). Backend returns {address, balance};
+  // older/preview shapes may return a plain string, handled here too.
+  list.forEach((a) => {
+    const addr = (typeof a === 'string') ? a : (a.address || '');
+    const bal = (typeof a === 'string') ? null : (a.balance || 0);
+    const balHtml = (bal != null) ? `<span class="addr-bal${bal > 0 ? '' : ' zero'}">${fmt(bal)} BRVA</span>` : '';
+    const li = document.createElement('li');
+    li.innerHTML = `<code class="mono">${addr}</code>${balHtml}`;
+    ol.appendChild(li);
+  });
   ol.hidden = false;
 });
 function showReceive(addr) {
@@ -569,9 +588,14 @@ $$('#set-language .seg-btn').forEach((b) => b.addEventListener('click', () => {
 // Mining mode selector (solo / grouped). The Brisvia pool is being set up; until it is live, choosing "grouped"
 // reveals the pool row with a "being set up" status and mining keeps running solo. When the pool is live this
 // selector will point the miner at pool.brisvia.com.
+let currentMiningMode = 'solo';
 function applyMiningMode(mode) {
   const m = mode === 'pool' ? 'pool' : 'solo';
+  currentMiningMode = m;
   $$('#set-mining-mode .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.mode === m));
+  // Plain-language explanation of the chosen mode (solo vs grouped/pool).
+  const desc = $('#mining-mode-desc');
+  if (desc) desc.textContent = T(m === 'pool' ? 'settings.mode_pool_desc' : 'settings.mode_solo_desc');
   const row = $('#pool-info-row');
   if (row) row.hidden = m !== 'pool';
 }
@@ -837,6 +861,12 @@ function setNet(connected, key) {
   if (lbl) lbl.textContent = T(key);
 }
 let syncing = false, syncProgress = 0;
+// Whether THIS build targets the real network (mainnet). Read from the node's reported network
+// (node_info().network === 'brisvia'), which comes from the compile-time build, so it is right even
+// before the node connects. A testnet/preview build keeps this false and is NEVER put in wait mode
+// (testnet users must be able to mine right now). `netInfoReceived` avoids flashing the wrong notice
+// on a real build before the first node_info arrives.
+let isMainnetBuild = false, netInfoReceived = false;
 // Human label for the network this build belongs to (test vs real). Solo mode is the only one today
 // (you mine against your own node); when pools land, the "mode" row will show the chosen pool.
 function networkLabel(net) {
@@ -847,6 +877,9 @@ async function pollNet() {
   if (!window.brisvia.isReal) return;
   const info = await window.brisvia.nodeInfo();
   const st = await window.brisvia.nodeStatus();
+  // Which network this build targets (real vs test). Comes from the build (NET_CHAIN), so it is right
+  // even before the node connects. Drives the wait mode + the launch notice below.
+  if (info && info.network) { isMainnetBuild = info.network === 'brisvia'; netInfoReceived = true; }
   const connected = !!(info && info.connected);
   const walletReady = !!(st && st.walletReady);
   // Syncing = connected but still catching up with the shared chain (do not mine yet).
@@ -878,6 +911,8 @@ async function pollNet() {
       $('#nr-mining').className = on ? 'nr-on' : 'nr-off';
     } catch {}
   }
+  // Keep the launch notice in sync now that we know which network this build targets.
+  updateTestnetBanner();
 }
 
 // On language change: re-apply static texts (i18n handles that) + re-render the dynamic ones.
@@ -885,6 +920,7 @@ document.addEventListener('langchange', () => {
   renderOnb();
   refreshMine();
   refreshPowLabel();
+  applyMiningMode(currentMiningMode); // keep the mining-mode explanation in the current language
   updateTestnetBanner();
   const wv = document.querySelector('.view[data-view="wallet"]');
   if (wv && !wv.hidden) loadWallet();
@@ -934,22 +970,52 @@ document.addEventListener('langchange', () => {
   document.addEventListener('click', hide);
 })();
 
-// ===================== Test network (testnet): notice + countdown to real mining =====================
-// Real mining start (mainnet). Fixed in code so the whole "test network" notice — including this
-// countdown — hides ITSELF the moment real mining begins, with no update required.
-const MAINNET_START = Date.UTC(2026, 7, 1, 15, 0, 0); // Sat 1 Aug 2026, 12:00 Argentina = 15:00 UTC
+// ===================== Launch gate: wait mode + countdown to real mining =====================
+// Real mining start on the REAL network (mainnet). Single source of truth for the client-side "wait mode".
+// Kept in sync with the backend MAINNET_START (src-tauri/src/lib.rs). This is only a UX convenience:
+// the real protection is the network consensus, not this client.
+//   Unix seconds: 1785596400   ·   ISO: 2026-08-01T15:00:00Z   (12:00 Argentina)
+const MAINNET_START = Date.UTC(2026, 7, 1, 15, 0, 0); // = 1785596400 * 1000 ms
+
+// Wait mode: a REAL-network build opened BEFORE the launch instant. The wallet works normally; only the
+// "Mine" button is held until launch. A testnet/preview build is never in wait mode (people test now).
+// Automatic by date: the moment the clock passes MAINNET_START, mining enables itself with no user action.
+function isWaitMode() { return isMainnetBuild && Date.now() < MAINNET_START; }
+
+// Human countdown to launch ("Real mining in Xd Yh" / "…about to begin"). Reused by the banner and the Mine view.
+function launchCountdownText() {
+  const diff = MAINNET_START - Date.now();
+  const days = Math.floor(diff / 86400000);
+  const hours = Math.floor((diff % 86400000) / 3600000);
+  return days >= 1 ? T('testnet.mainnet_in', { d: days, h: hours }) : T('testnet.mainnet_soon');
+}
+
+// Top notice shown before launch. On a REAL-network build it is the "wait mode" notice (mining opens Aug 1,
+// the wallet works now). On a testnet/preview build it stays the test-network notice. It hides ITSELF the
+// moment real mining begins, with no update required.
 function updateTestnetBanner() {
   const banner = $('#testnet-banner');
   if (!banner) return;
   const diff = MAINNET_START - Date.now();
-  if (diff <= 0) { banner.hidden = true; return; } // real mining already started: the notice hides itself
-  banner.hidden = false;
+  if (diff <= 0) { banner.hidden = true; return; } // launch reached: the notice hides itself
+  // On a real build, wait until we know which network this build targets before showing anything, so a
+  // mainnet build never flashes the "test network" copy. A preview (no real node) shows the test notice.
+  if (window.brisvia.isReal && !netInfoReceived) { banner.hidden = true; return; }
+  const tag = $('#tb-tag'), note = $('#tb-note'), until = banner.querySelector('.tb-until'), wallet = banner.querySelector('.tb-wallet');
+  if (isMainnetBuild) {
+    if (tag) tag.textContent = T('wait.tag');
+    if (note) note.textContent = T('wait.note');
+    if (until) until.hidden = true; // "the test runs until…" does not apply to the real network
+    if (wallet) wallet.textContent = T('wait.wallet_note');
+  } else {
+    if (tag) tag.textContent = T('testnet.tag');
+    if (note) note.textContent = T('testnet.note');
+    if (until) { until.hidden = false; until.textContent = T('testnet.until'); }
+    if (wallet) wallet.textContent = T('testnet.wallet_note');
+  }
   const cd = $('#tb-countdown');
-  if (!cd) return;
-  const days = Math.floor(diff / 86400000);
-  const hours = Math.floor((diff % 86400000) / 3600000);
-  cd.hidden = false;
-  cd.textContent = days >= 1 ? T('testnet.mainnet_in', { d: days, h: hours }) : T('testnet.mainnet_soon');
+  if (cd) { cd.hidden = false; cd.textContent = launchCountdownText(); }
+  banner.hidden = false;
 }
 setInterval(updateTestnetBanner, 60000); // refresh the countdown every minute
 
@@ -1000,11 +1066,14 @@ async function init() {
       // Offer to protect an OLD wallet (created before password support) with a password.
       try { const k = await window.brisvia.wallet.kind(); if (k && k.encrypted === false) openProtect(); } catch {}
       // Resume mining automatically if the app was mining when it restarted for an update.
+      // Never auto-resume during wait mode (mining is not open yet on a real-network build before launch).
       try {
         if (localStorage.getItem('brv_resume_mining')) {
           localStorage.removeItem('brv_resume_mining');
-          await window.brisvia.start(currentIntensity());
-          refreshMine();
+          if (!isWaitMode()) {
+            await window.brisvia.start(currentIntensity());
+            refreshMine();
+          }
         }
       } catch {}
     } else {

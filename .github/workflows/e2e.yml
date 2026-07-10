@@ -1,0 +1,147 @@
+name: E2E (real, Windows)
+
+# Runs the REAL end-to-end suite on a clean GitHub Windows runner (never on a dev machine).
+# It builds the native pieces the app drives at runtime (RandomX -> bitcoind/bitcoin-cli node,
+# Rust miner), builds the app with the "e2e" feature (isolated regtest + test clock, compiled out
+# of the public binary), then drives the compiled app with WebdriverIO + @wdio/tauri-service.
+#
+# Priority: keep recorridos 01 (first open) and 02 (create wallet) green. The remaining P0
+# recorridos (wait mode / regtest / mining / recovery) are added once their specs are written.
+#
+# Trigger manually from the Actions tab (or: gh workflow run e2e.yml).
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-windows:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - name: Checkout desktop app
+        uses: actions/checkout@v4
+
+      - name: Checkout core (with the RandomX submodule)
+        uses: actions/checkout@v4
+        with:
+          repository: brisvia/brisvia
+          submodules: recursive
+          path: core
+
+      - name: Resolve core commit (cache key for the native binaries)
+        id: corerev
+        shell: pwsh
+        run: |
+          $sha = (git -C core rev-parse HEAD).Trim()
+          echo "sha=$sha" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          echo "Core at $sha"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust (app + miner)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri
+            crates/brisvia-randomx
+          key: e2e-${{ steps.corerev.outputs.sha }}
+
+      # The native node/miner binaries are expensive to build (vcpkg). Cache them keyed on the core
+      # commit so config-only iterations on the E2E step don't recompile the whole node each time.
+      - name: Cache native binaries (bitcoind + bitcoin-cli + miner)
+        id: bins
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/binaries
+          key: brisvia-native-bins-windows-2022-${{ steps.corerev.outputs.sha }}-v1
+
+      - name: Build RandomX (static lib, portable)
+        if: steps.bins.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          # Static MSVC runtime (MultiThreaded) to match the vs2022-static preset; otherwise the
+          # final link fails with LNK1169 (multiply defined symbols from libucrt).
+          cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release -DARCH=default `
+            -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          cmake --build core/src/randomx/build --config Release -j
+          $rx = Get-ChildItem -Path core/src/randomx/build -Recurse -Filter randomx.lib | Select-Object -First 1
+          echo "RANDOMX_LIB=$($rx.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Configure and build bitcoind + bitcoin-cli (MSVC + vcpkg, wallet only)
+        if: steps.bins.outputs.cache-hit != 'true'
+        shell: pwsh
+        working-directory: core
+        run: |
+          $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT   # GitHub Windows runners ship vcpkg here
+          cmake --preset vs2022-static -B build `
+            -DVCPKG_MANIFEST_NO_DEFAULT_FEATURES=ON -DVCPKG_MANIFEST_FEATURES=wallet `
+            -DBUILD_GUI=OFF -DBUILD_TESTS=OFF -DBUILD_BENCH=OFF -DWITH_ZMQ=OFF -DENABLE_IPC=OFF `
+            -DBRISVIA_RANDOMX_LIB="$env:RANDOMX_LIB" `
+            -DBRISVIA_RANDOMX_INCLUDE="$PWD/src/randomx/src"
+          cmake --build build --config Release --target bitcoind bitcoin-cli -j
+
+      - name: Build the miner (mine-once)
+        if: steps.bins.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $env:RANDOMX_LIB_DIR = (Split-Path $env:RANDOMX_LIB)
+          cargo build --release --manifest-path crates/brisvia-randomx/Cargo.toml --bin mine-once
+
+      - name: Stage native binaries (.exe) into src-tauri/binaries
+        if: steps.bins.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
+          $bd  = Get-ChildItem -Path core/build -Recurse -Filter bitcoind.exe     | Select-Object -First 1
+          $cli = Get-ChildItem -Path core/build -Recurse -Filter bitcoin-cli.exe  | Select-Object -First 1
+          $mw  = Get-ChildItem -Path . -Recurse -Filter mine-once.exe | Where-Object { $_.FullName -match 'release' } | Select-Object -First 1
+          Copy-Item $bd.FullName  src-tauri/binaries/bitcoind.exe -Force
+          Copy-Item $cli.FullName src-tauri/binaries/bitcoin-cli.exe -Force
+          Copy-Item $mw.FullName  src-tauri/binaries/brisvia-worker.exe -Force
+          Get-ChildItem src-tauri/binaries
+
+      - name: Confirm native binaries are present (restored from cache or freshly built)
+        shell: pwsh
+        run: |
+          foreach ($n in @('bitcoind.exe','bitcoin-cli.exe','brisvia-worker.exe')) {
+            $p = "src-tauri/binaries/$n"
+            if (-not (Test-Path $p)) { throw "Falta $p" }
+          }
+          Get-ChildItem src-tauri/binaries
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Build the app with the e2e feature (isolated regtest binary)
+        shell: pwsh
+        run: |
+          # Debug build of the app crate with the e2e hooks. build.rs embeds the static frontend
+          # (src/renderer). We only need the e2e binary for recorridos 01/02 (not the mainnet-e2e one).
+          cargo build --manifest-path src-tauri/Cargo.toml --features e2e
+          Copy-Item src-tauri/target/debug/brisvia-miner.exe src-tauri/target/debug/brisvia-miner-e2e.exe -Force
+          Get-ChildItem src-tauri/target/debug/brisvia-miner*.exe
+
+      - name: Run real E2E — recorridos 01 (apertura) + 02 (crear billetera)
+        shell: pwsh
+        run: npm run test:e2e:real -- --only 01,02
+
+      - name: Upload failure evidence (screenshots, node/miner logs, RPC state)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-failure-evidence
+          path: |
+            test-results/**
+            logs/**
+          if-no-files-found: ignore
+          retention-days: 7
