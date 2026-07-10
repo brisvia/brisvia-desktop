@@ -20,8 +20,10 @@ const isMining = () => browser.executeAsync((done) => {
 });
 
 describe('Recorrido 5 — minado RandomX', () => {
-  it('enciende el motor, intenta minar 1 bloque y lo apaga', async function () {
-    this.timeout(360000); // margen amplio: dataset RandomX + intento de minar en un runner CPU-limitado
+  it('enciende el motor, intenta minar 1 bloque y lo apaga', async () => {
+    // Nota: en wdio+mocha this.timeout() no aplica de forma fiable, así que el test entero debe entrar en
+    // el timeout global de mocha (180s). Por eso la ventana best-effort de minado es corta (60s): alcanza
+    // para el chequeo informativo (el runner no encuentra bloque igual) sin reventar el presupuesto.
     const run = harness.fromEnv();
 
     await harness.onboardCreate(PASSWORD);
@@ -42,12 +44,13 @@ describe('Recorrido 5 — minado RandomX', () => {
       timeout: 30000, timeoutMsg: 'el backend no reportó el minado activo tras iniciar',
     });
 
-    // 2) BEST-EFFORT: darle hasta 3 minutos a que mine un bloque (la altura del nodo sube). No falla si no entra.
+    // 2) BEST-EFFORT: ventana corta (60s) para ver si mina un bloque (la altura del nodo sube). No falla si no
+    //    entra: RandomX es pesado en el runner gratis y no encuentra bloque a tiempo (validado por otras vías).
     let mined = false;
     const t0 = Date.now();
     try {
       await browser.waitUntil(async () => harness.blockCount(run.datadir, run.port) > h0, {
-        timeout: 180000, interval: 3000, timeoutMsg: 'no minó en la ventana',
+        timeout: 60000, interval: 3000, timeoutMsg: 'no minó en la ventana',
       });
       mined = true;
     } catch { mined = false; }

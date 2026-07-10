@@ -15,8 +15,9 @@ describe('Recorrido 3b — modo espera (después del lanzamiento)', () => {
 
     await harness.onboardCreate(PASSWORD);
 
-    const waitBadge = await browser.execute(() => window.I18N.t('wait.badge'));
-    const waitTitle = await browser.execute(() => window.I18N.t('wait.title'));
+    // En minúsculas: el badge se muestra en MAYÚSCULAS por CSS y getText() respeta ese estilo.
+    const waitBadge = (await browser.execute(() => window.I18N.t('wait.badge'))).toLowerCase();
+    const waitTitle = (await browser.execute(() => window.I18N.t('wait.title'))).toLowerCase();
 
     await (await $('.nav-btn[data-view="mine"]')).click();
     const badge = await $('[data-testid="state-badge"]');
@@ -24,11 +25,11 @@ describe('Recorrido 3b — modo espera (después del lanzamiento)', () => {
 
     // Damos margen a pollNet para detectar la red real y recalcular el modo. El estado NO debe quedar "en espera".
     await browser.waitUntil(async () => {
-      const b = (await badge.getText()).trim();
-      const h = (await hero.getText()).trim();
+      const b = (await badge.getText()).trim().toLowerCase();
+      const h = (await hero.getText()).trim().toLowerCase();
       return b.length > 0 && b !== waitBadge && h !== waitTitle;
     }, { timeout: 30000, timeoutMsg: 'tras pasar la fecha, la app siguió mostrando el estado "en espera"' });
 
-    expect((await badge.getText()).trim()).not.toBe(waitBadge);
+    expect((await badge.getText()).trim().toLowerCase()).not.toBe(waitBadge);
   });
 });
