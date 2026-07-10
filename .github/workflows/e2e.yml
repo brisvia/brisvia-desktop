@@ -135,8 +135,18 @@ jobs:
         shell: pwsh
         run: npm run test:e2e:real -- --only 01,02
 
+      # Recorridos de billetera en estabilización (restaurar, backup/recibir, contraseña incorrecta,
+      # enviar, idioma, configuración, reingreso). No bloquean el verde de 01/02: si alguno falla
+      # todavía, queda registrado pero el job no se marca en rojo por ellos.
+      - name: Run real E2E — recorridos de billetera (07-13) [en estabilización]
+        continue-on-error: true
+        shell: pwsh
+        run: npm run test:e2e:real -- --only 07,08,09,10,11,12,13
+
+      # Siempre subimos la evidencia: como los recorridos 07-13 corren con continue-on-error, el job
+      # can stay green even if one fails; without always() we would not have its captures to debug.
       - name: Upload failure evidence (screenshots, node/miner logs, RPC state)
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-failure-evidence
