@@ -25,6 +25,9 @@ window.LOCALES = {
       wallet_note: 'Puedes crear y ver tu billetera ahora; el minado se habilita ese mismo día.',
       title: 'El minado real todavía no comenzó',
       sub: 'Puedes crear y ver tu billetera ahora. El minado se habilita el 1 de agosto de 2026 a las 15:00 UTC (12:00 en Argentina).',
+      // Estado de red mientras falta para el lanzamiento: NO mostrar "Sincronizando" (confunde), sino que
+      // estamos esperando la apertura de la red.
+      net: 'En espera de lanzamiento',
     },
     sync: {
       title: 'Sincronizando con la red',
@@ -276,6 +279,9 @@ window.LOCALES = {
       wallet_note: 'You can create and view your wallet now; mining unlocks by itself on that day.',
       title: 'Real mining has not started yet',
       sub: 'You can create and view your wallet now. Mining unlocks by itself on August 1, 2026 at 15:00 UTC (12:00 in Argentina).',
+      // Network status while waiting for launch: do NOT show "Syncing" (confusing); show that we are
+      // waiting for the network to open.
+      net: 'Waiting for launch',
     },
     sync: {
       title: 'Syncing with the network',
