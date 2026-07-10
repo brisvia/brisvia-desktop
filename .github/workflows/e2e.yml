@@ -126,22 +126,32 @@ jobs:
         shell: pwsh
         run: |
           # Debug build of the app crate with the e2e hooks. build.rs embeds the static frontend
-          # (src/renderer). We only need the e2e binary for recorridos 01/02 (not the mainnet-e2e one).
+          # (src/renderer). This is the test-network binary that recorridos 01/02/04-13 drive.
           cargo build --manifest-path src-tauri/Cargo.toml --features e2e
           Copy-Item src-tauri/target/debug/brisvia-miner.exe src-tauri/target/debug/brisvia-miner-e2e.exe -Force
+          Get-ChildItem src-tauri/target/debug/brisvia-miner*.exe
+
+      - name: Build the app with the mainnet+e2e features (real-network binary for wait mode)
+        shell: pwsh
+        run: |
+          # Real-network build WITH the e2e hooks (regtest redirect + test clock). Recorrido 03 (modo espera)
+          # needs it to exercise the pre/post launch date logic. Build AFTER the e2e one and copy to its own
+          # name (the cargo build overwrites brisvia-miner.exe in place).
+          cargo build --manifest-path src-tauri/Cargo.toml --features mainnet,e2e
+          Copy-Item src-tauri/target/debug/brisvia-miner.exe src-tauri/target/debug/brisvia-miner-mainnet-e2e.exe -Force
           Get-ChildItem src-tauri/target/debug/brisvia-miner*.exe
 
       - name: Run real E2E — recorridos 01 (apertura) + 02 (crear billetera)
         shell: pwsh
         run: npm run test:e2e:real -- --only 01,02
 
-      # Recorridos de billetera en estabilización (restaurar, backup/recibir, contraseña incorrecta,
-      # enviar, idioma, configuración, reingreso). No bloquean el verde de 01/02: si alguno falla
-      # todavía, queda registrado pero el job no se marca en rojo por ellos.
-      - name: Run real E2E — recorridos de billetera (07-13) [en estabilización]
+      # Recorridos de nodo/minado (03 modo espera, 04 nodo regtest, 05 minado, 06 cierre) + billetera
+      # (07-13), en estabilización. No bloquean el verde de 01/02: si alguno falla todavía, queda
+      # registrado pero el job no se marca en rojo por ellos.
+      - name: Run real E2E — recorridos 03-13 (nodo, minado, cierre y billetera) [en estabilización]
         continue-on-error: true
         shell: pwsh
-        run: npm run test:e2e:real -- --only 07,08,09,10,11,12,13
+        run: npm run test:e2e:real -- --only 03,04,05,06,07,08,09,10,11,12,13
 
       # Siempre subimos la evidencia: como los recorridos 07-13 corren con continue-on-error, el job
       # puede quedar verde aunque alguno falle; sin always() no tendríamos sus capturas para depurar.

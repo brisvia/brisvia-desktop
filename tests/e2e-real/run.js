@@ -19,14 +19,16 @@ const ROOT = harness.ROOT;
 const CONFIG = path.join(ROOT, 'wdio.conf.js');
 const SPEC_DIR = path.join(ROOT, 'tests', 'e2e-real', 'specs');
 
-// Instante unix (segundos) un poco DESPUÉS del lanzamiento real (1-ago-2026 15:00 UTC = 1785596400).
-const AFTER_LAUNCH = 1785596400 + 3600; // 16:00 UTC del 1-ago -> ya habilitado
+// Instantes unix (segundos) alrededor del lanzamiento real (1-ago-2026 15:00 UTC = 1785596400).
+const MAINNET_START = 1785596400;
+const BEFORE_LAUNCH = MAINNET_START - 3600; // 14:00 UTC del 1-ago -> todavía en espera
+const AFTER_LAUNCH = MAINNET_START + 3600;  // 16:00 UTC del 1-ago -> ya habilitado
 
 // Plan de recorridos. app: qué binario; regtest: nodo regtest aislado; nowUnix: reloj congelado (modo espera).
 const PLAN = [
   { file: '01-apertura.spec.js', app: harness.APP_E2E, regtest: true },
   { file: '02-crear-billetera.spec.js', app: harness.APP_E2E, regtest: true },
-  { file: '03a-modo-espera-antes.spec.js', app: harness.APP_MAINNET_E2E, regtest: true, nowUnix: null },
+  { file: '03a-modo-espera-antes.spec.js', app: harness.APP_MAINNET_E2E, regtest: true, nowUnix: BEFORE_LAUNCH },
   { file: '03b-modo-espera-despues.spec.js', app: harness.APP_MAINNET_E2E, regtest: true, nowUnix: AFTER_LAUNCH },
   { file: '04-nodo-regtest.spec.js', app: harness.APP_E2E, regtest: true },
   { file: '05-minado.spec.js', app: harness.APP_E2E, regtest: true },
@@ -79,7 +81,12 @@ async function runOne(item, attempt) {
     shell: true,
   });
 
-  await harness.teardown(run);
+  const cleanup = await harness.teardown(run);
+  if (cleanup && !cleanup.cleanExit) {
+    console.log(`  ⚠ cierre NO limpio: hubo ${cleanup.orphans} proceso(s) huérfano(s) que hubo que forzar (nodo/minero).`);
+  } else {
+    console.log('  cierre limpio: 0 procesos huérfanos.');
+  }
   return r.status === 0;
 }
 

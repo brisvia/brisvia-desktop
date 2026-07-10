@@ -882,17 +882,22 @@ async function pollNet() {
   if (info && info.network) { isMainnetBuild = info.network === 'brisvia'; netInfoReceived = true; }
   const connected = !!(info && info.connected);
   const walletReady = !!(st && st.walletReady);
-  // Syncing = connected but still catching up with the shared chain (do not mine yet).
-  syncing = connected && !!(info && info.ibd);
+  // Wait mode (real-network build, before launch): the node may still be catching up, but we must NOT show
+  // "Syncing" — before the launch date the honest state is "waiting for launch", not a sync in progress.
+  const waitMode = isWaitMode();
+  // Syncing = connected but still catching up with the shared chain (do not mine yet). Never in wait mode.
+  syncing = !waitMode && connected && !!(info && info.ibd);
   syncProgress = (info && info.verificationprogress != null) ? Number(info.verificationprogress) : 0;
-  const netKey = !connected ? 'net.connecting' : (syncing ? 'net.syncing' : (walletReady ? 'net.connected' : 'net.preparing'));
-  setNet(connected && !syncing, netKey);
+  const netKey = waitMode ? 'wait.net'
+    : (!connected ? 'net.connecting' : (syncing ? 'net.syncing' : (walletReady ? 'net.connected' : 'net.preparing')));
+  setNet(connected && !waitMode && !syncing, netKey);
   if ($('#nr-status')) {
     // Network + mode: gives the user certainty about WHERE they are mining (asked by users who weren't sure).
     // `network` comes from the build itself (NET_CHAIN), so it's right even before the node connects.
     $('#nr-network').textContent = networkLabel(info && info.network);
     $('#nr-mode').textContent = T('net_panel.mode_solo'); // solo today; pools will add more modes later
-    $('#nr-status').textContent = !connected ? T('net_panel.connecting') : (syncing ? T('net.syncing') : (walletReady ? T('net_panel.connected') : T('net_panel.preparing')));
+    $('#nr-status').textContent = waitMode ? T('wait.net')
+      : (!connected ? T('net_panel.connecting') : (syncing ? T('net.syncing') : (walletReady ? T('net_panel.connected') : T('net_panel.preparing'))));
     $('#nr-height').textContent = connected ? window.I18N.fmtNum(info.blocks ?? 0) : '—';
     $('#nr-peers').textContent = connected ? (info.peers ?? 0) : '—';
     // Difficulty on the shared testnet is a tiny number; 2 decimals would round it to "0".
