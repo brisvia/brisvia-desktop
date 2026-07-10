@@ -209,9 +209,91 @@ async function captureFailure(browser, run, testName) {
   } catch { /* la evidencia nunca debe tumbar la corrida */ }
 }
 
+// ----- helpers de UI (se ejecutan DENTRO del proceso wdio: usan los globals $, $$, browser, expect) -----
+
+// Pasa las diapositivas de bienvenida hasta llegar al paso "crear o importar".
+async function skipWelcome() {
+  const welcome = await $('[data-testid="onb-welcome"]');
+  await welcome.waitForDisplayed({ timeout: 60000 });
+  const choose = await $('[data-testid="onb-choose"]');
+  const next = await $('[data-testid="onb-next"]');
+  for (let i = 0; i < 5 && !(await choose.isDisplayed()); i++) {
+    await next.waitForClickable({ timeout: 10000 });
+    await next.click();
+    await browser.pause(150); // deja re-renderizar la diapositiva; el corte real es el isDisplayed()
+  }
+  await choose.waitForDisplayed({ timeout: 10000 });
+}
+
+// Creates a new wallet going through the full onboarding (password -> seed -> verification of
+// respaldo) y devuelve las 12 palabras generadas. Reusa el mismo flujo que valida el recorrido 02.
+async function onboardCreate(password) {
+  await skipWelcome();
+  await (await $('[data-testid="onb-create"]')).click();
+
+  const pass = await $('[data-testid="onb-pass"]');
+  await pass.waitForDisplayed({ timeout: 10000 });
+  await (await $('[data-testid="pass-1"]')).setValue(password);
+  await (await $('[data-testid="pass-2"]')).setValue(password);
+  await (await $('[data-testid="pass-next"]')).click();
+
+  const seedStep = await $('[data-testid="onb-seed"]');
+  await seedStep.waitForDisplayed({ timeout: 30000 });
+  const seedGrid = await $('[data-testid="seed-grid"]');
+  await browser.waitUntil(async () => (await seedGrid.$$('li')).length === 12, {
+    timeout: 30000, timeoutMsg: 'the backend did not return 12 words',
+  });
+  const seed = [];
+  for (const li of await seedGrid.$$('li')) seed.push((await li.getText()).trim());
+  expect(seed.filter(Boolean).length).toBe(12);
+
+  await (await $('[data-testid="seed-ack"]')).click();
+  const seedNext = await $('[data-testid="seed-next"]');
+  await browser.waitUntil(async () => await seedNext.isEnabled(), { timeout: 5000 });
+  await seedNext.click();
+
+  const verifyStep = await $('[data-testid="onb-verify"]');
+  await verifyStep.waitForDisplayed({ timeout: 10000 });
+  const slotEls = await $$('[data-testid="verify-slots"] .slot');
+  const positions = [];
+  for (const s of slotEls) positions.push(parseInt((await s.$('.slot-n').getText()).trim(), 10));
+  for (const pos of positions) {
+    const word = seed[pos - 1];
+    for (const chip of await $$('[data-testid="verify-bank"] .chip')) {
+      const cls = (await chip.getAttribute('class')) || '';
+      if (cls.includes('used')) continue;
+      if ((await chip.getText()).trim() === word) { await chip.click(); break; }
+    }
+  }
+
+  const setup = await $('#setup');
+  await browser.waitUntil(async () => !(await setup.isDisplayed()), {
+    timeout: 20000, timeoutMsg: 'onboarding did not close after verifying the backup',
+  });
+  await (await $('[data-testid="view-wallet"]')).waitForDisplayed({ timeout: 15000 });
+  return seed;
+}
+
+// Reads the address to receive from the already-open wallet (opens the modal, waits for the address,
+// lo cierra y la devuelve). Sirve para comparar direcciones entre reaperturas/restauraciones.
+async function readReceiveAddress() {
+  await (await $('.nav-btn[data-view="wallet"]')).click();
+  await (await $('[data-testid="act-receive"]')).click();
+  const recvModal = await $('[data-testid="modal-receive"]');
+  await recvModal.waitForDisplayed({ timeout: 10000 });
+  const addrEl = await $('[data-testid="recv-addr"]');
+  await browser.waitUntil(async () => (await addrEl.getText()).trim().length > 10, {
+    timeout: 10000, timeoutMsg: 'no address to receive appeared',
+  });
+  const addr = (await addrEl.getText()).trim();
+  await (await recvModal.$('[data-close]')).click();
+  return addr;
+}
+
 module.exports = {
   ROOT, BIN_DIR, CLI, TARGET_DIR, ARTIFACT_DIR, APP_E2E, APP_MAINNET_E2E,
   freePort, makeDatadir, envFor, fromEnv,
   rpc, waitFor, waitRpcUp, blockCount,
   teardown, killByDatadir, listProcs, countProcs, captureFailure,
+  skipWelcome, onboardCreate, readReceiveAddress,
 };

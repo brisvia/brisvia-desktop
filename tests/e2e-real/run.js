@@ -31,6 +31,15 @@ const PLAN = [
   { file: '04-nodo-regtest.spec.js', app: harness.APP_E2E, regtest: true },
   { file: '05-minado.spec.js', app: harness.APP_E2E, regtest: true },
   { file: '06-cierre-recuperacion.spec.js', app: harness.APP_E2E, regtest: true },
+  // Recorridos de billetera (backend real sin nodo): restaurar, backup/recibir, seguridad, enviar,
+  // language, settings and re-entry.
+  { file: '07-restaurar.spec.js', app: harness.APP_E2E, regtest: true },
+  { file: '08-backup-recibir.spec.js', app: harness.APP_E2E, regtest: true },
+  { file: '09-contrasena-incorrecta.spec.js', app: harness.APP_E2E, regtest: true },
+  { file: '10-enviar.spec.js', app: harness.APP_E2E, regtest: true },
+  { file: '11-idioma.spec.js', app: harness.APP_E2E, regtest: true },
+  { file: '12-configuracion.spec.js', app: harness.APP_E2E, regtest: true },
+  { file: '13-reingreso.spec.js', app: harness.APP_E2E, regtest: true },
 ];
 
 // Filtro opcional --only <substr,substr>
