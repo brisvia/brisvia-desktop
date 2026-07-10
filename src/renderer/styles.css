@@ -86,6 +86,11 @@ h1, h2, h3 { margin: 0; }
 .nr .nr-off { color: var(--text-dim); }
 .nr > span:last-child { font-weight: 600; }
 .mono, .nr .mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 11.5px; font-weight: 500 !important; color: var(--muted); word-break: break-all; text-align: right; }
+/* Inline link-style buttons (e.g. "Use max", "View my addresses"). Without this base rule they fell back to
+   the browser's default (light) button box, which clashed with the dark theme. Now: no box, accent color, subtle. */
+.link { font: inherit; font-weight: 600; color: var(--brand); background: transparent; border: 0; padding: 0; cursor: pointer; border-radius: 6px; transition: color .15s ease, opacity .15s ease; }
+.link:hover { opacity: .82; text-decoration: underline; text-underline-offset: 3px; }
+.link:disabled { opacity: .45; cursor: not-allowed; text-decoration: none; }
 .link.small { font-size: 12.5px; padding: 0; }
 
 /* Clickable transactions */
@@ -166,9 +171,13 @@ h1 { font-size: 26px; line-height: 1.14; letter-spacing: -.02em; max-width: 15ch
 .pow-slider input[type=range]::-moz-range-thumb { width: 18px; height: 18px; border-radius: 50%; background: var(--brand); border: 2px solid #0B1117; cursor: pointer; }
 .pow-val { min-width: 44px; text-align: right; font-weight: 600; color: var(--text); }
 .contrib-sub { margin: -2px 0 14px; }
-.addr-history { list-style: decimal inside; margin: 10px 0 0; padding: 8px 10px; max-height: 170px; overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; text-align: left; }
-.addr-history li { font-size: 12px; padding: 3px 0; }
-.addr-history code { font-size: 11px; word-break: break-all; color: var(--muted); }
+.addr-history { list-style: none; counter-reset: addr; margin: 10px 0 0; padding: 8px 10px; max-height: 170px; overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; text-align: left; }
+/* Each address row: number · address (left, grows) · current balance (right, informational). */
+.addr-history li { display: flex; align-items: baseline; gap: 8px; counter-increment: addr; font-size: 12px; padding: 4px 0; }
+.addr-history li::before { content: counter(addr) "."; color: var(--muted); flex-shrink: 0; min-width: 15px; }
+.addr-history code { flex: 1; font-size: 11px; word-break: break-all; color: var(--muted); }
+.addr-history .addr-bal { flex-shrink: 0; font-size: 11.5px; font-weight: 700; color: var(--mineral); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.addr-history .addr-bal.zero { color: var(--muted); font-weight: 600; }
 #recv-history-toggle { margin-top: 10px; display: inline-block; }
 .contrib { background: linear-gradient(160deg, var(--surface-2), var(--surface)); border: 1px solid var(--border); border-radius: 18px; padding: 20px; box-shadow: var(--shadow); }
 .contrib h3 { margin-bottom: 14px; font-size: 15px; letter-spacing: .02em; }
@@ -189,6 +198,8 @@ h1 { font-size: 26px; line-height: 1.14; letter-spacing: -.02em; max-width: 15ch
 .set-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 10px 0; border-bottom: 1px solid rgba(38,54,66,.6); }
 .set-row:last-child { border-bottom: 0; }
 .set-title { font-weight: 600; }
+/* Plain-language explanation of the selected mining mode (solo vs grouped). */
+.set-mode-desc { margin-top: 6px; max-width: 360px; line-height: 1.4; }
 .foot-note { text-align: center; margin-top: 10px; }
 /* switch */
 .switch { position: relative; display: inline-block; width: 46px; height: 26px; flex-shrink: 0; }
