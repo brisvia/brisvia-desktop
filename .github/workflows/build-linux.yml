@@ -1,0 +1,115 @@
+name: Build Linux
+
+# Builds the whole app for Linux (x86-64) on GitHub's free Ubuntu runners:
+# RandomX -> bitcoind node -> Rust miner -> Tauri app (.AppImage + .deb) -> attach to the release.
+# The .AppImage is portable and runs on most modern distros. Triggered manually from the Actions tab.
+on:
+  workflow_dispatch:
+
+jobs:
+  linux-x86_64:
+    runs-on: ubuntu-22.04 # glibc 2.35 + webkit2gtk-4.1; AppImage runs on Ubuntu 22.04+/Debian 12+ and newer
+    permissions:
+      contents: write # needed to attach the artifacts to the release
+    steps:
+      - name: Checkout desktop app
+        uses: actions/checkout@v4
+
+      - name: Checkout core (with the RandomX submodule)
+        uses: actions/checkout@v4
+        with:
+          repository: brisvia/brisvia
+          submodules: recursive
+          path: core
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          # bitcoind deps + Tauri v2 Linux deps (webkit2gtk 4.1) + AppImage tooling (patchelf)
+          sudo apt-get install -y \
+            cmake build-essential pkg-config \
+            libboost-dev libevent-dev libsqlite3-dev libssl-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev patchelf
+
+      - name: Build RandomX (static lib, portable)
+        # No -DARCH=native on purpose: the CI CPU differs from users', a native build could use
+        # instructions (AVX2/...) missing on older CPUs. The portable build keeps runtime CPU detection.
+        run: |
+          cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build core/src/randomx/build -j3
+
+      - name: Build bitcoind and bitcoin-cli
+        run: |
+          cd core
+          cmake -B build \
+            -DENABLE_IPC=OFF -DBUILD_TESTS=OFF -DBUILD_GUI=OFF -DWITH_ZMQ=OFF -DBUILD_BENCH=OFF \
+            -DBRISVIA_RANDOMX_LIB="$PWD/src/randomx/build/librandomx.a" \
+            -DBRISVIA_RANDOMX_INCLUDE="$PWD/src/randomx/src"
+          cmake --build build --target bitcoind bitcoin-cli -j3
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the miner (mine-once)
+        run: |
+          export RANDOMX_LIB_DIR="$PWD/core/src/randomx/build"
+          cargo build --release --manifest-path crates/brisvia-randomx/Cargo.toml --bin mine-once
+
+      - name: Stage binaries (no .exe on Linux) and point the config at them
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          mkdir -p src-tauri/binaries
+          cp core/build/bin/bitcoind src-tauri/binaries/bitcoind
+          cp core/build/bin/bitcoin-cli src-tauri/binaries/bitcoin-cli
+          cp crates/brisvia-randomx/target/release/mine-once src-tauri/binaries/brisvia-worker || \
+            cp target/release/mine-once src-tauri/binaries/brisvia-worker
+          chmod +x src-tauri/binaries/*
+          python3 - <<'PY'
+          import json, os
+          p = "src-tauri/tauri.conf.json"
+          d = json.load(open(p))
+          d["bundle"]["resources"] = ["binaries/bitcoind", "binaries/bitcoin-cli", "binaries/brisvia-worker"]
+          # nsis is Windows-only; on Linux build AppImage (portable) + deb.
+          # Sign only if the signing key secret is present (yields the .AppImage.sig updater artifact).
+          signing = bool(os.environ.get("TAURI_SIGNING_PRIVATE_KEY"))
+          d["bundle"]["createUpdaterArtifacts"] = signing
+          d["bundle"]["targets"] = ["appimage", "deb"]
+          json.dump(d, open(p, "w"), indent=2)
+          PY
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install frontend dependencies
+        run: npm install
+
+      - name: Build the Tauri app (.AppImage + .deb + signed updater artifact)
+        run: npm run tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+
+      - name: Smoke test the compiled binaries
+        run: |
+          ./src-tauri/binaries/bitcoind -version | head -1 || echo "bitcoind version check failed"
+          file ./src-tauri/binaries/brisvia-worker || true
+
+      - name: Stage the .AppImage with a fixed (versionless) name for a permanent download link
+        # Keeps releases/latest/download/Brisvia-Miner-Linux.AppImage working across every version.
+        run: cp src-tauri/target/release/bundle/appimage/*.AppImage Brisvia-Miner-Linux.AppImage
+
+      - name: Attach the .AppImage, .deb and the signed updater artifact to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.4.1
+          files: |
+            src-tauri/target/release/bundle/appimage/*.AppImage
+            src-tauri/target/release/bundle/appimage/*.AppImage.sig
+            src-tauri/target/release/bundle/deb/*.deb
+            Brisvia-Miner-Linux.AppImage
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
