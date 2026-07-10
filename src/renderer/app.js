@@ -556,6 +556,7 @@ async function loadSettings() {
   $('#set-tray').checked = s.tray !== false;
   setPower(parseInt(pctOf(s.defaultIntensity), 10), false); // sync both power controls with the saved default
   $$('#set-language .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.lang === window.I18N.lang));
+  applyMiningMode(s.miningMode === 'pool' ? 'pool' : 'solo');
 }
 $('#set-autostart').addEventListener('change', (e) => window.brisvia.settings.set('autostart', e.target.checked));
 $('#set-tray').addEventListener('change', (e) => window.brisvia.settings.set('tray', e.target.checked));
@@ -564,6 +565,19 @@ $$('#set-intensity .seg-btn').forEach((b) => b.addEventListener('click', () => s
 $$('#set-language .seg-btn').forEach((b) => b.addEventListener('click', () => {
   window.I18N.setLang(b.dataset.lang);
   if (window.brisvia.setLanguage) window.brisvia.setLanguage(b.dataset.lang); // rebuilds the tray menu
+}));
+// Mining mode selector (solo / grouped). The Brisvia pool is being set up; until it is live, choosing "grouped"
+// reveals the pool row with a "being set up" status and mining keeps running solo. When the pool is live this
+// selector will point the miner at pool.brisvia.com.
+function applyMiningMode(mode) {
+  const m = mode === 'pool' ? 'pool' : 'solo';
+  $$('#set-mining-mode .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.mode === m));
+  const row = $('#pool-info-row');
+  if (row) row.hidden = m !== 'pool';
+}
+$$('#set-mining-mode .seg-btn').forEach((b) => b.addEventListener('click', () => {
+  applyMiningMode(b.dataset.mode);
+  window.brisvia.settings.set('miningMode', b.dataset.mode);
 }));
 // Social links live in the header now (visible from any view); open them in the system browser.
 $$('.hsocial').forEach((b) => b.addEventListener('click', () => window.brisvia.openUrl(b.dataset.url)));
@@ -672,8 +686,20 @@ function renderAchievements(list) {
     b.style.top = top + 'px';
   }
   function hide() { if (timer) { clearTimeout(timer); timer = null; } if (el) el.classList.remove('on'); }
-  document.addEventListener('mouseover', (e) => { const t = e.target.closest('.ach-tile'); if (!t) return; hide(); timer = setTimeout(() => show(t), 120); });
-  document.addEventListener('mouseout', (e) => { if (e.target.closest('.ach-tile')) hide(); });
+  // Treat the whole medal tile as ONE surface: moving between its inner parts (drawing, border) does NOT
+  // restart or hide the tooltip. It only restarts when entering ANOTHER medal, and only hides when the mouse
+  // actually leaves the medal. (mouseover/mouseout bubble between children; hence the filter.)
+  let curTile = null;
+  document.addEventListener('mouseover', (e) => {
+    const t = e.target.closest('.ach-tile'); if (!t) return;
+    if (t === curTile) return; // already inside this medal: don't restart
+    curTile = t; hide(); timer = setTimeout(() => show(t), 120);
+  });
+  document.addEventListener('mouseout', (e) => {
+    const t = e.target.closest('.ach-tile'); if (!t) return;
+    if (e.relatedTarget && t.contains(e.relatedTarget)) return; // moved to another part of the SAME medal
+    curTile = null; hide();
+  });
   document.addEventListener('focusin', (e) => { const t = e.target.closest('.ach-tile'); if (t) show(t); });
   document.addEventListener('focusout', hide);
   document.addEventListener('click', hide);
@@ -811,6 +837,12 @@ function setNet(connected, key) {
   if (lbl) lbl.textContent = T(key);
 }
 let syncing = false, syncProgress = 0;
+// Human label for the network this build belongs to (test vs real). Solo mode is the only one today
+// (you mine against your own node); when pools land, the "mode" row will show the chosen pool.
+function networkLabel(net) {
+  if (net === 'brisvia') return T('net_panel.net_main');
+  return T('net_panel.net_test'); // brisvia-test (and the preview build) → test network
+}
 async function pollNet() {
   if (!window.brisvia.isReal) return;
   const info = await window.brisvia.nodeInfo();
@@ -823,6 +855,10 @@ async function pollNet() {
   const netKey = !connected ? 'net.connecting' : (syncing ? 'net.syncing' : (walletReady ? 'net.connected' : 'net.preparing'));
   setNet(connected && !syncing, netKey);
   if ($('#nr-status')) {
+    // Network + mode: gives the user certainty about WHERE they are mining (asked by users who weren't sure).
+    // `network` comes from the build itself (NET_CHAIN), so it's right even before the node connects.
+    $('#nr-network').textContent = networkLabel(info && info.network);
+    $('#nr-mode').textContent = T('net_panel.mode_solo'); // solo today; pools will add more modes later
     $('#nr-status').textContent = !connected ? T('net_panel.connecting') : (syncing ? T('net.syncing') : (walletReady ? T('net_panel.connected') : T('net_panel.preparing')));
     $('#nr-height').textContent = connected ? window.I18N.fmtNum(info.blocks ?? 0) : '—';
     $('#nr-peers').textContent = connected ? (info.peers ?? 0) : '—';
