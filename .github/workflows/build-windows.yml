@@ -1,0 +1,94 @@
+name: Build Windows
+
+# Builds the whole app for Windows (x64) on GitHub's free Windows runners:
+# RandomX -> bitcoind node (MSVC + vcpkg, wallet only) -> Rust miner -> Tauri app (NSIS installer)
+# -> attach the signed installer to the release. Triggered manually from the Actions tab.
+on:
+  workflow_dispatch:
+
+jobs:
+  windows-x64:
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout desktop app
+        uses: actions/checkout@v4
+
+      - name: Checkout core (with the RandomX submodule)
+        uses: actions/checkout@v4
+        with:
+          repository: brisvia/brisvia
+          submodules: recursive
+          path: core
+
+      - name: Build RandomX (static lib, portable)
+        shell: pwsh
+        run: |
+          cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release -DARCH=default
+          cmake --build core/src/randomx/build --config Release -j
+          $rx = Get-ChildItem -Path core/src/randomx/build -Recurse -Filter randomx.lib | Select-Object -First 1
+          echo "RANDOMX_LIB=$($rx.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Configure and build bitcoind + bitcoin-cli (MSVC + vcpkg, wallet only)
+        shell: pwsh
+        working-directory: core
+        run: |
+          cmake --preset vs2022-static `
+            -DVCPKG_MANIFEST_NO_DEFAULT_FEATURES=ON -DVCPKG_MANIFEST_FEATURES=wallet `
+            -DBUILD_GUI=OFF -DBUILD_TESTS=OFF -DBUILD_BENCH=OFF -DWITH_ZMQ=OFF -DENABLE_IPC=OFF `
+            -DBRISVIA_RANDOMX_LIB="$env:RANDOMX_LIB" `
+            -DBRISVIA_RANDOMX_INCLUDE="$PWD/src/randomx/src"
+          cmake --build build --config Release --target bitcoind bitcoin-cli -j
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the miner (mine-once)
+        shell: pwsh
+        run: |
+          $env:RANDOMX_LIB_DIR = (Split-Path $env:RANDOMX_LIB)
+          cargo build --release --manifest-path crates/brisvia-randomx/Cargo.toml --bin mine-once
+
+      - name: Stage binaries (.exe)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
+          $bd  = Get-ChildItem -Path core/build -Recurse -Filter bitcoind.exe     | Select-Object -First 1
+          $cli = Get-ChildItem -Path core/build -Recurse -Filter bitcoin-cli.exe  | Select-Object -First 1
+          $mw  = Get-ChildItem -Path . -Recurse -Filter mine-once.exe | Where-Object { $_.FullName -match 'release' } | Select-Object -First 1
+          Copy-Item $bd.FullName  src-tauri/binaries/bitcoind.exe
+          Copy-Item $cli.FullName src-tauri/binaries/bitcoin-cli.exe
+          Copy-Item $mw.FullName  src-tauri/binaries/brisvia-worker.exe
+          Get-ChildItem src-tauri/binaries
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install frontend dependencies
+        run: npm install
+
+      - name: Build the Tauri app (NSIS installer + signed updater artifact)
+        run: npm run tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+
+      - name: Stage the installer with a fixed (versionless) name for a permanent link
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter *-setup.exe | Select-Object -First 1
+          Copy-Item $exe.FullName Brisvia-Miner-Windows.exe
+
+      - name: Attach the installer and the signed updater artifact to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.5.0
+          files: |
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/nsis/*-setup.exe.sig
+            Brisvia-Miner-Windows.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
