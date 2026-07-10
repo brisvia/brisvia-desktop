@@ -166,19 +166,24 @@ function countProcs(datadir) {
 
 // Stops the node gracefully and, if anything remains, kills it. Then deletes temporaries (with retries because
 // los bloqueos de archivo de Windows). No lanza: la limpieza nunca debe romper la corrida.
+// Devuelve { cleanExit, orphans }: cleanExit=true si los procesos hijos (nodo+minero) quedaron en 0 SOLOS,
+// without needing to force (a sign of "left no orphan processes"). orphans = how many had to be forced.
 async function teardown(run) {
-  if (!run || !run.datadir) return;
+  if (!run || !run.datadir) return { cleanExit: true, orphans: 0 };
   const { datadir, port } = run;
   try { rpc(datadir, port, ['stop']); } catch {}
-  for (let i = 0; i < 10; i++) {
-    if (countProcs(datadir) === 0) break;
+  let cleanExit = false;
+  for (let i = 0; i < 20; i++) {
+    if (countProcs(datadir) === 0) { cleanExit = true; break; }
     await new Promise((r) => setTimeout(r, 500));
   }
+  const orphans = cleanExit ? 0 : countProcs(datadir);
   killByDatadir(datadir);
   for (let i = 0; i < 8; i++) {
     try { fs.rmSync(datadir, { recursive: true, force: true }); break; }
     catch { await new Promise((r) => setTimeout(r, 400)); }
   }
+  return { cleanExit, orphans };
 }
 
 // Guarda evidencia cuando un recorrido falla: pantalla + debug.log del nodo + eventos del minero +
