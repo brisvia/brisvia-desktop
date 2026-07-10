@@ -35,7 +35,7 @@ jobs:
         working-directory: core
         run: |
           $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT   # GitHub Windows runners ship vcpkg here
-          cmake --preset vs2022-static `
+          cmake --preset vs2022-static -B build `
             -DVCPKG_MANIFEST_NO_DEFAULT_FEATURES=ON -DVCPKG_MANIFEST_FEATURES=wallet `
             -DBUILD_GUI=OFF -DBUILD_TESTS=OFF -DBUILD_BENCH=OFF -DWITH_ZMQ=OFF -DENABLE_IPC=OFF `
             -DBRISVIA_RANDOMX_LIB="$env:RANDOMX_LIB" `
