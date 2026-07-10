@@ -17,11 +17,24 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Manager, State};
 
 const RPC_HOST: &str = "127.0.0.1";
-const RPC_PORT: u16 = 19332; // local RPC of brisvia-test (the shared test network)
-// Shared test network (testnet). The app used to run a private, isolated "regtest" chain (a demo); it now
-// connects to brisvia-test, the network shared by all miners.
-const NET_CHAIN: &str = "brisvia-test";      // network name passed to the node (-chain)
-const NET_SUBDIR: &str = "brisvia-testnet";  // data subfolder the node creates for this network (cookie, wallets, blocks)
+
+// The network the app connects to is chosen at COMPILE TIME. The node binary supports both networks;
+// only these three constants differ between the two builds:
+//   - default (no flags):              brisvia-test — the shared test network.
+//   - built with `--features mainnet`: brisvia      — the real network (mainnet), opens Aug 1, 2026.
+#[cfg(not(feature = "mainnet"))]
+mod netcfg {
+    pub const RPC_PORT: u16 = 19332; // local RPC of the node (test network)
+    pub const NET_CHAIN: &str = "brisvia-test"; // network name passed to the node (-chain)
+    pub const NET_SUBDIR: &str = "brisvia-testnet"; // data subfolder the node creates (cookie, wallets, blocks)
+}
+#[cfg(feature = "mainnet")]
+mod netcfg {
+    pub const RPC_PORT: u16 = 9332; // local RPC of the node (real network)
+    pub const NET_CHAIN: &str = "brisvia"; // real network (mainnet)
+    pub const NET_SUBDIR: &str = "brisvia-mainnet"; // data subfolder the node creates (cookie, wallets, blocks)
+}
+use netcfg::{NET_CHAIN, NET_SUBDIR, RPC_PORT};
 const WALLET_NAME: &str = "brisvia";
 
 struct AppState {
@@ -189,12 +202,20 @@ fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
     std::fs::create_dir_all(&state.datadir).map_err(|e| e.to_string())?;
     // Wide rpcthreads/rpcworkqueue: the miner (getblocktemplate + submitblock) plus the UI polling make several
     // concurrent RPC calls; with the defaults (4 threads) the node rejects connections under load.
+    // Mainnet seed nodes: the "front doors" to the network on launch day. On the test network the shared DNS/fixed
+    // seed already covers it; on mainnet we point the node at our own seed servers (Hostinger VPS + Oracle) so the
+    // app finds peers from the first minute. More can be added over time.
+    #[cfg(feature = "mainnet")]
+    let seeds = "addnode=187.77.240.145\naddnode=129.80.250.36\n";
+    #[cfg(not(feature = "mainnet"))]
+    let seeds = "";
     let conf = format!(
-        // The node connects to the test network on its own (dnsseed + fixed seed), accepts inbound if the router
+        // The node connects to the network on its own (dnsseed + fixed seed), accepts inbound if the router
         // allows it (natpmp tries to open the port), and validates everything locally. RPC stays on 127.0.0.1 only.
-        "chain={chain}\nserver=1\nlisten=1\ndiscover=1\ndnsseed=1\nnatpmp=1\nfallbackfee=0.0001\nrpcthreads=16\nrpcworkqueue=128\n[{chain}]\nrpcport={port}\nrpcbind=127.0.0.1\nrpcallowip=127.0.0.1\n",
+        "chain={chain}\nserver=1\nlisten=1\ndiscover=1\ndnsseed=1\nnatpmp=1\nfallbackfee=0.0001\nrpcthreads=16\nrpcworkqueue=128\n[{chain}]\nrpcport={port}\nrpcbind=127.0.0.1\nrpcallowip=127.0.0.1\n{seeds}",
         chain = NET_CHAIN,
-        port = rpc_port()
+        port = rpc_port(),
+        seeds = seeds
     );
     std::fs::write(state.datadir.join("bitcoin.conf"), conf).map_err(|e| e.to_string())?;
     let mut cmd = Command::new(&bitcoind);
@@ -406,6 +427,9 @@ fn node_info(state: State<AppState>) -> Value {
     json!({
         "connected": !chain["blocks"].is_null(),
         "chain": chain["chain"],
+        // The target network this build belongs to, independent of connection state (so the UI never
+        // shows the wrong network before the node is up). "brisvia-test" (testnet) or "brisvia" (mainnet).
+        "network": NET_CHAIN,
         "blocks": chain["blocks"],
         "headers": chain["headers"],
         "difficulty": chain["difficulty"],
@@ -654,6 +678,18 @@ fn save_total_mined(datadir: &std::path::Path, secs: u64) {
     let _ = std::fs::write(total_mined_path(datadir), secs.to_string());
 }
 
+// Persists the total INCLUDING the in-progress session, without touching total_mined_secs in memory. Avoids
+// losing a session's time if the app closes without going through miner_stop (closing the window, a power cut,
+// or an update). On reopen, load_total_mined() recovers it. No double counting: miner_stop only adds the
+// session to total_mined_secs (in memory) and saves the same value, staying consistent with what was flushed.
+fn flush_total_mined(state: &AppState) {
+    let base = *state.total_mined_secs.lock().unwrap();
+    let sess = if state.mining.load(Ordering::SeqCst) {
+        state.mine_start.lock().unwrap().map(|t| t.elapsed().as_secs()).unwrap_or(0)
+    } else { 0 };
+    save_total_mined(&state.datadir, base + sess);
+}
+
 // Legacy plaintext phrase file (old unencrypted format). Kept only to READ during migration to the
 // encrypted format; new/updated wallets never write it (see encrypt_phrase_file / wallet_migrate_encrypt).
 fn seed_phrase_path(datadir: &std::path::Path) -> std::path::PathBuf { datadir.join("wallet_seed_phrase.txt") }
@@ -864,12 +900,24 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
         let hashrate = state.hashrate.clone();
         let mining = state.mining.clone();
         let ready = state.miner_ready.clone();
+        let total_mined = state.total_mined_secs.clone();
+        let mine_start_ref = state.mine_start.clone();
+        let datadir_ref = state.datadir.clone();
         std::thread::spawn(move || {
             use std::io::BufRead;
             let mut prev_total: u64 = 0;
+            let mut last_flush = Instant::now();
             loop {
                 if !mining.load(Ordering::SeqCst) { break; }
                 std::thread::sleep(Duration::from_millis(500));
+                // Periodic save of the total time (including the in-progress session), in case the app
+                // closes without going through "Stop". Every 30 s is enough and doesn't wear the disk.
+                if last_flush.elapsed().as_secs() >= 30 {
+                    let base = *total_mined.lock().unwrap();
+                    let sess = mine_start_ref.lock().unwrap().map(|t| t.elapsed().as_secs()).unwrap_or(0);
+                    save_total_mined(&datadir_ref, base + sess);
+                    last_flush = Instant::now();
+                }
                 let f = match std::fs::File::open(&events_path) { Ok(f) => f, Err(_) => continue };
                 let mut total = 0u64;
                 let mut total_stale = 0u64;
@@ -1547,6 +1595,7 @@ pub fn run() {
         .run(|app_handle, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 let state = app_handle.state::<AppState>();
+                flush_total_mined(&state); // don't lose the in-progress session's time on close
                 stop_node(&state);
             }
         });
