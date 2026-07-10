@@ -127,7 +127,7 @@
       backup: async () => ({ ok: true, path: 'C:/Users/…/Documents/Brisvia-backups/brisvia-wallet.dat' }),
       kind: async () => ({ kind: 'preview_wallet', has_seed_phrase: false }),
     },
-    nodeInfo: async () => ({ connected: true, chain: 'regtest', blocks: 12, headers: 12, peers: 0, difficulty: 0, bestblockhash: '0'.repeat(64), networkhashps: 0 }),
+    nodeInfo: async () => ({ connected: true, chain: 'regtest', network: 'brisvia-test', blocks: 12, headers: 12, peers: 0, difficulty: 0, bestblockhash: '0'.repeat(64), networkhashps: 0 }),
 
     settings: {
       get: async () => LS.get('brv_settings', { autostart: false, tray: true, defaultIntensity: 'equilibrado' }),

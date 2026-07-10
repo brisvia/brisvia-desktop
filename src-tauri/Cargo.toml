@@ -1,6 +1,6 @@
 [package]
 name = "brisvia-miner"
-version = "0.4.1"
+version = "0.5.0"
 description = "Brisvia (BRVA) desktop miner"
 authors = ["Brisvia"]
 edition = "2021"
@@ -8,6 +8,11 @@ edition = "2021"
 [lib]
 name = "brisvia_miner_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+# Build the app against the real network (mainnet). Without this flag the app targets
+# the shared test network (testnet). Only three network constants differ between builds.
+mainnet = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
