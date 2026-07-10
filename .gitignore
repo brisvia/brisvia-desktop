@@ -3,6 +3,10 @@ target/
 node_modules/
 dist/
 
+# Test artifacts (Playwright E2E: reports and traces, regenerated on each run)
+playwright-report/
+test-results/
+
 # Node and mining engine binaries: built by CI for each system, not versioned
 /src-tauri/binaries/*.exe
 /src-tauri/binaries/*.dll
@@ -10,6 +14,8 @@ dist/
 /src-tauri/binaries/bitcoin-cli
 /src-tauri/binaries/brisvia-worker
 /src-tauri/binaries/*.viejo
+/src-tauri/binaries/*.pre-mainnet
+/src-tauri/binaries/*.bak
 
 # Secrets / credentials (never commit)
 *.key

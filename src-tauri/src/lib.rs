@@ -12,7 +12,6 @@ use std::str::FromStr;
 use bip39::Mnemonic;
 use bitcoin::bip32::{DerivationPath, Xpriv};
 use bitcoin::secp256k1::Secp256k1;
-use bitcoin::Network;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager, State};
 
@@ -27,14 +26,22 @@ mod netcfg {
     pub const RPC_PORT: u16 = 19332; // local RPC of the node (test network)
     pub const NET_CHAIN: &str = "brisvia-test"; // network name passed to the node (-chain)
     pub const NET_SUBDIR: &str = "brisvia-testnet"; // data subfolder the node creates (cookie, wallets, blocks)
+    // Extended-key network for the wallet's BIP32 keys. Must match the node's EXT prefixes:
+    // brisvia-test uses EXT_SECRET_KEY 0x04358394 -> tprv / EXT_PUBLIC_KEY 0x043587CF -> tpub (same as Bitcoin testnet),
+    // which NetworkKind::Test (Regtest/Testnet) serializes. Otherwise the node's wpkh() descriptor rejects the key.
+    pub const WALLET_NETWORK: bitcoin::Network = bitcoin::Network::Regtest;
 }
 #[cfg(feature = "mainnet")]
 mod netcfg {
     pub const RPC_PORT: u16 = 9332; // local RPC of the node (real network)
     pub const NET_CHAIN: &str = "brisvia"; // real network (mainnet)
     pub const NET_SUBDIR: &str = "brisvia-mainnet"; // data subfolder the node creates (cookie, wallets, blocks)
+    // Extended-key network for the wallet's BIP32 keys. Must match the node's EXT prefixes:
+    // brisvia (mainnet) uses EXT_SECRET_KEY 0x0488ADE4 -> xprv / EXT_PUBLIC_KEY 0x0488B21E -> xpub (same as Bitcoin
+    // mainnet), which NetworkKind::Main (Bitcoin) serializes. Otherwise the node's wpkh() descriptor rejects the key.
+    pub const WALLET_NETWORK: bitcoin::Network = bitcoin::Network::Bitcoin;
 }
-use netcfg::{NET_CHAIN, NET_SUBDIR, RPC_PORT};
+use netcfg::{NET_CHAIN, NET_SUBDIR, RPC_PORT, WALLET_NETWORK};
 const WALLET_NAME: &str = "brisvia";
 
 struct AppState {
@@ -111,7 +118,47 @@ fn b64(input: &[u8]) -> String {
 }
 
 fn read_cookie(datadir: &PathBuf) -> Option<String> {
-    std::fs::read_to_string(datadir.join(NET_SUBDIR).join(".cookie")).ok()
+    std::fs::read_to_string(datadir.join(net_subdir()).join(".cookie")).ok()
+}
+
+// Network chain (-chain value) and the node's data subfolder (where the .cookie lives). In production these
+// are the compile-time constants. In the e2e test binary (feature "e2e") they can be redirected to an isolated
+// regtest instance via env vars. The env reads are compiled out of the public binary, so it can never be
+// pointed anywhere but its own network.
+fn net_chain() -> String {
+    #[cfg(feature = "e2e")]
+    if let Ok(c) = std::env::var("BRISVIA_E2E_CHAIN") {
+        return c;
+    }
+    NET_CHAIN.to_string()
+}
+fn net_subdir() -> String {
+    #[cfg(feature = "e2e")]
+    if let Ok(s) = std::env::var("BRISVIA_E2E_SUBDIR") {
+        return s;
+    }
+    NET_SUBDIR.to_string()
+}
+
+// e2e-only clock injection. If BRISVIA_E2E_NOW (unix SECONDS) is set, freeze Date.now() to that instant in
+// every webview BEFORE the page scripts run. Only Date.now() is replaced (Date.UTC/parse and the Date constructor
+// stay real), which is exactly what the frontend reads to decide the pre-launch wait mode and the launch countdown.
+// This lets the test drive "before Aug 1" vs "after Aug 1" without ever touching the machine's real clock.
+#[cfg(feature = "e2e")]
+fn e2e_clock_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    let script = match std::env::var("BRISVIA_E2E_NOW")
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+    {
+        Some(secs) => format!(
+            "(function(){{var __t={};Date.now=function(){{return __t;}};}})();",
+            secs * 1000
+        ),
+        None => String::new(),
+    };
+    tauri::plugin::Builder::new("brisvia_e2e_clock")
+        .js_init_script(script)
+        .build()
 }
 
 // Maps common Core errors to a stable "ERR:CODE" that the UI translates; unknown ones pass through verbatim.
@@ -209,11 +256,22 @@ fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
     let seeds = "addnode=187.77.240.145\naddnode=129.80.250.36\n";
     #[cfg(not(feature = "mainnet"))]
     let seeds = "";
+    let chain = net_chain();
+    // An isolated e2e run (regtest override) must never reach the outside world: no discovery, no dnsseed,
+    // no port mapping, no seed nodes. That keeps the automated tests offline, deterministic and self-contained.
+    let isolated = chain != NET_CHAIN;
+    let net_lines = if isolated {
+        "listen=0\ndiscover=0\ndnsseed=0\nnatpmp=0\n"
+    } else {
+        "listen=1\ndiscover=1\ndnsseed=1\nnatpmp=1\n"
+    };
+    let seeds = if isolated { "" } else { seeds };
     let conf = format!(
         // The node connects to the network on its own (dnsseed + fixed seed), accepts inbound if the router
         // allows it (natpmp tries to open the port), and validates everything locally. RPC stays on 127.0.0.1 only.
-        "chain={chain}\nserver=1\nlisten=1\ndiscover=1\ndnsseed=1\nnatpmp=1\nfallbackfee=0.0001\nrpcthreads=16\nrpcworkqueue=128\n[{chain}]\nrpcport={port}\nrpcbind=127.0.0.1\nrpcallowip=127.0.0.1\n{seeds}",
-        chain = NET_CHAIN,
+        "chain={chain}\nserver=1\n{net_lines}fallbackfee=0.0001\nrpcthreads=16\nrpcworkqueue=128\n[{chain}]\nrpcport={port}\nrpcbind=127.0.0.1\nrpcallowip=127.0.0.1\n{seeds}",
+        chain = chain,
+        net_lines = net_lines,
         port = rpc_port(),
         seeds = seeds
     );
@@ -334,7 +392,9 @@ fn append_address(datadir: &PathBuf, addr: &str) {
     }
 }
 
-// All receive addresses generated so far, oldest first. Makes sure the current one is recorded too.
+// All receive addresses generated so far, oldest first, each with the BRVA currently sitting at it. Makes sure
+// the current one is recorded too. The balance is INFORMATIONAL only: sending stays global/automatic (the wallet
+// picks the coins on its own), so this never enables per-address spending.
 #[tauri::command]
 fn wallet_addresses(state: State<AppState>) -> Value {
     let cur = state.receive_addr.lock().unwrap().clone();
@@ -342,7 +402,22 @@ fn wallet_addresses(state: State<AppState>) -> Value {
     let list: Vec<String> = std::fs::read_to_string(addresses_path(&state.datadir))
         .unwrap_or_default()
         .lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-    json!(list)
+    // Current balance per address = sum of its unspent outputs. One listunspent call (minconf 0) covers them all.
+    let mut balances: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    if let Ok(utxos) = rpc(&state.datadir, Some(WALLET_NAME), "listunspent", json!([0])) {
+        if let Some(arr) = utxos.as_array() {
+            for u in arr {
+                if let (Some(a), Some(amt)) = (u["address"].as_str(), u["amount"].as_f64()) {
+                    *balances.entry(a.to_string()).or_insert(0.0) += amt;
+                }
+            }
+        }
+    }
+    let out: Vec<Value> = list
+        .iter()
+        .map(|a| json!({ "address": a, "balance": balances.get(a).copied().unwrap_or(0.0) }))
+        .collect();
+    json!(out)
 }
 
 #[tauri::command]
@@ -506,12 +581,14 @@ fn wallet_kind(state: State<AppState>) -> Value {
 }
 
 // ================= BIP39: real 12-word backup =================
-// Derives the (external, internal) descriptors WITHOUT checksum from a mnemonic. Testnet -> tprv, coin 1'.
-// The descriptor carries the PRIVATE key (xprv) so the wallet can spend; Core derives and stores only that.
+// Derives the (external, internal) descriptors WITHOUT checksum from a mnemonic.
+// The extended private key is serialized with WALLET_NETWORK's EXT prefix (tprv on the test build,
+// xprv on the mainnet build) so the local node's wpkh() descriptor accepts it. Derivation coin type
+// stays 1' (path 84h/1h/0h) on both builds: it does not affect the EXT prefix nor descriptor validation.
 fn descriptors_from_mnemonic(mnemonic: &Mnemonic) -> Result<(String, String, String), String> {
     let seed = mnemonic.to_seed("");
     let secp = Secp256k1::new();
-    let master = Xpriv::new_master(Network::Regtest, &seed).map_err(|e| e.to_string())?;
+    let master = Xpriv::new_master(WALLET_NETWORK, &seed).map_err(|e| e.to_string())?;
     let fp = master.fingerprint(&secp);
     let path = DerivationPath::from_str("84h/1h/0h").map_err(|e| e.to_string())?; // coin 1' = test
     let account = master.derive_priv(&secp, &path).map_err(|e| e.to_string())?;
@@ -788,6 +865,38 @@ mod seed_crypto_tests {
     }
 }
 
+#[cfg(test)]
+mod wallet_key_tests {
+    use super::descriptors_from_mnemonic;
+    use bip39::Mnemonic;
+    use std::str::FromStr;
+
+    // The extended PRIVATE key inside the wpkh() descriptor must carry the EXT_SECRET_KEY prefix the
+    // local node accepts (see chainparams.cpp): xprv on the mainnet build, tprv on the test build.
+    // A mismatch is exactly the "wpkh(): key 'tprv...' is not valid" bug this test guards against.
+    #[test]
+    fn ext_key_prefix_matches_build_network() {
+        let m = Mnemonic::from_str(
+            "legal winner thank year wave sausage worth useful legal winner thank yellow",
+        )
+        .unwrap();
+        let (_fp, ext, int) = descriptors_from_mnemonic(&m).unwrap();
+        // The key follows the origin: "wpkh([<fp>/84h/1h/0h]<extkey>/0/*)", so the char after ']' is the prefix.
+        #[cfg(feature = "mainnet")]
+        {
+            assert!(ext.contains("]xprv"), "mainnet build must produce xprv, got: {ext}");
+            assert!(int.contains("]xprv"), "mainnet build must produce xprv, got: {int}");
+            assert!(!ext.contains("]tprv"), "mainnet build leaked a testnet tprv key: {ext}");
+        }
+        #[cfg(not(feature = "mainnet"))]
+        {
+            assert!(ext.contains("]tprv"), "test build must produce tprv, got: {ext}");
+            assert!(int.contains("]tprv"), "test build must produce tprv, got: {int}");
+            assert!(!ext.contains("]xprv"), "test build produced a mainnet xprv key: {ext}");
+        }
+    }
+}
+
 // Update the notification-area tooltip so it always matches the current language and mining state.
 // Called on start/stop/intensity change AND on language change, so it never gets stuck in the wrong language.
 fn refresh_tooltip(state: &AppState) {
@@ -850,7 +959,7 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
     refresh_tooltip(&state);
 
     // Node cookie auth (never exposed in logs): the .cookie file contains "user:password".
-    let cookie = std::fs::read_to_string(state.datadir.join(NET_SUBDIR).join(".cookie")).unwrap_or_default();
+    let cookie = std::fs::read_to_string(state.datadir.join(net_subdir()).join(".cookie")).unwrap_or_default();
     let (cuser, cpass) = cookie.split_once(':').map(|(u, p)| (u.to_string(), p.to_string()))
         .unwrap_or_else(|| ("__cookie__".into(), String::new()));
     // Address that receives the rewards. If startup hasn't loaded one yet (wallet just created, or the node was slow
@@ -1416,6 +1525,12 @@ pub fn run() {
     };
 
     let mut builder = tauri::Builder::default();
+    // e2e-only: freeze the webview clock so the automated suite can exercise the pre-launch wait mode
+    // (before/after Aug 1) without changing the machine's real clock. Absent from the public binary.
+    #[cfg(feature = "e2e")]
+    {
+        builder = builder.plugin(e2e_clock_plugin());
+    }
     // Single instance: if the app is already open and it's launched again, bring the existing window to the
     // front instead of opening another. Skipped when BRISVIA_SOLO is set (isolated test instance).
     if std::env::var("BRISVIA_SOLO").is_err() {
