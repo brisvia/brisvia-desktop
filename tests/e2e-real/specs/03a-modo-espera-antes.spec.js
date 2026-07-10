@@ -17,13 +17,15 @@ describe('Recorrido 3a — modo espera (antes del lanzamiento)', () => {
     await harness.onboardCreate(PASSWORD);
 
     // Textos esperados según el idioma real de la app (locale-proof).
-    const waitBadge = await browser.execute(() => window.I18N.t('wait.badge'));
-    const waitNet = await browser.execute(() => window.I18N.t('wait.net'));
+    // Textos esperados según el idioma real de la app (locale-proof). Comparamos en minúsculas porque
+    // el badge se muestra en MAYÚSCULAS por CSS (text-transform) y getText() respeta ese estilo.
+    const waitBadge = (await browser.execute(() => window.I18N.t('wait.badge'))).toLowerCase();
+    const waitNet = (await browser.execute(() => window.I18N.t('wait.net'))).toLowerCase();
 
     // Vista Minar: estado "en espera" + botón deshabilitado (le damos tiempo a pollNet a detectar la red real).
     await (await $('.nav-btn[data-view="mine"]')).click();
     const badge = await $('[data-testid="state-badge"]');
-    await browser.waitUntil(async () => (await badge.getText()).trim() === waitBadge, {
+    await browser.waitUntil(async () => (await badge.getText()).trim().toLowerCase() === waitBadge, {
       timeout: 20000, timeoutMsg: `el estado no quedó en espera ("${waitBadge}")`,
     });
     expect(await (await $('[data-testid="mine-toggle"]')).isEnabled()).toBe(false);
@@ -31,7 +33,7 @@ describe('Recorrido 3a — modo espera (antes del lanzamiento)', () => {
     // Panel de red (vista billetera): en modo espera dice "En espera de lanzamiento", nunca "Sincronizando".
     await (await $('.nav-btn[data-view="wallet"]')).click();
     const status = await $('[data-testid="nr-status"]');
-    await browser.waitUntil(async () => (await status.getText()).trim() === waitNet, {
+    await browser.waitUntil(async () => (await status.getText()).trim().toLowerCase() === waitNet, {
       timeout: 20000, timeoutMsg: `el panel de red no mostró "${waitNet}" en modo espera`,
     });
   });
