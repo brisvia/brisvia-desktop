@@ -25,7 +25,10 @@ jobs:
       - name: Build RandomX (static lib, portable)
         shell: pwsh
         run: |
-          cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release -DARCH=default
+          # Static MSVC runtime (MultiThreaded) to match the vs2022-static preset; otherwise the
+          # final link fails with LNK1169 (multiply defined symbols from libucrt).
+          cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release -DARCH=default `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
           cmake --build core/src/randomx/build --config Release -j
           $rx = Get-ChildItem -Path core/src/randomx/build -Recurse -Filter randomx.lib | Select-Object -First 1
           echo "RANDOMX_LIB=$($rx.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
