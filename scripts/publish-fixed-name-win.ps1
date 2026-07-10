@@ -12,19 +12,19 @@ $repo = "brisvia/brisvia-desktop"
 $exe = Get-ChildItem -Path "src-tauri\target\release\bundle" -Recurse -Filter "*-setup.exe" -ErrorAction SilentlyContinue |
        Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if (-not $exe) {
-    Write-Error "No encontré el instalador *-setup.exe. Corré 'npm run tauri build' primero."
+    Write-Error "Installer *-setup.exe not found. Run 'npm run tauri build' first."
     exit 1
 }
 
 $fixed = "Brisvia-Miner-Windows.exe"
 Copy-Item $exe.FullName $fixed -Force
-Write-Host "Copiado '$($exe.Name)' -> $fixed"
+Write-Host "Copied '$($exe.Name)' -> $fixed"
 
 gh release upload $Tag --repo $repo $fixed --clobber
 if ($LASTEXITCODE -eq 0) {
-    Write-Host "OK: subido $fixed al release $Tag"
-    Write-Host "Link permanente: https://github.com/$repo/releases/latest/download/$fixed"
+    Write-Host "OK: uploaded $fixed to release $Tag"
+    Write-Host "Permanent link: https://github.com/$repo/releases/latest/download/$fixed"
 } else {
-    Write-Error "Falló la subida a GitHub."
+    Write-Error "Upload to GitHub failed."
     exit 1
 }
