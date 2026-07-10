@@ -61,27 +61,12 @@ exports.config = {
     timeout: 180000, // los recorridos con nodo/minado pueden tardar; el corte real lo hacen los waitFor internos
   },
 
-  // Antes de cada comando de foco ($, findElement, click, getTitle), @wdio/tauri-service corre
-  // ensureActiveWindowFocus(), que consulta el estado de ventanas vía el plugin "wdio" de Tauri.
-  // Esta app NO registra ese plugin (no hace falta para manejar una app de UNA sola ventana), así que
-  // cada consulta se cuelga ~8s en un reintento de 100 pasos ANTES de fallar, y no cachea el fallo:
-  // paga esos ~8s en TODOS los comandos. En un recorrido con muchas interacciones (crear billetera)
-  // esa suma revienta el presupuesto de 180s (el recorrido 01, con pocos comandos, sí llegaba).
-  // Neutralizamos la consulta: que devuelva [] al instante ("no hay ventanas -> no cambiar foco"),
-  // sin alterar lo que los recorridos ejercen (una sola ventana no necesita este manejo de foco).
-  before: async function () {
-    try {
-      const t = browser.tauri;
-      if (t && typeof t.execute === 'function' && !t.__brisviaFastFocus) {
-        t.execute = async () => [];
-        t.__brisviaFastFocus = true;
-        console.log('[e2e] foco de ventana del tauri-service neutralizado (app de una sola ventana).');
-      }
-    } catch (e) {
-      // Si el service cambia su API interna, no rompemos la corrida por esto.
-      console.log('[e2e] no se pudo neutralizar el foco del tauri-service:', e && e.message);
-    }
-  },
+  // Nota: el manejo de foco por-comando del @wdio/tauri-service (ensureActiveWindowFocus, que corre
+  // before $/findElement/click/getTitle) is DISABLED via patch-package
+  // (patches/@wdio+tauri-service+1.2.0.patch, reaplicado por el script postinstall). Esta app es de
+  // ONE single window, so that hook is unnecessary; and since it does not register Tauri's "wdio" plugin,
+  // cada consulta gastaba ~8s antes de fallar, reventando el presupuesto de 180s en los recorridos
+  // with many interactions (journey 01, with few commands, did reach it; 02 did not).
 
   // Evidencia en cada fallo (pantalla + logs del nodo/minero + procesos + estado RPC). La corrida se lee del entorno.
   afterTest: async function (test, context, { passed }) {

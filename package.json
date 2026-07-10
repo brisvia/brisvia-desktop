@@ -13,7 +13,8 @@
     "test:rust": "node tests/run-rust-tests.js",
     "test:all": "node tests/run-rust-tests.js && playwright test",
     "build:e2e": "node tests/e2e-real/build-e2e-binaries.js",
-    "test:e2e:real": "node tests/e2e-real/run.js"
+    "test:e2e:real": "node tests/e2e-real/run.js",
+    "postinstall": "patch-package"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",
@@ -23,6 +24,7 @@
     "@wdio/mocha-framework": "^9.29.1",
     "@wdio/spec-reporter": "^9.29.1",
     "@wdio/tauri-service": "^1.2.0",
+    "patch-package": "^8.0.1",
     "webdriverio": "^9.29.1"
   },
   "overrides": {
