@@ -599,15 +599,21 @@ fn wallet_network() -> bitcoin::Network {
 // Derives the (external, internal) descriptors WITHOUT checksum from a mnemonic.
 // The extended private key is serialized with wallet_network()'s EXT prefix (tprv on the test build,
 // xprv on the mainnet build; regtest tprv under e2e) so the local node's wpkh() descriptor accepts it.
-// Derivation coin type stays 1' (path 84h/1h/0h) on both builds: it does not affect the EXT prefix.
+// Coin type per build: mainnet uses 0' (path 84h/0h/0h, the SLIP-44 real-network standard); the test/e2e
+// build keeps 1' (path 84h/1h/0h). This does NOT change the EXT prefix (xprv/tprv). The same 12 words still
+// derive a working wallet on both networks; only the account coin type (and the address HRP) differ.
 fn descriptors_from_mnemonic(mnemonic: &Mnemonic) -> Result<(String, String, String), String> {
     let seed = mnemonic.to_seed("");
     let secp = Secp256k1::new();
     let master = Xpriv::new_master(wallet_network(), &seed).map_err(|e| e.to_string())?;
     let fp = master.fingerprint(&secp);
-    let path = DerivationPath::from_str("84h/1h/0h").map_err(|e| e.to_string())?; // coin 1' = test
+    #[cfg(feature = "mainnet")]
+    let coin = "0h"; // real-network coin type (SLIP-44)
+    #[cfg(not(feature = "mainnet"))]
+    let coin = "1h"; // test coin type
+    let path = DerivationPath::from_str(&format!("84h/{coin}/0h")).map_err(|e| e.to_string())?;
     let account = master.derive_priv(&secp, &path).map_err(|e| e.to_string())?;
-    let origin = format!("[{}/84h/1h/0h]", fp);
+    let origin = format!("[{}/84h/{}/0h]", fp, coin);
     let external = format!("wpkh({}{}/0/*)", origin, account);
     let internal = format!("wpkh({}{}/1/*)", origin, account);
     Ok((fp.to_string(), external, internal))
@@ -896,18 +902,21 @@ mod wallet_key_tests {
         )
         .unwrap();
         let (_fp, ext, int) = descriptors_from_mnemonic(&m).unwrap();
-        // The key follows the origin: "wpkh([<fp>/84h/1h/0h]<extkey>/0/*)", so the char after ']' is the prefix.
+        // Origin: "wpkh([<fp>/84h/<coin>/0h]<extkey>/0/*)". The char after ']' is the EXT prefix; <coin> is
+        // the coin type (0' on mainnet, 1' on the test build). We assert both.
         #[cfg(feature = "mainnet")]
         {
             assert!(ext.contains("]xprv"), "mainnet build must produce xprv, got: {ext}");
             assert!(int.contains("]xprv"), "mainnet build must produce xprv, got: {int}");
             assert!(!ext.contains("]tprv"), "mainnet build leaked a testnet tprv key: {ext}");
+            assert!(ext.contains("/84h/0h/0h]"), "mainnet build must use coin_type 0', got: {ext}");
         }
         #[cfg(not(feature = "mainnet"))]
         {
             assert!(ext.contains("]tprv"), "test build must produce tprv, got: {ext}");
             assert!(int.contains("]tprv"), "test build must produce tprv, got: {int}");
             assert!(!ext.contains("]xprv"), "test build produced a mainnet xprv key: {ext}");
+            assert!(ext.contains("/84h/1h/0h]"), "test build must use coin_type 1', got: {ext}");
         }
     }
 }
