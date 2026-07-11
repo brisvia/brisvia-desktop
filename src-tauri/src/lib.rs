@@ -921,6 +921,94 @@ mod wallet_key_tests {
             assert!(ext.contains("/84h/1h/0h]"), "test build must use coin_type 1', got: {ext}");
         }
     }
+
+    // ================= GOLDEN VECTOR (mainnet) =================
+    // A frozen end-to-end derivation vector for the REAL network, requested before the coin_type/address
+    // format is locked in. It pins the WHOLE chain: 12-word phrase -> seed -> master -> path m/84'/9339'/0'
+    // -> account xprv -> child keys -> P2WPKH witness program -> bech32 encoding with Brisvia mainnet HRP
+    // "brv". If ANY link ever changes (coin type, EXT prefix, HRP, derivation), a shipped wallet would hand
+    // users addresses they cannot restore. Freezing the exact strings turns any such change into a loud,
+    // visible CI failure instead of a silent break. FIXED test phrase only — the standard all-"abandon"
+    // BIP39 vector, a public test key with NO funds. NEVER type real funds into this phrase.
+    #[cfg(feature = "mainnet")]
+    #[test]
+    fn golden_vector_mainnet_derivation() {
+        use bitcoin::bip32::{ChildNumber, Xpriv};
+        use bitcoin::hashes::Hash;
+        use bitcoin::secp256k1::Secp256k1;
+        use bitcoin::CompressedPublicKey;
+
+        // Standard BIP39 test vector (valid 12-word mnemonic). PUBLIC, well-known, holds no coins.
+        const TEST_PHRASE: &str =
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+        // Derive the account xprv straight out of the descriptor string, then walk the external chain
+        // (m/.../0/index) to a P2WPKH address encoded with Brisvia mainnet's own HRP ("brv").
+        fn addr_from_account(account_xprv: &str, change: u32, index: u32) -> String {
+            let secp = Secp256k1::new();
+            let account = Xpriv::from_str(account_xprv).unwrap();
+            let path = [
+                ChildNumber::from_normal_idx(change).unwrap(),
+                ChildNumber::from_normal_idx(index).unwrap(),
+            ];
+            let child = account.derive_priv(&secp, &path).unwrap();
+            let pubkey = CompressedPublicKey::from_private_key(&secp, &child.to_priv()).unwrap();
+            let program = pubkey.wpubkey_hash().to_byte_array();
+            let hrp = bitcoin::bech32::Hrp::parse("brv").unwrap();
+            bitcoin::bech32::segwit::encode_v0(hrp, &program).unwrap()
+        }
+
+        // Pull the account extended key from the descriptor: "wpkh([<fp>/84h/9339h/0h]<xprv>/0/*)".
+        fn account_xprv_of(ext: &str) -> String {
+            ext.split(']')
+                .nth(1)
+                .expect("descriptor missing origin ']' separator")
+                .strip_suffix("/0/*)")
+                .expect("descriptor missing '/0/*)' suffix")
+                .to_string()
+        }
+
+        let m = Mnemonic::from_str(TEST_PHRASE).unwrap();
+        let (_fp, ext, int) = descriptors_from_mnemonic(&m).unwrap();
+        let account = account_xprv_of(&ext);
+        let addrs: Vec<String> = (0..3).map(|i| addr_from_account(&account, 0, i)).collect();
+
+        // Print the real derived values so they can be read off the first run and frozen below.
+        eprintln!("GOLDEN ext descriptor = {ext}");
+        eprintln!("GOLDEN account xprv   = {account}");
+        eprintln!("GOLDEN addr 0/0 = {}", addrs[0]);
+        eprintln!("GOLDEN addr 0/1 = {}", addrs[1]);
+        eprintln!("GOLDEN addr 0/2 = {}", addrs[2]);
+
+        // --- Structure of the chain (path + EXT prefix) ---
+        assert!(ext.contains("/84h/9339h/0h]"), "mainnet path must be m/84'/9339'/0', got: {ext}");
+        assert!(ext.contains("]xprv"), "account key must serialize as xprv, got: {ext}");
+        assert!(int.contains("/84h/9339h/0h]"), "internal descriptor path drifted, got: {int}");
+        assert!(account.starts_with("xprv"), "account key must be an xprv, got: {account}");
+        for a in &addrs {
+            assert!(a.starts_with("brv1q"), "mainnet address must be brv1q... (P2WPKH), got: {a}");
+        }
+
+        // --- Golden values (frozen) ---
+        // The master fingerprint 73c5da0a is the well-known BIP32 root fingerprint of this public test seed,
+        // an independent cross-check that phrase -> seed -> master is correct.
+        const GOLDEN_EXT: &str = "wpkh([73c5da0a/84h/9339h/0h]xprv9yDfZrCVwPCcMQB7uAiv9Mwdb8E8z8pB43fy78hSJpoSsJd5FbyiVyKaMKeBdDhuHoTEZmGUaW3QXGLoUa1oMqRDhy1UJei3Efrn1Cf5QGF/0/*)";
+        const GOLDEN_ADDR_0: &str = "brv1qtulvfeste55pszl98ezzc7pmvpuyxg5q0374mp";
+        const GOLDEN_ADDR_1: &str = "brv1qur70qc9nf0p0g229e448l4nyjwxhm68ud4j09f";
+        const GOLDEN_ADDR_2: &str = "brv1qqrw7wthpwegpmjx8krsxgjazkndvy4myr7t88u";
+        assert_eq!(ext, GOLDEN_EXT, "mainnet external descriptor changed vs golden vector");
+        assert_eq!(addrs[0], GOLDEN_ADDR_0, "receiving address 0/0 changed vs golden vector");
+        assert_eq!(addrs[1], GOLDEN_ADDR_1, "receiving address 0/1 changed vs golden vector");
+        assert_eq!(addrs[2], GOLDEN_ADDR_2, "receiving address 0/2 changed vs golden vector");
+
+        // --- Idempotency: re-deriving (i.e. "restoring") the same phrase yields the exact same result ---
+        let (_fp2, ext2, int2) = descriptors_from_mnemonic(&m).unwrap();
+        assert_eq!(ext, ext2, "descriptor is not deterministic across derivations");
+        assert_eq!(int, int2, "internal descriptor is not deterministic across derivations");
+        let account2 = account_xprv_of(&ext2);
+        let addrs2: Vec<String> = (0..3).map(|i| addr_from_account(&account2, 0, i)).collect();
+        assert_eq!(addrs, addrs2, "restoring the same phrase produced different addresses");
+    }
 }
 
 // Update the notification-area tooltip so it always matches the current language and mining state.
