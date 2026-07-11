@@ -599,16 +599,18 @@ fn wallet_network() -> bitcoin::Network {
 // Derives the (external, internal) descriptors WITHOUT checksum from a mnemonic.
 // The extended private key is serialized with wallet_network()'s EXT prefix (tprv on the test build,
 // xprv on the mainnet build; regtest tprv under e2e) so the local node's wpkh() descriptor accepts it.
-// Coin type per build: mainnet uses 0' (path 84h/0h/0h, the SLIP-44 real-network standard); the test/e2e
-// build keeps 1' (path 84h/1h/0h). This does NOT change the EXT prefix (xprv/tprv). The same 12 words still
-// derive a working wallet on both networks; only the account coin type (and the address HRP) differ.
+// Coin type per build: mainnet uses 9339' (path 84h/9339h/0h) — Brisvia's OWN coin type: 9339 is free in
+// the SLIP-44 registry and mirrors the P2P port 9333, and is NOT Bitcoin's 0' (so the same seed does not
+// reuse Bitcoin's keys). The test/e2e build keeps 1' (path 84h/1h/0h). This does NOT change the EXT prefix
+// (xprv/tprv). The same 12 words still derive a working wallet on both networks; only the account coin type
+// (and the address HRP) differ.
 fn descriptors_from_mnemonic(mnemonic: &Mnemonic) -> Result<(String, String, String), String> {
     let seed = mnemonic.to_seed("");
     let secp = Secp256k1::new();
     let master = Xpriv::new_master(wallet_network(), &seed).map_err(|e| e.to_string())?;
     let fp = master.fingerprint(&secp);
     #[cfg(feature = "mainnet")]
-    let coin = "0h"; // real-network coin type (SLIP-44)
+    let coin = "9339h"; // Brisvia's own coin type (9339, free in SLIP-44; NOT Bitcoin's 0h)
     #[cfg(not(feature = "mainnet"))]
     let coin = "1h"; // test coin type
     let path = DerivationPath::from_str(&format!("84h/{coin}/0h")).map_err(|e| e.to_string())?;
@@ -903,13 +905,13 @@ mod wallet_key_tests {
         .unwrap();
         let (_fp, ext, int) = descriptors_from_mnemonic(&m).unwrap();
         // Origin: "wpkh([<fp>/84h/<coin>/0h]<extkey>/0/*)". The char after ']' is the EXT prefix; <coin> is
-        // the coin type (0' on mainnet, 1' on the test build). We assert both.
+        // the coin type (9339' on mainnet, 1' on the test build). We assert both.
         #[cfg(feature = "mainnet")]
         {
             assert!(ext.contains("]xprv"), "mainnet build must produce xprv, got: {ext}");
             assert!(int.contains("]xprv"), "mainnet build must produce xprv, got: {int}");
             assert!(!ext.contains("]tprv"), "mainnet build leaked a testnet tprv key: {ext}");
-            assert!(ext.contains("/84h/0h/0h]"), "mainnet build must use coin_type 0', got: {ext}");
+            assert!(ext.contains("/84h/9339h/0h]"), "mainnet build must use coin_type 9339', got: {ext}");
         }
         #[cfg(not(feature = "mainnet"))]
         {
@@ -1456,9 +1458,17 @@ fn build_updater(app: &tauri::AppHandle) -> Result<tauri_plugin_updater::Updater
     match std::env::var("BRISVIA_UPDATE_ENDPOINT") {
         Ok(ep) if !ep.is_empty() => {
             let url = tauri::Url::parse(&ep).map_err(|e| e.to_string())?;
+            // Test-only: when the override endpoint is set (local end-to-end/self-test), accept the
+            // self-signed TLS cert of the local HTTPS server. This only affects the transport of the
+            // controlled test endpoint; the minisign signature check on the artifact is untouched.
+            // Production uses app.updater() (below), which keeps full TLS validation.
             app.updater_builder()
                 .endpoints(vec![url])
                 .map_err(|e| e.to_string())?
+                .configure_client(|c| {
+                    c.danger_accept_invalid_certs(true)
+                        .danger_accept_invalid_hostnames(true)
+                })
                 .build()
                 .map_err(|e| e.to_string())
         }
