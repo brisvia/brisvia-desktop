@@ -294,6 +294,12 @@ enum Repair {
     Chainstate,       // rebuild only the UTXO state (fast) — the node asks for this one by name
     Full,             // rebuild the block index too (slower, needed when the index itself is broken)
     Blocked(&'static str), // an operational problem: a rebuild would not fix it, so tell the user instead
+    /// NOT a fault: the genesis is dated at the launch instant, so until August 1st it looks like a block
+    /// "from the future" and the node refuses to start (chainstate.cpp:241 — it tolerates 2 h, and the
+    /// genesis is weeks ahead). This is the real reason the app used to hang on "Preparing wallet..." before
+    /// the self-repair existed; it was never the killed process I blamed. It cures itself at 15:00 UTC on
+    /// launch day, when the genesis stops being in the future.
+    FutureGenesis,
 }
 
 // Decides what to do from what the node wrote while it was failing to start.
@@ -312,6 +318,12 @@ fn classify_failure(log: &str) -> Repair {
     }
     if log.contains("Permission denied") || log.contains("Access is denied") {
         return Repair::Blocked("permissions");
+    }
+    // BEFORE the corruption cases: this message ends with "Please restart with -reindex", so without this
+    // branch it would be classified as a broken database. Nothing is broken -- the genesis is simply dated at
+    // the launch instant and the node will not load a tip more than 2 h in the future.
+    if log.contains("appears to be from the future") {
+        return Repair::FutureGenesis;
     }
     // The node explicitly asks for a chainstate-only rebuild: that is the cheap fix, prefer it.
     if log.contains("-reindex-chainstate") || log.contains("Error opening coins database") {
@@ -447,15 +459,23 @@ fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
         Repair::Blocked("disk") => return Err("ERR:NODE_DISK_FULL".into()),
         Repair::Blocked("locked") => return Err("ERR:NODE_ALREADY_RUNNING".into()),
         Repair::Blocked(_) => return Err("ERR:NODE_PERMISSIONS".into()),
+        Repair::FutureGenesis => "-reindex", // expected until launch day, not damage — see below
         Repair::Chainstate => "-reindex-chainstate",
         Repair::Full => "-reindex",
     };
-    // If a repair was attempted moments ago and it is failing again, stop: retrying is a loop, and an
-    // automatic loop on someone's machine is worse than an honest error message.
-    if repair_blocked(&state.datadir) {
-        return Err("ERR:NODE_REPAIR_FAILED".into());
+    // The future-genesis case happens on EVERY start until launch day, so it must not spend the anti-loop
+    // marker: that marker exists to stop a repair that keeps failing, and this one is not a repair at all --
+    // it is the expected startup path before August 1st. Relaunching works because -reindex empties the
+    // chainstate, and the node only checks the tip's date when the chainstate is NOT empty. Instant here: the
+    // chain holds one block.
+    if what != Repair::FutureGenesis {
+        // If a repair was attempted moments ago and it is failing again, stop: retrying is a loop, and an
+        // automatic loop on someone's machine is worse than an honest error message.
+        if repair_blocked(&state.datadir) {
+            return Err("ERR:NODE_REPAIR_FAILED".into());
+        }
+        let _ = std::fs::write(repair_marker(&state.datadir), format!("{flag}|{}", ahora_secs()));
     }
-    let _ = std::fs::write(repair_marker(&state.datadir), format!("{flag}|{}", ahora_secs()));
     let mark = log_size(&state.datadir);
     let mut child = spawn_node(&bitcoind, &state.datadir, Some(flag))?;
     // A rebuild takes a while, so we only check it did not die immediately again.
@@ -1434,6 +1454,41 @@ mod repair_tests {
         let log = "2026-07-14T10:00:00Z Error opening block database.\n\
                    2026-07-14T10:00:00Z Permission denied\n";
         assert_eq!(classify_failure(log), Repair::Blocked("permissions"));
+    }
+
+    // THE REAL CAUSE, found on the owner's machine and misdiagnosed all day. The genesis is dated at the
+    // launch instant, so until August 1st the node sees a tip weeks in the future and refuses to start
+    // (chainstate.cpp:241 tolerates 2 h). NOTHING IS BROKEN.
+    //
+    // This is the real reason the app used to hang forever on "Preparing wallet..." before the self-repair
+    // existed. I blamed the process I had killed; the killed process was never it.
+    //
+    // The message below is copied verbatim from the owner's log. It ENDS with "Please restart with -reindex",
+    // so without its own branch it gets classified as a corrupted database and treated as damage.
+    #[test]
+    fn a_genesis_in_the_future_is_not_damage() {
+        let log = "2026-07-14T20:44:02Z Loaded best chain: hashBestChain=aa6bc268 height=0 date=2026-08-01T15:00:00Z\n\
+                   2026-07-14T20:44:02Z init message: Verifying blocks…\n\
+                   2026-07-14T20:44:02Z : The block database contains a block which appears to be from the future. \
+                   This may be due to your computer's date and time being set incorrectly. Only rebuild the block \
+                   database if you are sure that your computer's date and time are correct.\n\
+                   Please restart with -reindex or -reindex-chainstate to recover.\n";
+        assert_eq!(
+            classify_failure(log),
+            Repair::FutureGenesis,
+            "the pre-launch genesis is being treated as a corrupted database"
+        );
+    }
+
+    // And it must win over the corruption branches: the message contains BOTH "from the future" and
+    // "-reindex-chainstate", so order decides. Misread, it becomes "your data is broken" when it is not.
+    #[test]
+    fn the_future_genesis_wins_over_the_corruption_wording_in_the_same_message() {
+        let log = "The block database contains a block which appears to be from the future. \
+                   Please restart with -reindex or -reindex-chainstate to recover.";
+        assert_ne!(classify_failure(log), Repair::Chainstate);
+        assert_ne!(classify_failure(log), Repair::Full);
+        assert_eq!(classify_failure(log), Repair::FutureGenesis);
     }
 
     // A healthy start must not trigger anything: rebuilding on every start would be a slow, pointless loop.
