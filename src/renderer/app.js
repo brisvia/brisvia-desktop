@@ -15,6 +15,7 @@ function transError(err) {
       WALLET_EXISTS: 'errors.wallet_exists',
       NODE_SYNCING: 'errors.node_syncing', NO_PEERS: 'errors.no_peers', CLOCK_SKEW: 'errors.clock_skew',
       WALLET_NOT_READY: 'errors.wallet_not_ready', MINER_NOT_FOUND: 'errors.miner_not_found',
+      POOL_ADDR_MISSING: 'errors.pool_addr_missing',
     };
     const key = map[err.slice(4)];
     if (key) return T(key);
@@ -360,6 +361,7 @@ function setPower(pct, apply) {
   if (apply) {
     window.brisvia.setIntensity(String(pct)); // applies live (backend relaunches the engine)
     window.brisvia.settings.set('defaultIntensity', String(pct)); // remember as the default too
+    try { localStorage.setItem('brv_intensity', String(pct)); } catch {} // persist across restarts (audit N7/N8)
     if (mining) suppressPreparingUntil = Date.now() + 6000; // hide the brief "Preparing…" flash during the relaunch
   }
 }
@@ -610,7 +612,10 @@ async function loadSettings() {
   const s = await window.brisvia.settings.get();
   $('#set-autostart').checked = !!s.autostart;
   $('#set-tray').checked = s.tray !== false;
-  setPower(parseInt(pctOf(s.defaultIntensity), 10), false); // sync both power controls with the saved default
+  // Restore the chosen power from localStorage first (survives restarts even though the backend default
+  // resets); fall back to the backend default. Keeps the auto-resume from mining harder than chosen (N7/N8).
+  const savedPow = (() => { try { return localStorage.getItem('brv_intensity'); } catch { return null; } })();
+  setPower(savedPow != null ? parseInt(savedPow, 10) : parseInt(pctOf(s.defaultIntensity), 10), false);
   $$('#set-language .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.lang === window.I18N.lang));
   applyMiningMode(s.miningMode || 'solo');
   { const _pa = $('#set-pool-addr'); if (_pa && s.poolAddress) _pa.value = s.poolAddress; }
@@ -1119,8 +1124,11 @@ async function init() {
     // Decide the first screen WITHOUT waiting for the node: the welcome/onboarding does not need a
     // connected node, so if there is no wallet on disk yet we show it immediately instead of waiting
     // for the node-status loop below (which can take a while before the seed nodes are reachable).
-    let walletExists = false;
-    try { walletExists = await window.brisvia.wallet.seedOnDisk(); } catch {}
+    // Fail CLOSED (ChatGPT, absolute priority): if we cannot tell whether a wallet exists, assume it DOES,
+    // so a read glitch never shows the welcome/onboarding on top of an existing wallet. Default true; only a
+    // definitive "no seed on disk" (false) opens the first-run flow.
+    let walletExists = true;
+    try { walletExists = await window.brisvia.wallet.seedOnDisk(); } catch { walletExists = true; }
     if (!walletExists) {
       $('#setup').hidden = false;
       onbStep = 0; renderOnb(); setupStep('welcome');
