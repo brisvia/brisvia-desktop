@@ -1049,10 +1049,12 @@ fn load_mining_prefs(datadir: &std::path::Path) -> (String, String) {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| json!({}));
-    (
-        v["mode"].as_str().unwrap_or("solo").to_string(),
-        v["addr"].as_str().unwrap_or("").to_string(),
-    )
+    let modo = v["mode"].as_str().unwrap_or("solo");
+    // The last door: this file sits on disk and anyone can edit it. With pool mining off, a "pool" written
+    // by hand (or left over from an older version) is normalised to solo on the way in, so the mode the app
+    // BELIEVES it is in always matches the mode it actually runs. Anything else is a state that lies.
+    let modo = if POOL_ENABLED { modo } else { "solo" };
+    (modo.to_string(), v["addr"].as_str().unwrap_or("").to_string())
 }
 fn save_mining_prefs(datadir: &std::path::Path, mode: &str, addr: &str) {
     let _ = std::fs::create_dir_all(datadir);
@@ -1307,6 +1309,31 @@ mod pool_disabled_tests {
     #[test]
     fn the_official_pool_is_pinned_in_the_code() {
         assert_eq!(OFFICIAL_POOL_URL, "pool.brisvia.com:3333");
+    }
+
+    // THE LAST DOOR. The settings file is plain JSON on disk: anyone can write "pool" into it by hand, and an
+    // older version could have left it there. Disabling the button is not enough -- the UI is not the guard.
+    // Loading must normalise it, so the mode the app believes it is in always matches the mode it runs.
+    #[test]
+    fn a_pool_mode_written_by_hand_in_the_settings_file_is_ignored() {
+        let dir = std::env::temp_dir().join("brisvia-prefs-pool-a-mano");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Someone edits the file (or it survived from a version where pool was on).
+        super::save_mining_prefs(&dir, "pool", "pool.malicioso.com:3333");
+        let (modo, _addr) = super::load_mining_prefs(&dir);
+        assert_eq!(
+            modo, "solo",
+            "a hand-written 'pool' survived: the app would believe it is in pool mode while mining solo"
+        );
+
+        // And the same for a custom pool pointing anywhere.
+        super::save_mining_prefs(&dir, "custom", "cualquier.cosa:1234");
+        let (modo, _) = super::load_mining_prefs(&dir);
+        assert_eq!(modo, "solo", "a hand-written 'custom' survived");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -2212,7 +2239,15 @@ fn settings_set(app: AppHandle, state: State<AppState>, key: String, value: Valu
             let _ = if value.as_bool().unwrap_or(false) { al.enable() } else { al.disable() };
         }
         "miningMode" => {
-            if let Some(s) = value.as_str() { *state.mining_mode.lock().unwrap() = s.to_string(); }
+            if let Some(s) = value.as_str() {
+                // With pool mining off, "pool"/"custom" are not just unusable: STORING them would leave the
+                // saved state disagreeing with what actually runs (the miner always goes solo), and the day
+                // 1.1 turns the pool on, that stale value would silently start mining in a pool the user never
+                // chose in THAT version. The settings file is editable by hand, so refusing here -- not only
+                // in the UI -- is what makes "no pool route" true rather than merely displayed.
+                let pedido = if POOL_ENABLED { s } else { "solo" };
+                *state.mining_mode.lock().unwrap() = pedido.to_string();
+            }
             let (m, a) = (state.mining_mode.lock().unwrap().clone(), state.pool_address.lock().unwrap().clone());
             save_mining_prefs(&state.datadir, &m, &a);
         }
