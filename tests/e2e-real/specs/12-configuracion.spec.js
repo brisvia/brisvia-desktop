@@ -11,7 +11,7 @@ const harness = require('../helpers/harness');
 const PASSWORD = 'brisvia-e2e-1234';
 
 describe('Recorrido 12 — configuración', () => {
-  it('cambia intensidad de CPU y modo solo/grupo y la UI responde', async () => {
+  it('cambia la intensidad de CPU, y el modo pool esta deshabilitado con su motivo a la vista', async () => {
     harness.fromEnv();
 
     await harness.onboardCreate(PASSWORD);
@@ -25,19 +25,37 @@ describe('Recorrido 12 — configuración', () => {
       timeout: 5000, timeoutMsg: 'la intensidad 75% no quedó activa',
     });
 
-    // 2) Modo grupo (pool): el botón queda activo y aparece la fila con los datos del pool.
+    // 2) Minar en pool está APAGADO en la 1.0 (POOL_ENABLED=false en el backend). El motor stratum está
+    //    terminado y probado contra la pool real, pero lo que necesita un usuario de pool no existe todavía:
+    //    ver la conexión, y la diferencia entre share encontrada, enviada y ACEPTADA. Entregar el motor sin
+    //    forma honesta de ver qué hace es cómo alguien termina creyendo que minó horas y no cobró nada.
+    //
+    //    El botón tiene que estar DESHABILITADO de verdad, no escondido: quien vino buscando pool merece
+    //    saber que llega. Y un control que igual reacciona sería peor: prometería algo que no corre.
     const modePool = await $('#set-mining-mode .seg-btn[data-mode="pool"]');
-    await modePool.click();
-    await browser.waitUntil(async () => ((await modePool.getAttribute('class')) || '').includes('active'), {
-      timeout: 5000, timeoutMsg: 'el modo grupo no quedó activo',
+    await browser.waitUntil(async () => !(await modePool.isEnabled()), {
+      timeout: 5000,
+      timeoutMsg: 'el botón de minar en pool está habilitado: la 1.0 sale sólo con minado individual',
     });
-    await (await $('#pool-info-row')).waitForDisplayed({ timeout: 5000 });
 
-    // 3) Volver a modo solo: la fila del pool se oculta.
+    // 3) El motivo, a la vista. Que esté deshabilitado sin explicar por qué es una pantalla rota.
+    await (await $('#pool-soon')).waitForDisplayed({ timeout: 5000 });
+
+    // 4) Clickearlo NO debe hacer nada: ni activarse, ni abrir la fila del pool.
+    await modePool.click().catch(() => {}); // un botón deshabilitado puede rechazar el click: da igual
+    await browser.pause(300);
+    const activo = ((await modePool.getAttribute('class')) || '').includes('active');
+    if (activo) throw new Error('el modo pool se activó pese a estar deshabilitado');
+    if (await (await $('#pool-info-row')).isDisplayed()) {
+      throw new Error('se abrió la fila del pool con el modo pool deshabilitado');
+    }
+
+    // 5) Minado individual: sigue siendo elegible, y es lo único que la 1.0 promete.
     const modeSolo = await $('#set-mining-mode .seg-btn[data-mode="solo"]');
+    if (!(await modeSolo.isEnabled())) throw new Error('el modo individual quedó deshabilitado');
     await modeSolo.click();
-    await browser.waitUntil(async () => !(await (await $('#pool-info-row')).isDisplayed()), {
-      timeout: 5000, timeoutMsg: 'la fila del pool no se ocultó al volver a solo',
+    await browser.waitUntil(async () => ((await modeSolo.getAttribute('class')) || '').includes('active'), {
+      timeout: 5000, timeoutMsg: 'el modo individual no quedó activo',
     });
   });
 });
