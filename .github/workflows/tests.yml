@@ -1,0 +1,67 @@
+name: Tests (Rust unit + property)
+
+# Runs the Rust test suites on a clean Ubuntu runner, independent of the release builds:
+#  - brisvia-randomx crate tests (byte-exact header, stratum protocol, endianness, target).
+#  - the mainnet wallet-derivation property battery: thousands of BRAND-NEW wallets with the
+#    invariants that must hold for every real receiving address (brv/9339/determinism/uniqueness),
+#    plus rejection of invalid mnemonics.
+# Triggered manually (Actions tab) or on push to main touching the tested code.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src-tauri/src/**'
+      - 'crates/brisvia-randomx/**'
+      - '.github/workflows/tests.yml'
+
+jobs:
+  rust-tests:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout desktop app
+        uses: actions/checkout@v4
+
+      - name: Checkout core (with the RandomX submodule)
+        uses: actions/checkout@v4
+        with:
+          repository: brisvia/brisvia
+          submodules: recursive
+          path: core
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake build-essential pkg-config \
+            libboost-dev libevent-dev libsqlite3-dev libssl-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev
+
+      - name: Build RandomX (static lib)
+        run: |
+          cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build core/src/randomx/build -j3
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri
+            crates/brisvia-randomx
+
+      - name: brisvia-randomx crate tests (header / stratum / endianness / target)
+        run: |
+          export RANDOMX_LIB_DIR="$PWD/core/src/randomx/build"
+          # skip vector_fast: it allocates the ~2GB RandomX dataset (light mode covers the same hash)
+          cargo test --manifest-path crates/brisvia-randomx/Cargo.toml -- --skip vector_fast
+
+      - name: Wallet derivation property battery (mainnet, 10000 fresh wallets)
+        env:
+          BRISVIA_WALLET_CASES: "10000"
+        run: |
+          export RANDOMX_LIB_DIR="$PWD/core/src/randomx/build"
+          cargo test --manifest-path src-tauri/Cargo.toml --features mainnet --lib wallet_key_tests -- --nocapture
