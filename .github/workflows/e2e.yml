@@ -154,16 +154,12 @@ jobs:
       # tiene fecha vieja, el nodo se declara "sincronizando" y la app se niega a minar (correctamente). Se
       # arregla con un reloj controlado en el recorrido, no aflojando el candado. Hasta entonces queda
       # explícito y a la vista, no escondido detrás de un verde.
-      - name: Run real E2E — recorridos 03,04,06 (nodo, espera, cierre) + 07-13 (billetera)
+      # Los 14 recorridos, TODOS bloqueantes. Ya no queda ningún continue-on-error: el que había ("mientras
+      # se estabiliza") dejó al recorrido de MINADO fallando en silencio con el job en verde. Un probador que
+      # no puede ponerse rojo no prueba nada; es peor que no tenerlo, porque da confianza que no existe.
+      - name: Run real E2E — recorridos 03-13 (nodo, minado, cierre y billetera)
         shell: pwsh
-        run: npm run test:e2e:real -- --only 03,04,06,07,08,09,10,11,12,13
-
-      # ÚNICO recorrido tolerado: falla por el entorno regtest (bloque cero viejo => "sincronizando").
-      # Cuando el reloj controlado entre, este paso se une al de arriba y esta excepción desaparece.
-      - name: Run real E2E — recorrido 05 (minado) [falla conocida del entorno regtest, ver #minado]
-        continue-on-error: true
-        shell: pwsh
-        run: npm run test:e2e:real -- --only 05
+        run: npm run test:e2e:real -- --only 03,04,05,06,07,08,09,10,11,12,13
 
       # Siempre subimos la evidencia: como los recorridos 07-13 corren con continue-on-error, el job
       # puede quedar verde aunque alguno falle; sin always() no tendríamos sus capturas para depurar.
