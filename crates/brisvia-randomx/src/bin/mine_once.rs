@@ -199,9 +199,18 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 5 {
         eprintln!("usage: mine-once <rpc_url> <user> <pass> <payout_addr> [max_blocks] [threads] [max_nonces]");
+        eprintln!("       RPC credentials can also be given via BRISVIA_RPC_USER / BRISVIA_RPC_PASS (preferred; keeps them out of the command line)");
         std::process::exit(2);
     }
-    let (url, user, pass, addr) = (&args[1], &args[2], &args[3], &args[4]);
+    let (url, addr) = (&args[1], &args[4]);
+    // RPC credentials: prefer env vars (BRISVIA_RPC_USER/PASS) over argv. A process command line is readable by
+    // other local processes, so the backend passes the node cookie user/password via env, not argv. Falls back to
+    // argv[2]/argv[3] for direct CLI use.
+    let user_s = std::env::var("BRISVIA_RPC_USER").ok().filter(|s| !s.is_empty())
+        .unwrap_or_else(|| args.get(2).cloned().unwrap_or_default());
+    let pass_s = std::env::var("BRISVIA_RPC_PASS").ok().filter(|s| !s.is_empty())
+        .unwrap_or_else(|| args.get(3).cloned().unwrap_or_default());
+    let (user, pass) = (user_s.as_str(), pass_s.as_str());
     let max_blocks: u64 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(u64::MAX);
     let threads: usize = args.get(6).and_then(|s| s.parse().ok())
         .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2));
@@ -212,6 +221,28 @@ fn main() {
     let ev = |obj: Value| {
         if json_mode { println!("{}", obj); }
     };
+
+    // Pool mode (opt-in via env, set by the Tauri backend when the user picks a pool): mine against a stratum
+    // pool instead of the local node. Only the public payout address (args[4]) travels, in the login. The solo
+    // RPC path below is untouched — this branch returns before it.
+    if let Ok(pool_url) = std::env::var("BRISVIA_POOL_URL") {
+        let worker_name = std::env::var("BRISVIA_POOL_WORKER").unwrap_or_else(|_| "rig".to_string());
+        let stop = AtomicBool::new(false);
+        if json_mode { ev(json!({"event":"started","threads":threads,"mode":"pool"})); }
+        brisvia_randomx::pool_worker::run_pool_worker(&pool_url, addr, &worker_name, threads, &stop, |e| {
+            use brisvia_randomx::pool_worker::PoolEvent;
+            if !json_mode { return; }
+            match e {
+                PoolEvent::NewJob { .. } => println!("{}", json!({"event":"seed_ready"})),
+                // Count a contribution only when the pool CONFIRMS the share (or it was a block), never on submit.
+                PoolEvent::ShareAccepted | PoolEvent::BlockFound => println!("{}", json!({"event":"accepted"})),
+                PoolEvent::ShareStale => println!("{}", json!({"event":"stale"})),
+                PoolEvent::Disconnected(msg) => eprintln!("pool disconnected: {msg}"),
+                _ => {}
+            }
+        });
+        return;
+    }
 
     let info = rpc(url, user, pass, "getaddressinfo", json!([addr])).unwrap();
     let payout_script = ScriptBuf::from_hex(info["scriptPubKey"].as_str().expect("scriptPubKey")).unwrap();
