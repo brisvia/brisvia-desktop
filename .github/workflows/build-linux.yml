@@ -88,7 +88,7 @@ jobs:
         run: npm install
 
       - name: Build the Tauri app (.AppImage + .deb + signed updater artifact)
-        run: npm run tauri build
+        run: npm run tauri build -- --features mainnet
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
@@ -106,6 +106,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.0
+          draft: true
           files: |
             src-tauri/target/release/bundle/appimage/*.AppImage
             src-tauri/target/release/bundle/appimage/*.AppImage.sig
