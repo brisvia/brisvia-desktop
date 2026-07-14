@@ -139,7 +139,7 @@ jobs:
       - name: Attach the .dmg and the signed updater artifact to the release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.3
+          tag_name: v1.0.4
           draft: true
           files: |
             src-tauri/target/release/bundle/dmg/*.dmg

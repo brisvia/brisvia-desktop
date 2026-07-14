@@ -1,6 +1,6 @@
 [package]
 name = "brisvia-miner"
-version = "1.0.3"
+version = "1.0.4"
 description = "Brisvia (BRVA) desktop miner"
 authors = ["Brisvia"]
 edition = "2021"
