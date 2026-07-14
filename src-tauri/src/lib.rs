@@ -409,7 +409,16 @@ fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
     // These can be tuned in later versions WITHOUT a fork. In an isolated e2e/regtest run keep the light defaults so
     // automated tests are not affected by mainnet relay fees.
     let net_lines = if isolated {
-        "listen=0\ndiscover=0\ndnsseed=0\nnatpmp=0\nfallbackfee=0.0001\n"
+        // maxtipage: ONLY here, and only because of what regtest is. Its genesis is dated 2011, so the node
+        // reports "still syncing" from the first second, and the app correctly refuses to mine on a chain it
+        // believes is stale (the IBD guard). The test then fails on a real, correct behaviour -- which is how
+        // the mining journey ended up quietly red for days.
+        //
+        // Raising it here does not weaken anything for anyone: `isolated` is true only when the chain was
+        // overridden to regtest, which the e2e build alone can do (the env read is compiled out of the public
+        // binary). On the real network the 24 h default stands, and it is load-bearing: the mainnet genesis is
+        // stamped at the launch instant precisely so the network is minable at 15:00 (see launch_window_tests).
+        "listen=0\ndiscover=0\ndnsseed=0\nnatpmp=0\nfallbackfee=0.0001\nmaxtipage=31536000\n"
     } else {
         "listen=1\ndiscover=1\ndnsseed=1\nnatpmp=1\nfallbackfee=0.02\nminrelaytxfee=0.01\nincrementalrelayfee=0.01\ndustrelayfee=0.03\nblockmintxfee=0.01\nmaxmempool=50\nmempoolexpiry=24\npersistmempool=1\n"
     };
