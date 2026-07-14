@@ -12,7 +12,7 @@
 //! Run:  cargo run --bin pool-tls-check -- [host:port] [address]
 //!       default host: pool.brisvia.com:3333
 
-use brisvia_randomx::stratum::{LoginError, StratumClient};
+use brisvia_randomx::stratum::{Incoming, LoginError, Poll, StratumClient};
 use std::time::Duration;
 
 fn main() {
@@ -47,7 +47,42 @@ fn main() {
                 }
             }
         }
-        Ok(None) => println!("   OK: la pool acepto el login (sin trabajo listo todavia: espera un job)"),
+        Ok(None) => {
+            println!("   OK: la pool confirmo el login explicitamente");
+            // El login confirmado no alcanza: el trabajo tiene que llegar despues, o el minero se queda
+            // conectado sin minar. Esperamos el primer job igual que hace la sesion real.
+            println!("3) esperando el primer trabajo ...");
+            let hasta = std::time::Instant::now() + Duration::from_secs(30);
+            let mut llego = false;
+            while std::time::Instant::now() < hasta && !llego {
+                match c.poll_message(Duration::from_millis(500)) {
+                    Ok(Poll::Message(Incoming::Job(j))) => {
+                        println!("   OK: llego trabajo -> job_id={} altura={}", j.job_id, j.height);
+                        match j.to_mining_job() {
+                            Ok(_) => println!("   OK: el trabajo es valido y minable"),
+                            Err(e) => {
+                                eprintln!("   FALLA: trabajo que el minero no puede usar -> {e}");
+                                std::process::exit(1);
+                            }
+                        }
+                        llego = true;
+                    }
+                    Ok(Poll::Closed) => {
+                        eprintln!("   FALLA: la pool cerro la conexion sin mandar trabajo");
+                        std::process::exit(1);
+                    }
+                    Ok(_) => continue,
+                    Err(e) => {
+                        eprintln!("   FALLA: error leyendo de la pool -> {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            if !llego {
+                eprintln!("   FALLA: la pool confirmo el login pero no mando trabajo en 30s");
+                std::process::exit(1);
+            }
+        }
         Err(LoginError::Permanent(m)) => {
             println!("   OK: la pool respondio y RECHAZO explicitamente -> {m}");
             println!("      (esperado si la direccion no corresponde a la red de esta pool)");
