@@ -169,6 +169,8 @@ h1 { font-size: 26px; line-height: 1.14; letter-spacing: -.02em; max-width: 15ch
 .pow-slider input[type=range] { flex: 1; -webkit-appearance: none; appearance: none; height: 6px; border-radius: 999px; background: var(--surface); border: 1px solid var(--border); cursor: pointer; }
 .pow-slider input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 18px; height: 18px; border-radius: 50%; background: var(--brand); border: 2px solid #0B1117; cursor: pointer; box-shadow: 0 1px 4px rgba(0,0,0,.4); }
 .pow-slider input[type=range]::-moz-range-thumb { width: 18px; height: 18px; border-radius: 50%; background: var(--brand); border: 2px solid #0B1117; cursor: pointer; }
+.pool-addr-input { width: 190px; max-width: 46%; padding: 7px 10px; border-radius: 8px; background: var(--surface); border: 1px solid var(--border); color: inherit; font-size: 13px; outline: none; }
+.pool-addr-input:focus { border-color: var(--brand); }
 .pow-val { min-width: 44px; text-align: right; font-weight: 600; color: var(--text); }
 .contrib-sub { margin: -2px 0 14px; }
 .addr-history { list-style: none; counter-reset: addr; margin: 10px 0 0; padding: 8px 10px; max-height: 170px; overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; text-align: left; }

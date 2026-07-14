@@ -575,7 +575,8 @@ async function loadSettings() {
   $('#set-tray').checked = s.tray !== false;
   setPower(parseInt(pctOf(s.defaultIntensity), 10), false); // sync both power controls with the saved default
   $$('#set-language .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.lang === window.I18N.lang));
-  applyMiningMode(s.miningMode === 'pool' ? 'pool' : 'solo');
+  applyMiningMode(s.miningMode || 'solo');
+  { const _pa = $('#set-pool-addr'); if (_pa && s.poolAddress) _pa.value = s.poolAddress; }
 }
 $('#set-autostart').addEventListener('change', (e) => window.brisvia.settings.set('autostart', e.target.checked));
 $('#set-tray').addEventListener('change', (e) => window.brisvia.settings.set('tray', e.target.checked));
@@ -589,20 +590,32 @@ $$('#set-language .seg-btn').forEach((b) => b.addEventListener('click', () => {
 // reveals the pool row with a "being set up" status and mining keeps running solo. When the pool is live this
 // selector will point the miner at pool.brisvia.com.
 let currentMiningMode = 'solo';
+// Three modes: solo (mine against your own node), pool (the official Brisvia pool), custom (a third-party pool
+// address the user types). Today mining runs solo until the stratum client lands; choosing pool/custom saves the
+// preference and reveals the matching row, without touching the audited solo path.
 function applyMiningMode(mode) {
-  const m = mode === 'pool' ? 'pool' : 'solo';
+  const m = (mode === 'pool' || mode === 'custom') ? mode : 'solo';
   currentMiningMode = m;
   $$('#set-mining-mode .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.mode === m));
-  // Plain-language explanation of the chosen mode (solo vs grouped/pool).
+  // Plain-language explanation of the chosen mode.
   const desc = $('#mining-mode-desc');
-  if (desc) desc.textContent = T(m === 'pool' ? 'settings.mode_pool_desc' : 'settings.mode_solo_desc');
-  const row = $('#pool-info-row');
-  if (row) row.hidden = m !== 'pool';
+  if (desc) desc.textContent = T('settings.mode_' + m + '_desc');
+  const poolRow = $('#pool-info-row');
+  if (poolRow) poolRow.hidden = m !== 'pool';
+  const customRow = $('#pool-custom-row');
+  if (customRow) customRow.hidden = m !== 'custom';
 }
 $$('#set-mining-mode .seg-btn').forEach((b) => b.addEventListener('click', () => {
   applyMiningMode(b.dataset.mode);
   window.brisvia.settings.set('miningMode', b.dataset.mode);
 }));
+// Custom pool address: persist what the user types (on change/blur), trimmed.
+{
+  const poolAddrInput = $('#set-pool-addr');
+  if (poolAddrInput) {
+    poolAddrInput.addEventListener('change', () => window.brisvia.settings.set('poolAddress', poolAddrInput.value.trim()));
+  }
+}
 // Social links live in the header now (visible from any view); open them in the system browser.
 $$('.hsocial').forEach((b) => b.addEventListener('click', () => window.brisvia.openUrl(b.dataset.url)));
 
@@ -1054,11 +1067,12 @@ async function init() {
   if (window.brisvia.isReal) {
     $('#setup').hidden = true;
     setNet(false, 'net.connecting');
-    let ready = false, decided = false;
+    let ready = false, decided = false, walletOnDisk = false;
     for (let i = 0; i < 150 && !decided; i++) {
       await pollNet();
       const s = await window.brisvia.nodeStatus();
       if (s && s.connected) {
+        if (s.walletOnDisk) walletOnDisk = true;
         if (s.walletReady) { ready = true; decided = true; }
         else if (s.walletOnDisk === false) { decided = true; }
       }
@@ -1081,6 +1095,13 @@ async function init() {
           }
         }
       } catch {}
+    } else if (walletOnDisk) {
+      // Wallet exists on disk but the node hasn't finished loading it yet (slow/syncing node).
+      // Do NOT fall back to onboarding: go to the wallet view; pollNet + the refresh interval
+      // load it once the node reports it ready. Prevents the welcome tour from reappearing.
+      $('#setup').hidden = true;
+      showView('wallet');
+      loadWallet();
     } else {
       $('#setup').hidden = false;
       onbStep = 0; renderOnb(); setupStep('welcome');
