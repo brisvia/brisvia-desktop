@@ -256,7 +256,7 @@ mod tests {
         let stop = AtomicBool::new(false);
         let mut events = Vec::new();
         // stub: return a fixed nonce, then flag stop so the session ends.
-        let stub = |mj: &MiningJob, _t: usize, _mx: u64, _s: &AtomicBool| -> Option<Solution> {
+        let stub = |mj: &MiningJob, _t: usize, _ns: u64, _mx: u64, _s: &AtomicBool| -> Option<Solution> {
             Some(Solution { job_id: mj.job_id.clone(), nonce: 0x2a, ntime: 0, extranonce2: String::new() })
         };
         let stop_ref = &stop;
@@ -296,7 +296,7 @@ mod tests {
         let client = StratumClient::connect(&addr, Duration::from_secs(5)).unwrap();
         let stop = AtomicBool::new(false);
         // stub: on the hard job, block until cancel is raised (simulates a long search); on the easy job, solve.
-        let stub = |mj: &MiningJob, _t: usize, _mx: u64, s: &AtomicBool| -> Option<Solution> {
+        let stub = |mj: &MiningJob, _t: usize, _ns: u64, _mx: u64, s: &AtomicBool| -> Option<Solution> {
             if mj.job_id == "hard1" {
                 while !s.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(2));
@@ -344,7 +344,7 @@ mod tests {
         let stop = AtomicBool::new(false);
         let solved = Arc::new(AtomicBool::new(false)); // solve once, then block, so the miner doesn't spin
         let solved_c = solved.clone();
-        let stub = move |mj: &MiningJob, _t: usize, _mx: u64, s: &AtomicBool| -> Option<Solution> {
+        let stub = move |mj: &MiningJob, _t: usize, _ns: u64, _mx: u64, s: &AtomicBool| -> Option<Solution> {
             if solved_c.swap(true, Ordering::SeqCst) {
                 while !s.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(2));
