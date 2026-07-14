@@ -145,13 +145,25 @@ jobs:
         shell: pwsh
         run: npm run test:e2e:real -- --only 01,02
 
-      # Recorridos de nodo/minado (03 modo espera, 04 nodo regtest, 05 minado, 06 cierre) + billetera
-      # (07-13), stabilizing. They do not block the green of 01/02: if any still fails, it stays
-      # registrado pero el job no se marca en rojo por ellos.
-      - name: Run real E2E — recorridos 03-13 (nodo, minado, cierre y billetera) [en estabilización]
+      # WITHOUT continue-on-error. It was "stabilizing" and stayed: 11 of the 14 journeys could fail
+      # con el job en VERDE. Y estaban fallando: el recorrido de MINADO llevaba tiempo roto y el probador
+      # said everything passed. A tester that cannot go red proves nothing; it is worse than not having it,
+      # porque da una confianza que no existe.
+      #
+      # 05-minado va aparte SOLO porque su fallo es del entorno, no del producto: en regtest el bloque cero
+      # tiene fecha vieja, el nodo se declara "sincronizando" y la app se niega a minar (correctamente). Se
+      # arregla con un reloj controlado en el recorrido, no aflojando el candado. Hasta entonces queda
+      # explicit and in plain sight, not hidden behind a green.
+      - name: Run real E2E — recorridos 03,04,06 (nodo, espera, cierre) + 07-13 (billetera)
+        shell: pwsh
+        run: npm run test:e2e:real -- --only 03,04,06,07,08,09,10,11,12,13
+
+      # ÚNICO recorrido tolerado: falla por el entorno regtest (bloque cero viejo => "sincronizando").
+      # Cuando el reloj controlado entre, este paso se une al de arriba y esta excepción desaparece.
+      - name: Run real E2E — recorrido 05 (minado) [falla conocida del entorno regtest, ver #minado]
         continue-on-error: true
         shell: pwsh
-        run: npm run test:e2e:real -- --only 03,04,05,06,07,08,09,10,11,12,13
+        run: npm run test:e2e:real -- --only 05
 
       # Siempre subimos la evidencia: como los recorridos 07-13 corren con continue-on-error, el job
       # can stay green even if one fails; without always() we would not have its captures to debug.
