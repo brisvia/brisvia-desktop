@@ -33,7 +33,7 @@ mod netcfg {
 }
 #[cfg(feature = "mainnet")]
 mod netcfg {
-    pub const RPC_PORT: u16 = 9332; // local RPC of the node (real network)
+    pub const RPC_PORT: u16 = 9338; // local RPC of the node (real network); own port (P2P 9339), distinct from Litecoin 9333/9332
     pub const NET_CHAIN: &str = "brisvia"; // real network (mainnet)
     pub const NET_SUBDIR: &str = "brisvia-mainnet"; // data subfolder the node creates (cookie, wallets, blocks)
     // Extended-key network for the wallet's BIP32 keys. Must match the node's EXT prefixes:
@@ -43,6 +43,9 @@ mod netcfg {
 }
 use netcfg::{NET_CHAIN, NET_SUBDIR, RPC_PORT, WALLET_NETWORK};
 const WALLET_NAME: &str = "brisvia";
+// The official Brisvia pool endpoint used when the user picks "Official pool" (no fee). host:port of the
+// stratum server. TODO: confirm the real port when the official pool is deployed.
+const OFFICIAL_POOL_URL: &str = "pool.brisvia.com:3333";
 
 struct AppState {
     child: Arc<Mutex<Option<Child>>>,
@@ -63,6 +66,10 @@ struct AppState {
     // shows "Preparing…" instead of a silent 0. Set to true on the engine's first event.
     miner_ready: Arc<AtomicBool>,
     tray_enabled: Arc<AtomicBool>,
+    // Mining mode ("solo" | "pool" | "custom") and the custom pool address (host:port), chosen in Settings.
+    // In pool/custom mode miner_start hands the worker a BRISVIA_POOL_URL; the solo path is unchanged.
+    mining_mode: Arc<Mutex<String>>,
+    pool_address: Arc<Mutex<String>>,
     // Freshly generated mnemonic, kept ONLY in memory to verify the backup; wiped after confirmation. Never persisted.
     pending_mnemonic: Arc<Mutex<Option<String>>>,
     // Current language (es/en) and tray handle to rebuild its menu when the language changes.
@@ -260,16 +267,21 @@ fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
     // An isolated e2e run (regtest override) must never reach the outside world: no discovery, no dnsseed,
     // no port mapping, no seed nodes. That keeps the automated tests offline, deterministic and self-contained.
     let isolated = chain != NET_CHAIN;
+    // Relay/mempool/wallet-fee policy (audit-decided 2026-07-12; LOCAL policy, NOT consensus). On the real network:
+    // deter cheap spam on a no-price coin (minrelay 0.01, dust 0.03, blockmintxfee 0.01), keep small seed nodes from a
+    // huge mempool (maxmempool 50 MiB, expiry 24 h, persist), and a safe wallet fallback fee (0.02, ~2x minrelay).
+    // These can be tuned in later versions WITHOUT a fork. In an isolated e2e/regtest run keep the light defaults so
+    // automated tests are not affected by mainnet relay fees.
     let net_lines = if isolated {
-        "listen=0\ndiscover=0\ndnsseed=0\nnatpmp=0\n"
+        "listen=0\ndiscover=0\ndnsseed=0\nnatpmp=0\nfallbackfee=0.0001\n"
     } else {
-        "listen=1\ndiscover=1\ndnsseed=1\nnatpmp=1\n"
+        "listen=1\ndiscover=1\ndnsseed=1\nnatpmp=1\nfallbackfee=0.02\nminrelaytxfee=0.01\nincrementalrelayfee=0.01\ndustrelayfee=0.03\nblockmintxfee=0.01\nmaxmempool=50\nmempoolexpiry=24\npersistmempool=1\n"
     };
     let seeds = if isolated { "" } else { seeds };
     let conf = format!(
         // The node connects to the network on its own (dnsseed + fixed seed), accepts inbound if the router
         // allows it (natpmp tries to open the port), and validates everything locally. RPC stays on 127.0.0.1 only.
-        "chain={chain}\nserver=1\n{net_lines}fallbackfee=0.0001\nrpcthreads=16\nrpcworkqueue=128\n[{chain}]\nrpcport={port}\nrpcbind=127.0.0.1\nrpcallowip=127.0.0.1\n{seeds}",
+        "chain={chain}\nserver=1\n{net_lines}rpcthreads=16\nrpcworkqueue=128\n[{chain}]\nrpcport={port}\nrpcbind=127.0.0.1\nrpcallowip=127.0.0.1\n{seeds}",
         chain = chain,
         net_lines = net_lines,
         port = rpc_port(),
@@ -351,8 +363,10 @@ fn wallet_create(state: State<AppState>) -> Result<Value, String> {
 fn wallet_seed(state: State<AppState>) -> Value {
     // Only right after creation (from memory, shown once). The persisted phrase is encrypted; to reveal it
     // later the user must call wallet_reveal_seed with the wallet password.
-    if let Some(p) = state.pending_mnemonic.lock().unwrap().clone() {
-        return json!(p.split(' ').collect::<Vec<_>>());
+    if let Some(mut p) = state.pending_mnemonic.lock().unwrap().clone() {
+        let out = json!(p.split(' ').collect::<Vec<_>>());
+        zeroize::Zeroize::zeroize(&mut p); // wipe our plaintext clone from memory
+        return out;
     }
     json!(Vec::<String>::new())
 }
@@ -600,7 +614,7 @@ fn wallet_network() -> bitcoin::Network {
 // The extended private key is serialized with wallet_network()'s EXT prefix (tprv on the test build,
 // xprv on the mainnet build; regtest tprv under e2e) so the local node's wpkh() descriptor accepts it.
 // Coin type per build: mainnet uses 9339' (path 84h/9339h/0h) — Brisvia's OWN coin type: 9339 is free in
-// the SLIP-44 registry and mirrors the P2P port 9333, and is NOT Bitcoin's 0' (so the same seed does not
+// the SLIP-44 registry and matches the P2P port 9339, and is NOT Bitcoin's 0' (so the same seed does not
 // reuse Bitcoin's keys). The test/e2e build keeps 1' (path 84h/1h/0h). This does NOT change the EXT prefix
 // (xprv/tprv). The same 12 words still derive a working wallet on both networks; only the account coin type
 // (and the address HRP) differ.
@@ -673,13 +687,19 @@ fn wallet_create_bip39(state: State<AppState>, name: String, password: String) -
     import_descriptors(&state.datadir, &name, &ext, &int, false)?;
     // Encrypt the Core wallet's private keys with the user's password (wallet is left locked afterwards).
     rpc(&state.datadir, Some(&name), "encryptwallet", json!([password]))?;
-    let words = mnemonic.to_string();
+    let mut words = mnemonic.to_string();
     *state.pending_mnemonic.lock().unwrap() = Some(words.clone());
     // Store the phrase ENCRYPTED (Argon2id + AES-256-GCM), never plaintext.
     encrypt_phrase_file(&state.datadir, &words, &password)?;
     activate_wallet(&state, &name);
-    let list: Vec<&str> = words.split(' ').collect();
-    Ok(json!({ "words": list, "fingerprint": fp }))
+    let result = {
+        let list: Vec<&str> = words.split(' ').collect();
+        json!({ "words": list, "fingerprint": fp })   // the words are copied into the JSON here
+    };
+    // Wipe this function's plaintext copy of the mnemonic from memory (the pending copy is wiped after backup
+    // verification; the on-disk copy is encrypted). Reduces exposure in a memory dump.
+    zeroize::Zeroize::zeroize(&mut words);
+    Ok(result)
 }
 
 // Verify the backup: compare, in order, the words the user enters against the mnemonic in memory.
@@ -688,10 +708,18 @@ fn wallet_create_bip39(state: State<AppState>, name: String, password: String) -
 fn wallet_verify_backup(state: State<AppState>, words: Vec<String>) -> Value {
     let pending = state.pending_mnemonic.lock().unwrap().clone();
     let ok = pending
+        .as_ref()
         .map(|p| p.split(' ').map(|s| s.to_string()).collect::<Vec<_>>() == words)
         .unwrap_or(false);
+    // Wipe our local plaintext clone of the mnemonic.
+    if let Some(mut p) = pending {
+        zeroize::Zeroize::zeroize(&mut p);
+    }
     if ok {
-        *state.pending_mnemonic.lock().unwrap() = None;
+        // Take the stored value out and wipe it too, instead of just dropping the String.
+        if let Some(mut stored) = state.pending_mnemonic.lock().unwrap().take() {
+            zeroize::Zeroize::zeroize(&mut stored);
+        }
     }
     json!({ "ok": ok })
 }
@@ -699,6 +727,7 @@ fn wallet_verify_backup(state: State<AppState>, words: Vec<String>) -> Value {
 // Restore from 12 words into a NEW wallet (never overwrites an existing one). Rescan from genesis.
 #[tauri::command]
 fn wallet_restore_bip39(state: State<AppState>, phrase: String, name: String, password: String) -> Result<Value, String> {
+    let phrase = zeroize::Zeroizing::new(phrase); // wiped from memory on every return path
     validate_password(&password)?;
     let mnemonic = Mnemonic::parse(phrase.trim())
         .map_err(|_| "ERR:INVALID_PHRASE".to_string())?;
@@ -716,7 +745,7 @@ fn wallet_restore_bip39(state: State<AppState>, phrase: String, name: String, pa
 // Reveal the 12 words AFTER creation — advanced/protected, only with the correct wallet password.
 #[tauri::command]
 fn wallet_reveal_seed(state: State<AppState>, password: String) -> Result<Value, String> {
-    let phrase = decrypt_phrase_file(&state.datadir, &password)?;
+    let phrase = zeroize::Zeroizing::new(decrypt_phrase_file(&state.datadir, &password)?); // wiped on return
     let list: Vec<String> = phrase.split_whitespace().map(|s| s.to_string()).collect();
     Ok(json!({ "words": list }))
 }
@@ -778,6 +807,55 @@ fn save_total_mined(datadir: &std::path::Path, secs: u64) {
     let _ = std::fs::write(total_mined_path(datadir), secs.to_string());
 }
 
+// Mining mode ("solo"/"pool"/"custom") + custom pool address, persisted so the chosen mode survives restarts.
+fn mining_prefs_path(datadir: &std::path::Path) -> std::path::PathBuf { datadir.join("mining_prefs.json") }
+fn load_mining_prefs(datadir: &std::path::Path) -> (String, String) {
+    let v: Value = std::fs::read_to_string(mining_prefs_path(datadir))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| json!({}));
+    (
+        v["mode"].as_str().unwrap_or("solo").to_string(),
+        v["addr"].as_str().unwrap_or("").to_string(),
+    )
+}
+fn save_mining_prefs(datadir: &std::path::Path, mode: &str, addr: &str) {
+    let _ = std::fs::create_dir_all(datadir);
+    let _ = std::fs::write(mining_prefs_path(datadir), json!({ "mode": mode, "addr": addr }).to_string());
+}
+
+// Validate a user-supplied custom pool address (host:port): rejects control chars, empty host, bad/out-of-range
+// port, and local/private targets by default. Mirrors the worker's own check so an invalid URL never reaches it.
+fn validate_pool_addr(host_port: &str) -> Result<(), String> {
+    let hp = host_port.trim();
+    if hp.chars().any(|c| c.is_control()) {
+        return Err("invalid characters".into());
+    }
+    let (host, port) = hp.rsplit_once(':').ok_or_else(|| "use host:port".to_string())?;
+    if host.is_empty() {
+        return Err("empty host".into());
+    }
+    let port: u32 = port.parse().map_err(|_| "invalid port".to_string())?;
+    if port == 0 || port > 65535 {
+        return Err("port out of range".into());
+    }
+    if host.eq_ignore_ascii_case("localhost") {
+        return Err("local address not allowed".into());
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        let blocked = match ip {
+            std::net::IpAddr::V4(v4) => {
+                v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() || v4.is_broadcast()
+            }
+            std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
+        };
+        if blocked {
+            return Err("local/private address not allowed".into());
+        }
+    }
+    Ok(())
+}
+
 // Persists the total INCLUDING the in-progress session, without touching total_mined_secs in memory. Avoids
 // losing a session's time if the app closes without going through miner_stop (closing the window, a power cut,
 // or an update). On reopen, load_total_mined() recovers it. No double counting: miner_stop only adds the
@@ -826,23 +904,38 @@ fn encrypt_phrase_file(datadir: &std::path::Path, phrase: &str, password: &str) 
     rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
     let mut key = derive_key(password, &salt)?;
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
-    let ct = cipher
-        .encrypt(Nonce::from_slice(&nonce_bytes), phrase.trim().as_bytes())
-        .map_err(|_| "ERR:ENCRYPT_FAILED".to_string())?;
-    key.zeroize();
+    let enc = cipher.encrypt(Nonce::from_slice(&nonce_bytes), phrase.trim().as_bytes());
+    key.zeroize(); // wipe our key copy on EVERY path (success or encrypt error)
+    let ct = enc.map_err(|_| "ERR:ENCRYPT_FAILED".to_string())?;
     let mut out = Vec::with_capacity(1 + 16 + 12 + ct.len());
     out.push(1u8);
     out.extend_from_slice(&salt);
     out.extend_from_slice(&nonce_bytes);
     out.extend_from_slice(&ct);
     let _ = std::fs::create_dir_all(datadir);
-    std::fs::write(enc_seed_path(datadir), out).map_err(|e| e.to_string())
+    // Atomic write: write a temp file then rename, so a crash mid-write never leaves a half-written (corrupt)
+    // seed file. Restrict permissions to owner-only on unix (harmless no-op on Windows).
+    let path = enc_seed_path(datadir);
+    let tmp = path.with_extension("enc.tmp");
+    std::fs::write(&tmp, &out).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 
 fn decrypt_phrase_file(datadir: &std::path::Path, password: &str) -> Result<String, String> {
     use aes_gcm::{Aes256Gcm, Key, Nonce, aead::{Aead, KeyInit}};
     use zeroize::Zeroize;
-    let data = std::fs::read(enc_seed_path(datadir)).map_err(|_| "ERR:NO_SEED_FILE".to_string())?;
+    let path = enc_seed_path(datadir);
+    // Bound the file size before reading it into memory: a valid seed file is ~100 bytes; a tampered huge
+    // file must not cause excessive memory use.
+    if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > 8192 {
+        return Err("ERR:SEED_CORRUPT".to_string());
+    }
+    let data = std::fs::read(&path).map_err(|_| "ERR:NO_SEED_FILE".to_string())?;
     if data.len() < 1 + 16 + 12 + 16 || data[0] != 1 {
         return Err("ERR:SEED_CORRUPT".to_string());
     }
@@ -859,9 +952,10 @@ fn decrypt_phrase_file(datadir: &std::path::Path, password: &str) -> Result<Stri
     String::from_utf8(pt).map_err(|_| "ERR:SEED_CORRUPT".to_string())
 }
 
-// Minimum password policy for non-technical users (kept light; the real backstop is the 12-word phrase).
+// Minimum password policy. 12 chars: an 8-char password is too weak against OFFLINE brute force of the
+// encrypted seed file (the 12 recovery words do NOT compensate a weak local password). Audit finding F.
 fn validate_password(password: &str) -> Result<(), String> {
-    if password.chars().count() < 8 {
+    if password.chars().count() < 12 {
         return Err("ERR:WEAK_PASSWORD".to_string());
     }
     Ok(())
@@ -1049,6 +1143,33 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
     if state.mining.swap(true, Ordering::SeqCst) {
         return json!({ "mining": true }); // already mining
     }
+    // Defense in depth (audit CF2-10): do NOT start mining while the node is still in initial block download —
+    // it would mine on a stale/partial chain. The UI already blocks "Mine" during IBD; this backend guard does not
+    // rely on the UI alone. An RPC failure (node still warming up) is tolerated: only an explicit IBD=true blocks.
+    if let Ok(info) = rpc(&state.datadir, None, "getblockchaininfo", json!([])) {
+        if info.get("initialblockdownload").and_then(|v| v.as_bool()) == Some(true) {
+            state.mining.store(false, Ordering::SeqCst);
+            return json!({ "mining": false, "error": "ERR:NODE_SYNCING" });
+        }
+    }
+    // "Ready to mine" signal (audit-decided). On the REAL network only (an e2e/regtest run is intentionally offline):
+    // do NOT mine a lonely branch (need >= 1 peer) nor with a clock skewed >= 5 min vs the peers' adjusted time.
+    // The genesis-time gate is a consensus rule, enforced by the node, not here. Tip age does NOT block mining
+    // (a long gap between blocks is normal in PoW; stopping miners would make it worse).
+    if net_chain() == NET_CHAIN {
+        let peers = rpc(&state.datadir, None, "getconnectioncount", json!([]))
+            .ok().and_then(|v| v.as_u64()).unwrap_or(0);
+        if peers < 1 {
+            state.mining.store(false, Ordering::SeqCst);
+            return json!({ "mining": false, "error": "ERR:NO_PEERS" });
+        }
+        if let Ok(ni) = rpc(&state.datadir, None, "getnetworkinfo", json!([])) {
+            if ni.get("timeoffset").and_then(|v| v.as_i64()).map(|o| o.abs() >= 300).unwrap_or(false) {
+                state.mining.store(false, Ordering::SeqCst);
+                return json!({ "mining": false, "error": "ERR:CLOCK_SKEW" });
+            }
+        }
+    }
     // A power change relaunches the engine; in that case keep the session timer, the shown speed and the
     // "ready" flag (the worker reports the new speed in a moment) — for the user it's the same session.
     if !state.keep_session_on_relaunch.swap(false, Ordering::SeqCst) {
@@ -1105,11 +1226,36 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
     // and follow it (tail) from a thread that re-reads the file every half second.
     let events_path = state.datadir.join("miner-events.log");
     let out_stdio = std::fs::File::create(&events_path).map(Stdio::from).unwrap_or_else(|_| Stdio::null());
+    // Mining mode: solo (against the local node, default) or pool. In pool/custom mode the worker connects to a
+    // stratum pool (BRISVIA_POOL_URL) and mines there; only the payout address travels in the login. The solo
+    // arguments below are still passed (the worker ignores them in pool mode) so nothing about solo changes.
+    let pool_url = {
+        let mode = state.mining_mode.lock().unwrap().clone();
+        match mode.as_str() {
+            "pool" => Some(OFFICIAL_POOL_URL.to_string()),
+            "custom" => {
+                let a = state.pool_address.lock().unwrap().clone();
+                if a.trim().is_empty() { None } else { Some(a.trim().to_string()) }
+            }
+            _ => None,
+        }
+    };
     let mut cmd = Command::new(&miner_bin);
-    cmd.args([&url, &cuser, &cpass, &addr, &u64::MAX.to_string(), &threads.to_string()])
+    // RPC credentials go via ENV, not argv: a process command line is readable by other local processes, so we keep
+    // the node cookie user/password out of it. The worker reads BRISVIA_RPC_USER/PASS (with an argv fallback for CLI).
+    let empty = String::new();
+    cmd.args([&url, &empty, &empty, &addr, &u64::MAX.to_string(), &threads.to_string()])
+        .env("BRISVIA_RPC_USER", &cuser)
+        .env("BRISVIA_RPC_PASS", &cpass)
         .env("BRISVIA_JSON", "1")
         .stdout(out_stdio)
         .stderr(Stdio::null());
+    // Explicit mode: pass the pool URL only in pool mode; in solo mode REMOVE any inherited BRISVIA_POOL_URL so a
+    // residual/leftover value can never silently put the worker in pool mode (keeps the audited solo path pristine).
+    match &pool_url {
+        Some(purl) => { cmd.env("BRISVIA_POOL_URL", purl); }
+        None => { cmd.env_remove("BRISVIA_POOL_URL"); }
+    }
     no_window(&mut cmd);
     let child = match cmd.spawn() {
         Ok(c) => c,
@@ -1461,7 +1607,9 @@ fn settings_get(app: AppHandle, state: State<AppState>) -> Value {
     json!({
         "autostart": autostart,
         "tray": state.tray_enabled.load(Ordering::SeqCst),
-        "defaultIntensity": *state.intensity.lock().unwrap()
+        "defaultIntensity": *state.intensity.lock().unwrap(),
+        "miningMode": state.mining_mode.lock().unwrap().clone(),
+        "poolAddress": state.pool_address.lock().unwrap().clone()
     })
 }
 
@@ -1476,6 +1624,26 @@ fn settings_set(app: AppHandle, state: State<AppState>, key: String, value: Valu
         "autostart" => {
             let al = app.autolaunch();
             let _ = if value.as_bool().unwrap_or(false) { al.enable() } else { al.disable() };
+        }
+        "miningMode" => {
+            if let Some(s) = value.as_str() { *state.mining_mode.lock().unwrap() = s.to_string(); }
+            let (m, a) = (state.mining_mode.lock().unwrap().clone(), state.pool_address.lock().unwrap().clone());
+            save_mining_prefs(&state.datadir, &m, &a);
+        }
+        "poolAddress" => {
+            if let Some(s) = value.as_str() {
+                let s = s.trim();
+                // Validate a custom pool address here, where the user enters it (blocks local/private targets,
+                // bad ports, control chars) — so an invalid address never reaches the worker.
+                if !s.is_empty() {
+                    if let Err(e) = validate_pool_addr(s) {
+                        return json!({ "ok": false, "error": e });
+                    }
+                }
+                *state.pool_address.lock().unwrap() = s.to_string();
+                let (m, a) = (state.mining_mode.lock().unwrap().clone(), state.pool_address.lock().unwrap().clone());
+                save_mining_prefs(&state.datadir, &m, &a);
+            }
         }
         _ => {}
     }
@@ -1622,6 +1790,7 @@ pub fn run() {
     let total_secs_initial = load_total_mined(&datadir);
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
 
+    let (init_mode, init_pool) = load_mining_prefs(&datadir);
     let state = AppState {
         child: Arc::new(Mutex::new(None)),
         datadir,
@@ -1637,6 +1806,8 @@ pub fn run() {
         hashrate: Arc::new(Mutex::new(0.0)),
         miner_ready: Arc::new(AtomicBool::new(false)),
         tray_enabled: Arc::new(AtomicBool::new(true)),
+        mining_mode: Arc::new(Mutex::new(init_mode)),
+        pool_address: Arc::new(Mutex::new(init_pool)),
         pending_mnemonic: Arc::new(Mutex::new(None)),
         lang: Arc::new(Mutex::new("es".to_string())),
         tray: Arc::new(Mutex::new(None)),

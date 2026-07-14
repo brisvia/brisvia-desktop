@@ -6,6 +6,14 @@ use std::os::raw::{c_int, c_ulong, c_void};
 use std::ptr;
 use std::sync::Arc;
 
+// Pool (stratum) mining support. `blockhdr` rebuilds the exact 80-byte header the pool verifies;
+// `stratum` is the async client that feeds jobs into the SAME RandomX engine as solo mining.
+pub mod blockhdr;
+pub mod stratum;
+pub mod worksource;
+pub mod pool_miner;
+pub mod pool_worker;
+
 #[repr(C)] pub struct RandomxCache { _p: [u8; 0] }
 #[repr(C)] pub struct RandomxDataset { _p: [u8; 0] }
 #[repr(C)] pub struct RandomxVm { _p: [u8; 0] }
