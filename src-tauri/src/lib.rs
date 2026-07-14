@@ -1346,6 +1346,11 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
             _ => None,
         }
     };
+    // N11: "custom" pool chosen but no address entered -> refuse to start instead of silently mining solo.
+    if state.mining_mode.lock().unwrap().as_str() == "custom" && pool_url.is_none() {
+        state.mining.store(false, Ordering::SeqCst);
+        return json!({ "mining": false, "error": "ERR:POOL_ADDR_MISSING" });
+    }
     let mut cmd = Command::new(&miner_bin);
     // RPC credentials go via ENV, not argv: a process command line is readable by other local processes, so we keep
     // the node cookie user/password out of it. The worker reads BRISVIA_RPC_USER/PASS (with an argv fallback for CLI).
