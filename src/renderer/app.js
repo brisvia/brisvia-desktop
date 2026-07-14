@@ -12,6 +12,9 @@ function transError(err) {
       BAD_PASSWORD: 'errors.bad_password', WEAK_PASSWORD: 'errors.weak_password',
       NO_SEED_FILE: 'errors.no_seed_file', SEED_CORRUPT: 'errors.seed_corrupt',
       INVALID_PHRASE: 'errors.invalid_phrase', ENCRYPT_FAILED: 'errors.encrypt_failed',
+      WALLET_EXISTS: 'errors.wallet_exists',
+      NODE_SYNCING: 'errors.node_syncing', NO_PEERS: 'errors.no_peers', CLOCK_SKEW: 'errors.clock_skew',
+      WALLET_NOT_READY: 'errors.wallet_not_ready', MINER_NOT_FOUND: 'errors.miner_not_found',
     };
     const key = map[err.slice(4)];
     if (key) return T(key);
@@ -76,6 +79,12 @@ function updatePassMeter() {
   $('#pass-meter').className = 'pass-meter lvl-' + (p ? passStrength(p) : 0);
 }
 $('#pass-1').addEventListener('input', updatePassMeter);
+// Clear a stale error as soon as the user edits either field, so a previous
+// "at least 8 characters" / "passwords don't match" message does not linger
+// after it has already been corrected.
+const clearPassMsg = () => { const m = $('#pass-msg'); if (m && !m.hidden) m.hidden = true; };
+$('#pass-1').addEventListener('input', clearPassMsg);
+$('#pass-2').addEventListener('input', clearPassMsg);
 $('#pass-show').addEventListener('change', (e) => {
   const t = e.target.checked ? 'text' : 'password';
   $('#pass-1').type = t; $('#pass-2').type = t;
@@ -84,7 +93,7 @@ $('#pass-back').addEventListener('click', () => setupStep(passMode === 'import' 
 $('#pass-next').addEventListener('click', async () => {
   const p1 = $('#pass-1').value, p2 = $('#pass-2').value;
   const msg = $('#pass-msg'); msg.hidden = false; msg.className = 'verify-msg err';
-  if (p1.length < 8) { msg.textContent = T('onboarding.pass_weak'); return; }
+  if ([...p1].length < 12) { msg.textContent = T('onboarding.pass_weak'); return; } // [...] counts code points, matching backend chars().count() (audit N10)
   if (p1 !== p2) { msg.textContent = T('onboarding.pass_mismatch'); return; }
   const btn = $('#pass-next'); btn.disabled = true; btn.textContent = T('onboarding.creating');
   try {
@@ -206,12 +215,25 @@ $('#verify-back').addEventListener('click', showSeedStep);
 
 // -- Import --
 $('#import-back').addEventListener('click', () => setupStep('choose'));
+// Clear a stale "must be 12 words" error as soon as the user edits any word.
+$('#import-grid').addEventListener('input', () => { const m = $('#import-msg'); if (m && !m.hidden) m.hidden = true; });
 $('#import-ok').addEventListener('click', async () => {
-  const words = [...$('#import-grid').querySelectorAll('input')].map((i) => i.value.trim().toLowerCase()).filter(Boolean);
+  // Split each cell by spaces too, so "13 words pasted into 12 cells" is caught here (audit N3).
+  const words = [...$('#import-grid').querySelectorAll('input')]
+    .flatMap((i) => i.value.trim().toLowerCase().split(/\s+/)).filter(Boolean);
   const msg = $('#import-msg');
   if (words.length !== 12) {
     msg.hidden = false; msg.className = 'verify-msg err';
     msg.textContent = T('onboarding.import_len_err', { n: words.length });
+    return;
+  }
+  // Validate the phrase HERE, before asking for a password, so a bad word is flagged on the words screen
+  // and not later on the password screen (audit N3). If the check can't run, fall through (backend re-checks).
+  let phraseValid = true;
+  try { phraseValid = await window.brisvia.wallet.validatePhrase(words); } catch { phraseValid = true; }
+  if (!phraseValid) {
+    msg.hidden = false; msg.className = 'verify-msg err';
+    msg.textContent = T('errors.invalid_phrase');
     return;
   }
   msg.hidden = true;
@@ -303,8 +325,15 @@ async function refreshMine() {
 }
 $('#toggle').addEventListener('click', async () => {
   if (isWaitMode()) { refreshMine(); return; } // wait mode: the button is disabled; ignore any click
-  if (mining) await window.brisvia.stop();
-  else await window.brisvia.start(currentIntensity());
+  const mm = $('#mine-msg'); if (mm) mm.hidden = true; // clear any previous mining error
+  if (mining) {
+    await window.brisvia.stop();
+  } else {
+    // Read the backend's answer: if it refused to start (no peers, clock skew, syncing, wallet/worker not
+    // ready...), show WHY instead of silently doing nothing (audit N2).
+    const r = await window.brisvia.start(currentIntensity());
+    if (r && r.error && mm) { mm.textContent = transError(r.error); mm.hidden = false; }
+  }
   refreshMine();
 });
 // Mining power: a percentage (1..100) of the machine's cores. Named shortcuts + a slider for fine control.
@@ -548,8 +577,16 @@ $('#act-send').addEventListener('click', () => {
 // "Use max": fills the whole available balance. The tiny network fee is taken by the node when it builds
 // the transaction; on the test network it is minimal, so if it doesn't fit the user just lowers the amount.
 $('#send-max').addEventListener('click', () => {
-  $('#send-amount').value = fmtAmountInput(availableBalance);
+  // Leave room for the network fee so "use max" yields an amount that actually sends (audit N4):
+  // fallbackfee is ~0.0001 BRVA/kB; a small reserve covers a typical transaction.
+  const FEE_RESERVE = 0.0002;
+  $('#send-amount').value = fmtAmountInput(Math.max(0, availableBalance - FEE_RESERVE));
   $('#send-msg').hidden = true;
+});
+// Clear a stale send error (invalid address/amount/password) as soon as the user edits any field.
+['#send-addr', '#send-amount', '#send-pass'].forEach((s) => {
+  const el = $(s);
+  if (el) el.addEventListener('input', () => { const m = $('#send-msg'); if (m && !m.hidden) m.hidden = true; });
 });
 $('#send-go').addEventListener('click', async () => {
   const go = $('#send-go');
@@ -612,9 +649,15 @@ $$('#set-mining-mode .seg-btn').forEach((b) => b.addEventListener('click', () =>
 // Custom pool address: persist what the user types (on change/blur), trimmed.
 {
   const poolAddrInput = $('#set-pool-addr');
-  if (poolAddrInput) {
-    poolAddrInput.addEventListener('change', () => window.brisvia.settings.set('poolAddress', poolAddrInput.value.trim()));
-  }
+  const savePoolBtn = $('#set-pool-save');
+  const poolSavedTag = $('#set-pool-saved');
+  const savePoolAddr = () => {
+    if (!poolAddrInput) return;
+    window.brisvia.settings.set('poolAddress', poolAddrInput.value.trim());
+    if (poolSavedTag) { poolSavedTag.hidden = false; setTimeout(() => { poolSavedTag.hidden = true; }, 1800); }
+  };
+  if (poolAddrInput) poolAddrInput.addEventListener('change', savePoolAddr);
+  if (savePoolBtn) savePoolBtn.addEventListener('click', savePoolAddr);
 }
 // Social links live in the header now (visible from any view); open them in the system browser.
 $$('.hsocial').forEach((b) => b.addEventListener('click', () => window.brisvia.openUrl(b.dataset.url)));
@@ -901,16 +944,23 @@ async function pollNet() {
   // Syncing = connected but still catching up with the shared chain (do not mine yet). Never in wait mode.
   syncing = !waitMode && connected && !!(info && info.ibd);
   syncProgress = (info && info.verificationprogress != null) ? Number(info.verificationprogress) : 0;
+  // Green/"connected" only with at least one real connection, so it never shows "connected" next to
+  // "peers: 0" (audit N12). Without peers we keep showing "connecting" (still looking for other computers).
+  const hasPeers = !!(info && (info.peers ?? 0) > 0);
   const netKey = waitMode ? 'wait.net'
-    : (!connected ? 'net.connecting' : (syncing ? 'net.syncing' : (walletReady ? 'net.connected' : 'net.preparing')));
-  setNet(connected && !waitMode && !syncing, netKey);
+    : (!connected ? 'net.connecting' : (syncing ? 'net.syncing' : (!hasPeers ? 'net.connecting' : (walletReady ? 'net.connected' : 'net.preparing'))));
+  setNet(connected && !waitMode && !syncing && hasPeers, netKey);
   if ($('#nr-status')) {
     // Network + mode: gives the user certainty about WHERE they are mining (asked by users who weren't sure).
     // `network` comes from the build itself (NET_CHAIN), so it's right even before the node connects.
     $('#nr-network').textContent = networkLabel(info && info.network);
-    $('#nr-mode').textContent = T('net_panel.mode_solo'); // solo today; pools will add more modes later
+    // Show what the user picked, honestly (audit N5 + Fernando pto3): mining runs solo until the pool
+    // client lands, so pool/custom are shown as "solo · <group> pending".
+    $('#nr-mode').textContent = currentMiningMode === 'pool' ? T('net_panel.mode_pool_pending')
+      : currentMiningMode === 'custom' ? T('net_panel.mode_custom_pending')
+      : T('net_panel.mode_solo');
     $('#nr-status').textContent = waitMode ? T('wait.net')
-      : (!connected ? T('net_panel.connecting') : (syncing ? T('net.syncing') : (walletReady ? T('net_panel.connected') : T('net_panel.preparing'))));
+      : (!connected ? T('net_panel.connecting') : (syncing ? T('net.syncing') : (!hasPeers ? T('net_panel.connecting') : (walletReady ? T('net_panel.connected') : T('net_panel.preparing')))));
     $('#nr-height').textContent = connected ? window.I18N.fmtNum(info.blocks ?? 0) : '—';
     $('#nr-peers').textContent = connected ? (info.peers ?? 0) : '—';
     // Difficulty on the shared testnet is a tiny number; 2 decimals would round it to "0".
@@ -1066,6 +1116,16 @@ async function init() {
 
   if (window.brisvia.isReal) {
     $('#setup').hidden = true;
+    // Decide the first screen WITHOUT waiting for the node: the welcome/onboarding does not need a
+    // connected node, so if there is no wallet on disk yet we show it immediately instead of waiting
+    // for the node-status loop below (which can take a while before the seed nodes are reachable).
+    let walletExists = false;
+    try { walletExists = await window.brisvia.wallet.seedOnDisk(); } catch {}
+    if (!walletExists) {
+      $('#setup').hidden = false;
+      onbStep = 0; renderOnb(); setupStep('welcome');
+      setInterval(pollNet, 3000);
+    } else {
     setNet(false, 'net.connecting');
     let ready = false, decided = false, walletOnDisk = false;
     for (let i = 0; i < 150 && !decided; i++) {
@@ -1107,6 +1167,7 @@ async function init() {
       onbStep = 0; renderOnb(); setupStep('welcome');
     }
     setInterval(pollNet, 3000);
+    }
   } else {
     const exists = await window.brisvia.wallet.exists();
     if (exists && localStorage.getItem('brisvia_onboarded') === '1') {
@@ -1138,10 +1199,15 @@ $('#protect-1').addEventListener('input', () => {
   const p = $('#protect-1').value;
   $('#protect-meter').className = 'pass-meter lvl-' + (p ? passStrength(p) : 0);
 });
+// Clear a stale error as soon as the user edits either field.
+['#protect-1', '#protect-2'].forEach((s) => {
+  const el = $(s);
+  if (el) el.addEventListener('input', () => { const m = $('#protect-msg'); if (m && !m.hidden) m.hidden = true; });
+});
 $('#protect-go').addEventListener('click', async () => {
   const p1 = $('#protect-1').value, p2 = $('#protect-2').value;
   const msg = $('#protect-msg'); msg.hidden = false; msg.className = 'verify-msg err';
-  if (p1.length < 8) { msg.textContent = T('onboarding.pass_weak'); return; }
+  if ([...p1].length < 12) { msg.textContent = T('onboarding.pass_weak'); return; } // [...] counts code points, matching backend chars().count() (audit N10)
   if (p1 !== p2) { msg.textContent = T('onboarding.pass_mismatch'); return; }
   const btn = $('#protect-go'); btn.disabled = true;
   const r = await window.brisvia.wallet.migrateEncrypt(p1);
