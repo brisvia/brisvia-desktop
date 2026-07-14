@@ -1,0 +1,91 @@
+{
+  "_comment": [
+    "SHARED TRUTH for the share rule. The miner (Rust) and the pool (Python) must decide IDENTICALLY whether a",
+    "hash meets a target. If they disagree, the miner submits work the pool throws away -- the CPU burns and",
+    "nobody is paid. Both sides read THIS file and must reproduce every verdict.",
+    "",
+    "Until now each side only tested itself: the Rust test is even called 'match_pool_rule', but it never runs",
+    "the pool -- it assumes the rule. This file replaces that assumption with a check.",
+    "",
+    "RandomX returns the hash in native order (little-endian). Both sides reverse it to big-endian and compare",
+    "<= against the big-endian target. 'hash_raw_le' is what RandomX hands over; 'target_be' is what the job",
+    "carries; 'accept' is the only correct answer.",
+    "",
+    "Any change here must be made ONCE and reproduced by both sides. The copy in the pool is checked byte for",
+    "byte against this file (test_share_rule_vectors.py)."
+  ],
+  "vectors": [
+    {
+      "name": "hash equals target -> accepted (the boundary is inclusive)",
+      "hash_raw_le": "1000000000000000000000000000000000000000000000000000000000000000",
+      "target_be": "0000000000000000000000000000000000000000000000000000000000000010",
+      "accept": true
+    },
+    {
+      "name": "hash one below the target -> accepted",
+      "hash_raw_le": "0f00000000000000000000000000000000000000000000000000000000000000",
+      "target_be": "0000000000000000000000000000000000000000000000000000000000000010",
+      "accept": true
+    },
+    {
+      "name": "hash one above the target -> rejected (off-by-one on the boundary)",
+      "hash_raw_le": "1100000000000000000000000000000000000000000000000000000000000000",
+      "target_be": "0000000000000000000000000000000000000000000000000000000000000010",
+      "accept": false
+    },
+    {
+      "name": "zero hash -> always accepted",
+      "hash_raw_le": "0000000000000000000000000000000000000000000000000000000000000000",
+      "target_be": "0000000000000000000000000000000000000000000000000000000000000010",
+      "accept": true
+    },
+    {
+      "name": "max hash vs max target -> equal -> accepted",
+      "hash_raw_le": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "target_be": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "accept": true
+    },
+    {
+      "name": "max hash vs the hardest target -> rejected",
+      "hash_raw_le": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "target_be": "0100000000000000000000000000000000000000000000000000000000000000",
+      "accept": false
+    },
+    {
+      "name": "THE ENDIAN TRAP: leading zeros in native order. Read the wrong way round this hash looks tiny and would be accepted; read correctly it is enormous and must be rejected.",
+      "hash_raw_le": "00000000000000000000000000000000000000000000000000000000000000ff",
+      "target_be": "0000000000000000000000000000000000000000000000000000000000000010",
+      "accept": false
+    },
+    {
+      "name": "THE MIRROR TRAP: read the wrong way round this one looks enormous and would be rejected; read correctly it is tiny and must be accepted.",
+      "hash_raw_le": "ff00000000000000000000000000000000000000000000000000000000000000",
+      "target_be": "ff00000000000000000000000000000000000000000000000000000000000000",
+      "accept": true
+    },
+    {
+      "name": "the whole value packed in the most significant byte (big-endian), exactly equal to the target -> accepted",
+      "hash_raw_le": "0000000000000000000000000000000000000000000000000000000000000001",
+      "target_be": "0100000000000000000000000000000000000000000000000000000000000000",
+      "accept": true
+    },
+    {
+      "name": "one step above the target in the most significant byte (big-endian) -> rejected. Note the 02 sits at the END of the native hash: writing it at the front (the intuitive mistake) makes the value 2, not 2^249, and the case would silently test nothing.",
+      "hash_raw_le": "0000000000000000000000000000000000000000000000000000000000000002",
+      "target_be": "0100000000000000000000000000000000000000000000000000000000000000",
+      "accept": false
+    },
+    {
+      "name": "realistic target (network difficulty 1e0fffff style): hash genuinely under it -> accepted",
+      "hash_raw_le": "00000000000000000000000000000000000000000000000000000000fe0f0000",
+      "target_be": "00000fff00000000000000000000000000000000000000000000000000000000",
+      "accept": true
+    },
+    {
+      "name": "realistic target: hash just over the top -> rejected",
+      "hash_raw_le": "00000000000000000000000000000000000000000000000000000000000010ff",
+      "target_be": "00000fff00000000000000000000000000000000000000000000000000000000",
+      "accept": false
+    }
+  ]
+}
