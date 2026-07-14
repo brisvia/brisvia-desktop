@@ -15,6 +15,34 @@ jobs:
       - name: Checkout desktop app
         uses: actions/checkout@v4
 
+      # Candado de version (bug real: tauri.conf decia 1.0.2 y Cargo.toml 1.0.0 -> la app mostraba la vieja).
+      # Si no coinciden, el build FALLA aca y no se publica nada desincronizado.
+      - name: Guard - version de tauri.conf.json y Cargo.toml deben coincidir
+        shell: bash
+        env:
+          GITHUB_WORKFLOW_FILE: .github/workflows/build-windows.yml
+        run: |
+          TC=$(grep -oE '"version": "[0-9]+\.[0-9]+\.[0-9]+"' src-tauri/tauri.conf.json | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          CG=$(grep -oE '^version = "[0-9]+\.[0-9]+\.[0-9]+"' src-tauri/Cargo.toml | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          # El tag al que se adjunta el release tiene que ser el MISMO numero: si no, el actualizador
+          # le ofrece a la gente una version que no coincide con la que trae el instalador.
+          TAG=$(grep -oE 'tag_name: v[0-9]+\.[0-9]+\.[0-9]+' "$GITHUB_WORKFLOW_FILE" | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          echo "tauri.conf.json = $TC | Cargo.toml = $CG | tag del release = $TAG"
+          if [ "$TC" != "$CG" ]; then echo "FALLO: versiones desincronizadas ($TC vs $CG)"; exit 1; fi
+          if [ "$TAG" != "$TC" ]; then echo "FALLO: el tag del release (v$TAG) no coincide con la version ($TC)"; exit 1; fi
+          echo "OK: version y tag sincronizados ($TC)"
+
+      # PRODUCT guards (not logic). They exist because of real bugs found in a two-minute manual pass and
+      # an automated audit did not catch: a Spanish text with the language in English, and a raw error
+      # del nodo en pantalla. Miran el producto tal como lo ve la gente, no el codigo por separado.
+      - name: Candado - textos (idiomas completos, sin mezclas, sin texto fijo en el HTML)
+        shell: bash
+        run: python tools/check_textos.py
+
+      - name: Candado - errores (todo error del programa llega traducido en ES y EN)
+        shell: bash
+        run: python tools/check_error_contract.py
+
       - name: Checkout core (with the RandomX submodule)
         uses: actions/checkout@v4
         with:
@@ -107,7 +135,7 @@ jobs:
       - name: Attach the installer and the signed updater artifact to the release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.2
+          tag_name: v1.0.3
           draft: true
           files: |
             src-tauri/target/release/bundle/nsis/*-setup.exe
