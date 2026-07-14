@@ -54,15 +54,6 @@ jobs:
           $env:RANDOMX_LIB_DIR = (Split-Path $env:RANDOMX_LIB)
           cargo build --release --manifest-path crates/brisvia-randomx/Cargo.toml --bin mine-once
 
-      - name: Rust tests on this platform (golden vector + wallet battery + crate) - MAINNET
-        shell: pwsh
-        env:
-          BRISVIA_WALLET_CASES: "5000"
-        run: |
-          $env:RANDOMX_LIB_DIR = (Split-Path $env:RANDOMX_LIB)
-          cargo test --manifest-path crates/brisvia-randomx/Cargo.toml -- --skip vector_fast
-          cargo test --manifest-path src-tauri/Cargo.toml --features mainnet --lib wallet_key_tests -- --nocapture
-
       - name: Stage binaries (.exe)
         shell: pwsh
         run: |
@@ -74,6 +65,16 @@ jobs:
           Copy-Item $cli.FullName src-tauri/binaries/bitcoin-cli.exe
           Copy-Item $mw.FullName  src-tauri/binaries/brisvia-worker.exe
           Get-ChildItem src-tauri/binaries
+
+      # After staging the sidecar binaries, so the Tauri build script finds the resources it validates.
+      - name: Rust tests on this platform (golden vector + wallet battery + crate) - MAINNET
+        shell: pwsh
+        env:
+          BRISVIA_WALLET_CASES: "5000"
+        run: |
+          $env:RANDOMX_LIB_DIR = (Split-Path $env:RANDOMX_LIB)
+          cargo test --manifest-path crates/brisvia-randomx/Cargo.toml -- --skip vector_fast
+          cargo test --manifest-path src-tauri/Cargo.toml --features mainnet --lib wallet_key_tests -- --nocapture
 
       - name: Setup Node
         uses: actions/setup-node@v4
