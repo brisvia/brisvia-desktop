@@ -974,7 +974,7 @@ fn decrypt_phrase_file(datadir: &std::path::Path, password: &str) -> Result<Stri
 // Single source of truth for the new-password policy. The frontend and the shown message
 // (onboarding.pass_weak) must state the SAME number. Only applies to CREATING/restoring a wallet;
 // unlocking to send never checks length (it must accept whatever the wallet was created with).
-const MIN_PASSWORD_LEN: usize = 12;
+const MIN_PASSWORD_LEN: usize = 6;
 fn validate_password(password: &str) -> Result<(), String> {
     if password.chars().count() < MIN_PASSWORD_LEN {
         return Err("ERR:WEAK_PASSWORD".to_string());

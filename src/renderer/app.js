@@ -68,7 +68,7 @@ function startPassStep(mode) {
 // Strength 0..4: length + variety. A visual guide, not a hard block (the real backup is the 12 words).
 function passStrength(p) {
   let s = 0;
-  if (p.length >= 8) s++;
+  if (p.length >= 6) s++;   // minimo permitido
   if (p.length >= 12) s++;
   if (/[A-Z]/.test(p) && /[a-z]/.test(p)) s++;
   if (/\d/.test(p)) s++;
@@ -94,7 +94,7 @@ $('#pass-back').addEventListener('click', () => setupStep(passMode === 'import' 
 $('#pass-next').addEventListener('click', async () => {
   const p1 = $('#pass-1').value, p2 = $('#pass-2').value;
   const msg = $('#pass-msg'); msg.hidden = false; msg.className = 'verify-msg err';
-  if ([...p1].length < 12) { msg.textContent = T('onboarding.pass_weak'); return; } // [...] counts code points, matching backend chars().count() (audit N10)
+  if ([...p1].length < 6) { msg.textContent = T('onboarding.pass_weak'); return; } // [...] counts code points, matching backend MIN_PASSWORD_LEN
   if (p1 !== p2) { msg.textContent = T('onboarding.pass_mismatch'); return; }
   const btn = $('#pass-next'); btn.disabled = true; btn.textContent = T('onboarding.creating');
   try {
@@ -1215,7 +1215,7 @@ $('#protect-1').addEventListener('input', () => {
 $('#protect-go').addEventListener('click', async () => {
   const p1 = $('#protect-1').value, p2 = $('#protect-2').value;
   const msg = $('#protect-msg'); msg.hidden = false; msg.className = 'verify-msg err';
-  if ([...p1].length < 12) { msg.textContent = T('onboarding.pass_weak'); return; } // [...] counts code points, matching backend chars().count() (audit N10)
+  if ([...p1].length < 6) { msg.textContent = T('onboarding.pass_weak'); return; } // [...] counts code points, matching backend MIN_PASSWORD_LEN
   if (p1 !== p2) { msg.textContent = T('onboarding.pass_mismatch'); return; }
   const btn = $('#protect-go'); btn.disabled = true;
   const r = await window.brisvia.wallet.migrateEncrypt(p1);
