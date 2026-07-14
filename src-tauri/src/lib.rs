@@ -176,6 +176,7 @@ fn friendly_error(msg: &str) -> String {
     if m.contains("fee") && (m.contains("low") || m.contains("small") || m.contains("insufficient")) { return "ERR:FEE_TOO_LOW".into(); }
     if m.contains("starting") || m.contains("loading") || m.contains("warming up") || m.contains("rescanning") { return "ERR:NODE_STARTING".into(); }
     if m.contains("no available keys") || m.contains("not loaded") || m.contains("does not exist") { return "ERR:NODE_UNAVAILABLE".into(); }
+    if m.contains("already exists") || m.contains("already loaded") || m.contains("database already") { return "ERR:WALLET_EXISTS".into(); }
     msg.to_string()
 }
 
@@ -349,6 +350,22 @@ fn node_status(state: State<AppState>) -> Value {
 #[tauri::command]
 fn wallet_exists(state: State<AppState>) -> bool {
     state.wallet_loaded.load(Ordering::SeqCst)
+}
+
+// Fast, node-independent check: is there already a wallet on disk? The encrypted seed file is written
+// when the wallet is created, so its presence means "a wallet exists here" even before the node loads it.
+// Used at startup to show the welcome/onboarding immediately ONLY on a genuine first run (no seed on disk),
+// and to avoid the "create over an existing wallet" trap after the user closed the app on the seed screen.
+#[tauri::command]
+fn wallet_seed_on_disk(state: State<AppState>) -> bool {
+    enc_seed_path(&state.datadir).exists()
+}
+
+// Validate a 12-word phrase WITHOUT creating a wallet, so the import screen can flag bad words BEFORE
+// asking for a password (audit N3: today the "invalid words" error surfaces on the password screen).
+#[tauri::command]
+fn wallet_validate_phrase(words: Vec<String>) -> bool {
+    Mnemonic::parse(words.join(" ").trim()).is_ok()
 }
 
 // The wallet is created during startup; create() just returns the receive address.
@@ -683,7 +700,7 @@ fn wallet_create_bip39(state: State<AppState>, name: String, password: String) -
     let mnemonic = Mnemonic::generate(12).map_err(|e| e.to_string())?;
     let (fp, ext, int) = descriptors_from_mnemonic(&mnemonic)?;
     // createwallet blank (no keys), descriptor
-    rpc(&state.datadir, None, "createwallet", json!([name, false, true, "", false, true]))?;
+    rpc(&state.datadir, None, "createwallet", json!([name, false, true, "", false, true])).map_err(|e| friendly_error(&e))?;
     import_descriptors(&state.datadir, &name, &ext, &int, false)?;
     // Encrypt the Core wallet's private keys with the user's password (wallet is left locked afterwards).
     rpc(&state.datadir, Some(&name), "encryptwallet", json!([password]))?;
@@ -954,8 +971,12 @@ fn decrypt_phrase_file(datadir: &std::path::Path, password: &str) -> Result<Stri
 
 // Minimum password policy. 12 chars: an 8-char password is too weak against OFFLINE brute force of the
 // encrypted seed file (the 12 recovery words do NOT compensate a weak local password). Audit finding F.
+// Single source of truth for the new-password policy. The frontend and the shown message
+// (onboarding.pass_weak) must state the SAME number. Only applies to CREATING/restoring a wallet;
+// unlocking to send never checks length (it must accept whatever the wallet was created with).
+const MIN_PASSWORD_LEN: usize = 12;
 fn validate_password(password: &str) -> Result<(), String> {
-    if password.chars().count() < 12 {
+    if password.chars().count() < MIN_PASSWORD_LEN {
         return Err("ERR:WEAK_PASSWORD".to_string());
     }
     Ok(())
@@ -2051,6 +2072,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             node_status,
             wallet_exists,
+            wallet_seed_on_disk,
+            wallet_validate_phrase,
             wallet_create,
             wallet_seed,
             wallet_confirm_backup,
