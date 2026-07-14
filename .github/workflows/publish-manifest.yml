@@ -1,0 +1,58 @@
+name: Publish updater manifest
+
+# Builds and attaches latest.json -- the file every installed copy of Brisvia polls to learn there is a new
+# version -- and then checks the updater from the outside, exactly as the app sees it.
+#
+# Why this workflow exists: latest.json was being written BY HAND after each release. On 1.0.3 it was
+# forgotten and the updater broke for everyone at once, with nothing looking wrong: the release page was
+# perfect and every installer downloaded, but the one URL the app asks for returned 404, so nobody would have
+# been offered the update. A step no one can forget replaces the step someone always eventually forgets.
+#
+# Runs automatically when a release is published, and can be run by hand for an existing tag.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag del release (ej: v1.0.3)"
+        required: true
+
+jobs:
+  manifest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # attach latest.json to the release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Tag a publicar
+        id: tag
+        run: echo "tag=${{ github.event.inputs.tag || github.event.release.tag_name }}" >> $GITHUB_OUTPUT
+
+      # Fails if any platform's signature is missing: a partial manifest silently strands whoever runs it.
+      - name: Generar latest.json desde las firmas publicadas
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OUT=$(python tools/make_latest_json.py "${{ steps.tag.outputs.tag }}" | tail -1)
+          echo "manifest=$OUT" >> $GITHUB_ENV
+          cat "$OUT"
+
+      - name: Adjuntar latest.json al release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ steps.tag.outputs.tag }}" "$manifest" --repo "$GITHUB_REPOSITORY" --clobber
+
+      # GitHub's CDN takes a few seconds to serve a freshly uploaded asset.
+      - name: Esperar a que el archivo este servido
+        run: sleep 30
+
+      # The real proof: fetch what the app fetches. Reading GitHub's metadata is not enough -- on 1.0.3 the
+      # API reported the manifest as "uploaded" while the download URL was still a 404.
+      - name: Candado - la app puede ver la actualizacion
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python tools/check_updater.py "${{ steps.tag.outputs.tag }}"
