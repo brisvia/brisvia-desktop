@@ -623,6 +623,9 @@ $('#send-go').addEventListener('click', async () => {
 // ===================== Settings =====================
 async function loadSettings() {
   const s = await window.brisvia.settings.get();
+  // The backend decides whether pool mining exists; the screen only reflects it. Default to OFF if the
+  // backend does not say, so an old/unknown build can never present a pool option that does not work.
+  applyPoolAvailability(s.poolEnabled === true);
   $('#set-autostart').checked = !!s.autostart;
   $('#set-tray').checked = s.tray !== false;
   // Restore the chosen power from localStorage first (survives restarts even though the backend default
@@ -661,9 +664,27 @@ function applyMiningMode(mode) {
   if (customRow) customRow.hidden = m !== 'custom';
 }
 $$('#set-mining-mode .seg-btn').forEach((b) => b.addEventListener('click', () => {
+  if (b.disabled) return;
   applyMiningMode(b.dataset.mode);
   window.brisvia.settings.set('miningMode', b.dataset.mode);
 }));
+
+// Pool mining is off in 1.0 (the backend decides; see POOL_ENABLED). The buttons are DISABLED, not hidden, and
+// say why: someone who came looking for pool mining deserves to know it is coming, not to wonder if it broke.
+// A disabled control that still reacts would be worse than none — it would promise something that does not run.
+function applyPoolAvailability(enabled) {
+  $$('#set-mining-mode .seg-btn').forEach((b) => {
+    if (b.dataset.mode === 'solo') return;
+    b.disabled = !enabled;
+    b.classList.toggle('seg-off', !enabled);
+  });
+  const note = $('#pool-soon');
+  if (note) note.hidden = enabled;
+  if (!enabled) {
+    const poolRow = $('#pool-info-row'); if (poolRow) poolRow.hidden = true;
+    const customRow = $('#pool-custom-row'); if (customRow) customRow.hidden = true;
+  }
+}
 // Custom pool address: persist what the user types (on change/blur), trimmed.
 {
   const poolAddrInput = $('#set-pool-addr');
