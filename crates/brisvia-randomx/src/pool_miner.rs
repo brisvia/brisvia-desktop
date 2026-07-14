@@ -145,7 +145,40 @@ pub fn mine_with_cache(job: &MiningJob, cache: &Arc<Cache>, threads: usize, nonc
 mod tests {
     use super::*;
 
-    // Pins down the share-check endianness so it can never silently diverge from the pool's verifier.
+    // THE CROSS-CHECK. The test after this one proves the Rust rule is self-consistent, but despite its name
+    // ("match_pool_rule") it never runs the pool: it assumes what the pool does. If the pool ever read the bytes
+    // the other way round, both sides would stay green and the miner would submit work the pool discards --
+    // CPU burned, nobody paid.
+    //
+    // This reads the SHARED vector file that the pool's own test also reads (test_share_rule_vectors.py). One
+    // written truth, two implementations, no assumptions.
+    #[test]
+    fn the_shared_vectors_decide_exactly_as_the_pool() {
+        let raw = include_str!("../share_rule_vectors.json");
+        let doc: serde_json::Value = serde_json::from_str(raw).expect("vector file must be valid JSON");
+        let vectors = doc["vectors"].as_array().expect("vectors must be a list");
+        assert!(vectors.len() >= 12, "the vector file lost cases: {}", vectors.len());
+
+        for v in vectors {
+            let name = v["name"].as_str().unwrap();
+            let hash: [u8; 32] = hex::decode(v["hash_raw_le"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .expect("hash must be 32 bytes");
+            let target: [u8; 32] = hex::decode(v["target_be"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .expect("target must be 32 bytes");
+            let expected = v["accept"].as_bool().unwrap();
+            assert_eq!(
+                hash_meets_target(&hash, &target),
+                expected,
+                "the miner disagrees with the shared rule -- the pool would throw this share away: {name}"
+            );
+        }
+    }
+
+    // Pins down the share-check endianness in code, next to the shared-vector cross-check above.
     // Boundary vectors, no RandomX needed: reverse(raw_hash) <= target_be, big-endian.
     #[test]
     fn endianness_boundary_vectors_match_pool_rule() {
