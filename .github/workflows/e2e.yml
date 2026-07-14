@@ -145,13 +145,25 @@ jobs:
         shell: pwsh
         run: npm run test:e2e:real -- --only 01,02
 
-      # Recorridos de nodo/minado (03 modo espera, 04 nodo regtest, 05 minado, 06 cierre) + billetera
-      # (07-13), en estabilización. No bloquean el verde de 01/02: si alguno falla todavía, queda
-      # registrado pero el job no se marca en rojo por ellos.
-      - name: Run real E2E — recorridos 03-13 (nodo, minado, cierre y billetera) [en estabilización]
+      # SIN continue-on-error. Lo tenía "en estabilización" y quedó: 11 de los 14 recorridos podían fallar
+      # con el job en VERDE. Y estaban fallando: el recorrido de MINADO llevaba tiempo roto y el probador
+      # decía que todo pasaba. Un probador que no puede ponerse rojo no prueba nada; es peor que no tenerlo,
+      # porque da una confianza que no existe.
+      #
+      # 05-minado va aparte SOLO porque su fallo es del entorno, no del producto: en regtest el bloque cero
+      # tiene fecha vieja, el nodo se declara "sincronizando" y la app se niega a minar (correctamente). Se
+      # arregla con un reloj controlado en el recorrido, no aflojando el candado. Hasta entonces queda
+      # explícito y a la vista, no escondido detrás de un verde.
+      - name: Run real E2E — recorridos 03,04,06 (nodo, espera, cierre) + 07-13 (billetera)
+        shell: pwsh
+        run: npm run test:e2e:real -- --only 03,04,06,07,08,09,10,11,12,13
+
+      # ÚNICO recorrido tolerado: falla por el entorno regtest (bloque cero viejo => "sincronizando").
+      # Cuando el reloj controlado entre, este paso se une al de arriba y esta excepción desaparece.
+      - name: Run real E2E — recorrido 05 (minado) [falla conocida del entorno regtest, ver #minado]
         continue-on-error: true
         shell: pwsh
-        run: npm run test:e2e:real -- --only 03,04,05,06,07,08,09,10,11,12,13
+        run: npm run test:e2e:real -- --only 05
 
       # Siempre subimos la evidencia: como los recorridos 07-13 corren con continue-on-error, el job
       # puede quedar verde aunque alguno falle; sin always() no tendríamos sus capturas para depurar.
