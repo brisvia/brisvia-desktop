@@ -1103,6 +1103,91 @@ mod wallet_key_tests {
         let addrs2: Vec<String> = (0..3).map(|i| addr_from_account(&account2, 0, i)).collect();
         assert_eq!(addrs, addrs2, "restoring the same phrase produced different addresses");
     }
+
+    // ================= MASSIVE WALLET DERIVATION (mainnet) =================
+    // Property-style battery: generate thousands of BRAND-NEW wallets and assert the invariants that must
+    // hold for EVERY user's real receiving address. Catches a broken RNG, a drifted derivation path, a
+    // wrong HRP, non-determinism, or an address collision. Case count via BRISVIA_WALLET_CASES (default
+    // 5000; the release candidate runs 100000 overnight). Never logs the phrases (only counts / a failing
+    // index), per the "no seed in logs" rule.
+    #[cfg(feature = "mainnet")]
+    #[test]
+    fn massive_wallet_derivation_invariants() {
+        use bitcoin::bip32::{ChildNumber, Xpriv};
+        use bitcoin::hashes::Hash;
+        use bitcoin::secp256k1::Secp256k1;
+        use bitcoin::CompressedPublicKey;
+        use std::collections::HashSet;
+
+        fn addr_from_account(account_xprv: &str, change: u32, index: u32) -> String {
+            let secp = Secp256k1::new();
+            let account = Xpriv::from_str(account_xprv).unwrap();
+            let path = [
+                ChildNumber::from_normal_idx(change).unwrap(),
+                ChildNumber::from_normal_idx(index).unwrap(),
+            ];
+            let child = account.derive_priv(&secp, &path).unwrap();
+            let pubkey = CompressedPublicKey::from_private_key(&secp, &child.to_priv()).unwrap();
+            let program = pubkey.wpubkey_hash().to_byte_array();
+            let hrp = bitcoin::bech32::Hrp::parse("brv").unwrap();
+            bitcoin::bech32::segwit::encode_v0(hrp, &program).unwrap()
+        }
+        fn account_xprv_of(ext: &str) -> String {
+            ext.split(']').nth(1).unwrap().strip_suffix("/0/*)").unwrap().to_string()
+        }
+
+        let n: usize = std::env::var("BRISVIA_WALLET_CASES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5_000);
+
+        let mut seen_addr: HashSet<String> = HashSet::with_capacity(n);
+        let mut seen_mnem: HashSet<String> = HashSet::with_capacity(n);
+
+        for i in 0..n {
+            let m = Mnemonic::generate(12).expect("generate 12-word mnemonic");
+            let phrase = m.to_string();
+            let (fp, ext, int) = descriptors_from_mnemonic(&m).unwrap();
+            let account = account_xprv_of(&ext);
+            let addr0 = addr_from_account(&account, 0, 0);
+
+            // Format invariants for the real receiving address.
+            assert!(addr0.starts_with("brv1q"), "case {i}: address is not brv1q P2WPKH");
+            assert_eq!(addr0.len(), 43, "case {i}: brv P2WPKH bech32 length must be 43 (hrp 'brv' + 1 + 32 + 6), got {}", addr0.len());
+            assert!(ext.contains("/84h/9339h/0h]"), "case {i}: derivation path drifted");
+            assert!(ext.contains("]xprv"), "case {i}: account key is not an xprv");
+            assert!(int.contains("/84h/9339h/0h]"), "case {i}: internal descriptor path drifted");
+
+            // Determinism: re-parsing the SAME phrase yields the SAME address (restore == create).
+            let m2 = Mnemonic::from_str(&phrase).unwrap();
+            let (fp2, ext2, _int2) = descriptors_from_mnemonic(&m2).unwrap();
+            assert_eq!(fp, fp2, "case {i}: fingerprint not deterministic");
+            assert_eq!(ext, ext2, "case {i}: descriptor not deterministic");
+            assert_eq!(addr0, addr_from_account(&account_xprv_of(&ext2), 0, 0),
+                "case {i}: restoring the phrase produced a different address");
+
+            // Uniqueness: distinct wallets must never collide (mnemonic or address).
+            assert!(seen_mnem.insert(phrase), "case {i}: DUPLICATE mnemonic generated (RNG failure)");
+            assert!(seen_addr.insert(addr0), "case {i}: ADDRESS COLLISION across distinct wallets");
+        }
+        eprintln!("massive_wallet_derivation_invariants: {n} nuevas billeteras, 0 colisiones, invariantes OK");
+    }
+
+    // Invalid phrases MUST be rejected (never silently create a wallet from a bad backup).
+    #[test]
+    fn invalid_mnemonics_rejected() {
+        let bads = [
+            "",                                                                                   // empty
+            "abandon",                                                                            // 1 word
+            "abandon abandon abandon",                                                            // 3 words
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon", // 12x, bad checksum
+            "zzzz zzzz zzzz zzzz zzzz zzzz zzzz zzzz zzzz zzzz zzzz zzzz",                         // words not in BIP39 list
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon zoo",      // wrong checksum word
+        ];
+        for b in bads {
+            assert!(Mnemonic::parse(b.trim()).is_err(), "invalid mnemonic was ACCEPTED: {b:?}");
+        }
+    }
 }
 
 // Update the notification-area tooltip so it always matches the current language and mining state.
