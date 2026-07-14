@@ -12,8 +12,12 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::stratum::{Incoming, Poll, StratumClient};
+use crate::stratum::{Incoming, LoginError, Poll, StratumClient};
 use crate::worksource::{MiningJob, Solution};
+
+/// Marks a session error as permanent, so the reconnect loop stops instead of hammering the pool forever.
+/// A string prefix keeps `run_session`'s signature (and its tests) unchanged.
+const PERMANENT_PREFIX: &str = "PERMANENT:";
 
 /// One event the worker reports (the Tauri backend turns these into UI updates, like the solo worker).
 /// Per ChatGPT: found-locally, submitted, and accepted are DISTINCT — the UI counts a contribution only on
@@ -27,6 +31,7 @@ pub enum PoolEvent {
     ShareAccepted,                                 // pool confirmed the share
     ShareRejected { reason: String },              // pool rejected (low diff, duplicate, unknown job…)
     ShareStale,                                    // arrived late (not fraud)
+    TargetChangeIgnored,                           // pool tried to change difficulty mid-job; v1 waits for a new job
     BlockFound,                                    // our share met the network target → a block
     Disconnected(String),
 }
@@ -48,11 +53,27 @@ where
     M: Fn(&MiningJob, usize, u64, u64, &AtomicBool) -> Option<Solution> + Send,
 {
     on_event(PoolEvent::Connected);
-    client.login(address, worker)?;
+    // Wait for the pool's verdict before mining anything: a rejected miner must not burn CPU for nobody.
+    // A pool that answers with work instead of an explicit ok has accepted us, and that first job is mined.
+    let first_job = client
+        .login(address, worker, Duration::from_secs(20))
+        .map_err(|e| match e {
+            LoginError::Permanent(m) => format!("{PERMANENT_PREFIX}{m}"),
+            LoginError::Temporary(m) => m,
+        })?;
     on_event(PoolEvent::LoggedIn);
 
     let job: Arc<Mutex<Option<(MiningJob, u64)>>> = Arc::new(Mutex::new(None));
     let cur_gen = Arc::new(AtomicU64::new(0));
+    // The job that arrived with the login (if any) starts the session instead of being dropped.
+    if let Some(pj) = first_job {
+        if let Ok(mj) = pj.to_mining_job() {
+            let (jid, h) = (mj.job_id.clone(), mj.height);
+            *job.lock().unwrap() = Some((mj, 1));
+            cur_gen.store(1, Ordering::SeqCst);
+            on_event(PoolEvent::NewJob { job_id: jid, height: h });
+        }
+    }
     let cancel = Arc::new(AtomicBool::new(false)); // raised on new job / disconnect -> mine_job bails out fast
     let done = Arc::new(AtomicBool::new(false));
     // Bounded queue of found shares (job_id, nonce, generation). Bounded so a stalled reader can never let the
@@ -157,8 +178,13 @@ where
                     Poll::Message(Incoming::PoolError(e)) => return Err(format!("pool error: {e}")),
                     // A rejected login is permanent — stop this session with an error.
                     Poll::Message(Incoming::LoginResult { ok: false }) => return Err("login rejected".into()),
-                    // v1 does not support mid-job target changes; each Job carries its own share_target.
-                    Poll::Message(Incoming::SetTarget(_)) => {}
+                    // v1 does not support changing the target mid-job: each job carries its own share_target and
+                    // the pool validates against the one IT stored. Silently ignoring this would leave the miner
+                    // working to a target the pool no longer uses, and every share would come back rejected with
+                    // no explanation. Say it out loud and wait for a fresh job, which does carry the new target.
+                    Poll::Message(Incoming::SetTarget(_)) => {
+                        on_event(PoolEvent::TargetChangeIgnored);
+                    }
                     Poll::Message(_) => {}
                     Poll::Timeout => {}
                     Poll::Closed => return Ok(()),
@@ -200,22 +226,43 @@ where
                     crate::pool_miner::mine_with_cache(mj, &cache, threads, nonce_start, max_nonces, cancel)
                 };
                 let res = run_session(client, address, worker, threads, 50_000_000, should_stop, &mut on_event, mine);
-                on_event(PoolEvent::Disconnected(res.err().unwrap_or_default()));
+                let err = res.err().unwrap_or_default();
+                // The pool gave a definitive answer (rejected address, banned worker, wrong version).
+                // Reconnecting cannot change it: it would hammer the pool and hide the reason from the user.
+                if let Some(reason) = err.strip_prefix(PERMANENT_PREFIX) {
+                    on_event(PoolEvent::Disconnected(reason.to_string()));
+                    return;
+                }
+                on_event(PoolEvent::Disconnected(err));
             }
             Err(e) => on_event(PoolEvent::Disconnected(e)),
         }
         if should_stop.load(Ordering::Relaxed) {
             break;
         }
-        // interruptible-ish backoff (checks stop each second)
-        for _ in 0..backoff {
+        // Backoff in short slices so stopping is immediate, plus jitter: without it, every miner that lost the
+        // same pool would come back at the same instant and knock it over again.
+        let jitter_ms = jitter_ms(address, backoff);
+        let slices = (backoff * 1000 + jitter_ms) / 100;
+        for _ in 0..slices {
             if should_stop.load(Ordering::Relaxed) {
                 return;
             }
-            std::thread::sleep(Duration::from_secs(1));
+            std::thread::sleep(Duration::from_millis(100));
         }
         backoff = (backoff * 2).min(60);
     }
+}
+
+/// Spread reconnections apart without a random number generator (this crate has none): derive a stable
+/// per-miner offset from its address and the attempt, giving each miner a different wait.
+fn jitter_ms(address: &str, attempt: u64) -> u64 {
+    let mut h: u64 = 1469598103934665603; // FNV-1a
+    for b in address.as_bytes() {
+        h = (h ^ *b as u64).wrapping_mul(1099511628211);
+    }
+    h = (h ^ attempt).wrapping_mul(1099511628211);
+    h % 1000 // up to 1 extra second
 }
 
 #[cfg(test)]
@@ -320,6 +367,115 @@ mod tests {
         assert!(submit_line.contains("\"easy2\""), "should submit for the new job, got: {submit_line}");
         assert!(!submit_line.contains("\"hard1\""), "must not submit the cancelled job: {submit_line}");
         assert_eq!(got_share_for, "easy2");
+    }
+
+    // A rejected login must NOT start mining: the pool credits nobody, so the CPU would burn for nothing.
+    #[test]
+    fn a_rejected_login_never_mines() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = std::thread::spawn(move || {
+            let (sock, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(sock.try_clone().unwrap());
+            let mut writer = sock;
+            let mut login = String::new();
+            reader.read_line(&mut login).unwrap();
+            writer.write_all(b"{\"type\":\"login_result\",\"ok\":false}\n").unwrap();
+            writer.flush().unwrap();
+            // If the miner ignored the rejection it would submit anyway; give it time to prove it does not.
+            std::thread::sleep(Duration::from_millis(200));
+        });
+        let client = StratumClient::connect(&addr, Duration::from_secs(5)).unwrap();
+        let stop = AtomicBool::new(false);
+        let mined = Arc::new(AtomicBool::new(false));
+        let mined_c = mined.clone();
+        let stub = move |mj: &MiningJob, _t: usize, _ns: u64, _mx: u64, _s: &AtomicBool| -> Option<Solution> {
+            mined_c.store(true, Ordering::SeqCst); // must never run
+            Some(Solution { job_id: mj.job_id.clone(), nonce: 1, ntime: 0, extranonce2: String::new() })
+        };
+        let mut on_event = |_e: PoolEvent| {};
+        let err = run_session(client, "brv1qbad", "rig1", 1, 1000, &stop, &mut on_event, stub).unwrap_err();
+        server.join().unwrap();
+        assert!(!mined.load(Ordering::SeqCst), "must not mine a single hash after a rejected login");
+        // Marked permanent so the reconnect loop stops instead of hammering the pool forever.
+        assert!(err.starts_with(PERMANENT_PREFIX), "a rejected login must be permanent, got: {err}");
+    }
+
+    // THE ONE THAT MATTERS for the pool: a permanent rejection must stop the worker, not retry forever.
+    // Without this, a miner with a wrong address hammers the pool for as long as the app is open, and the
+    // user never learns why nothing works.
+    #[test]
+    fn a_permanent_rejection_stops_the_worker_instead_of_reconnecting() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let intentos = Arc::new(AtomicU64::new(0));
+        let intentos_c = intentos.clone();
+        // Non-blocking accept loop: count every reconnection for 2s. A correct worker connects ONCE and gives up.
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let hasta = std::time::Instant::now() + Duration::from_secs(2);
+            while std::time::Instant::now() < hasta {
+                match listener.accept() {
+                    Ok((sock, _)) => {
+                        intentos_c.fetch_add(1, Ordering::SeqCst);
+                        sock.set_nonblocking(false).unwrap();
+                        let mut reader = BufReader::new(sock.try_clone().unwrap());
+                        let mut writer = sock;
+                        let mut login = String::new();
+                        let _ = reader.read_line(&mut login);
+                        let _ = writer.write_all(b"{\"type\":\"login_result\",\"ok\":false}\n");
+                        let _ = writer.flush();
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(20)),
+                }
+            }
+        });
+        let stop = AtomicBool::new(false);
+        let mut errores = Vec::new();
+        // run_pool_worker blocks; a correct one returns on its own after the permanent rejection.
+        run_pool_worker(&addr, "brv1qbad", "rig1", 1, &stop, |e| {
+            if let PoolEvent::Disconnected(m) = e {
+                errores.push(m);
+            }
+        });
+        server.join().unwrap(); // let the 2s counting window finish: a buggy worker would reconnect within it
+        assert_eq!(intentos.load(Ordering::SeqCst), 1, "must connect ONCE, not retry a definitive answer");
+        assert_eq!(errores.len(), 1);
+        assert!(!errores[0].starts_with(PERMANENT_PREFIX), "the user must read the reason, not the marker");
+        assert!(errores[0].contains("rejected"), "the reason must reach the user, got: {:?}", errores[0]);
+    }
+
+    // Several pools skip the explicit ok and answer the login with work. That job must be mined, not dropped.
+    #[test]
+    fn a_job_answering_the_login_counts_as_accepted_and_is_mined() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = std::thread::spawn(move || {
+            let (sock, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(sock.try_clone().unwrap());
+            let mut writer = sock;
+            let mut login = String::new();
+            reader.read_line(&mut login).unwrap();
+            writer.write_all((job_line("first", true, 3) + "\n").as_bytes()).unwrap(); // work, no ok
+            writer.flush().unwrap();
+            let mut submit = String::new();
+            reader.read_line(&mut submit).unwrap();
+            submit
+        });
+        let client = StratumClient::connect(&addr, Duration::from_secs(5)).unwrap();
+        let stop = AtomicBool::new(false);
+        let stub = |mj: &MiningJob, _t: usize, _ns: u64, _mx: u64, _s: &AtomicBool| -> Option<Solution> {
+            Some(Solution { job_id: mj.job_id.clone(), nonce: 7, ntime: 0, extranonce2: String::new() })
+        };
+        let stop_ref = &stop;
+        let mut on_event = |e: PoolEvent| {
+            if let PoolEvent::ShareSubmitted { .. } = e {
+                stop_ref.store(true, Ordering::SeqCst);
+            }
+        };
+        run_session(client, "brv1qexample", "rig1", 1, 1000, &stop, &mut on_event, stub).unwrap();
+        let submit_line = server.join().unwrap();
+        assert!(submit_line.contains("\"first\""), "the job that came with the login must be mined: {submit_line}");
     }
 
     // The pool's explicit ack drives the "accepted" event — the worker must NOT count acceptance on submit alone.
