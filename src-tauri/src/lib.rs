@@ -1,7 +1,7 @@
 // Backend of the Brisvia desktop app (Tauri). Rust controls the bitcoind node (sidecar), the credentials (RPC
 // cookie), the wallet and mining; JavaScript (window.brisvia) only sees presentation data. Real node over local
 // JSON-RPC, cookie auth, orderly shutdown (stop mining -> stop RPC -> kill).
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -188,7 +188,9 @@ fn rpc_port() -> u16 {
 
 // ---- JSON-RPC call to bitcoind (cookie auth; the body is never logged) ----
 fn rpc(datadir: &PathBuf, wallet: Option<&str>, method: &str, params: Value) -> Result<Value, String> {
-    let cookie = read_cookie(datadir).ok_or_else(|| "node is not ready yet".to_string())?;
+    // Translatable code instead of raw English: the user used to see "node is not ready yet" while the
+    // node was still starting (or had died), with no idea what it meant.
+    let cookie = read_cookie(datadir).ok_or_else(|| "ERR:NODE_NOT_READY".to_string())?;
     let url = match wallet {
         Some(w) => format!("http://{}:{}/wallet/{}", RPC_HOST, rpc_port(), w),
         None => format!("http://{}:{}/", RPC_HOST, rpc_port()),
@@ -251,9 +253,91 @@ fn no_window(cmd: &mut Command) {
     let _ = cmd;
 }
 
+// ---- self-repair: a hard shutdown can corrupt the node's database ----
+// A power cut, a battery running out or the task manager killing the process can leave the block/chainstate
+// database half-written. bitcoind then refuses to start, writes why to debug.log and exits, so the app would sit
+// at "Preparing wallet..." forever with no way out for a non-technical user. Real case: it happened twice on the
+// owner's machine during testing.
+//
+// Three rules learned from the audit, in order of importance:
+//  1. CAUSALITY. Only the log this attempt wrote counts. Reading the whole file would react to a message from
+//     months ago, already fixed by hand, and rebuild the chain for nothing. We record the log size before
+//     launching and read only from there.
+//  2. THE CAUSE PICKS THE CURE. A full disk, a locked datadir or a permissions error are NOT corruption: a
+//     rebuild cannot fix them and would just loop. Those must be reported, never auto-repaired.
+//  3. ONE SHOT. If a repair already ran and the node still fails, stop. An automatic repair loop on a user's
+//     machine is worse than an honest error message.
+// The seed is never at risk: a rebuild only touches blocks/chainstate, while keys live in a separate file that
+// this code never deletes, moves or writes.
+
+#[derive(PartialEq, Debug)]
+enum Repair {
+    None,             // the node did not fail this way; nothing to do
+    Chainstate,       // rebuild only the UTXO state (fast) — the node asks for this one by name
+    Full,             // rebuild the block index too (slower, needed when the index itself is broken)
+    Blocked(&'static str), // an operational problem: a rebuild would not fix it, so tell the user instead
+}
+
+// Decides what to do from what the node wrote while it was failing to start.
+fn classify_failure(log: &str) -> Repair {
+    // Operational causes FIRST: these look scary in the log but a rebuild is the wrong answer.
+    if log.contains("No space left on device")
+        || log.contains("Disk space is too low")
+        || log.contains("Error: Disk space is low")
+    {
+        return Repair::Blocked("disk");
+    }
+    if log.contains("Cannot obtain a lock on data directory")
+        || log.contains("probably already running")
+    {
+        return Repair::Blocked("locked");
+    }
+    if log.contains("Permission denied") || log.contains("Access is denied") {
+        return Repair::Blocked("permissions");
+    }
+    // The node explicitly asks for a chainstate-only rebuild: that is the cheap fix, prefer it.
+    if log.contains("-reindex-chainstate") || log.contains("Error opening coins database") {
+        return Repair::Chainstate;
+    }
+    // The block index itself is broken: a full rebuild is the only way back.
+    if log.contains("Please restart with -reindex")
+        || log.contains("Corrupted block database detected")
+        || log.contains("Error opening block database")
+    {
+        return Repair::Full;
+    }
+    Repair::None
+}
+
+// Reads only what was appended to the log after `from` (the size it had before this attempt started).
+fn log_since(datadir: &Path, from: u64) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let path = datadir.join(net_subdir()).join("debug.log");
+    let Ok(mut f) = std::fs::File::open(&path) else {
+        return String::new();
+    };
+    if f.seek(SeekFrom::Start(from)).is_err() {
+        return String::new();
+    }
+    let mut buf = Vec::new();
+    let _ = f.take(1024 * 1024).read_to_end(&mut buf); // a failing start writes little; cap it anyway
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+fn log_size(datadir: &Path) -> u64 {
+    std::fs::metadata(datadir.join(net_subdir()).join("debug.log"))
+        .map(|m| m.len())
+        .unwrap_or(0)
+}
+
+// Marker so a repair that did not work is never retried in a loop on the next start.
+fn repair_marker(datadir: &Path) -> PathBuf {
+    datadir.join("repair_attempted")
+}
+
 // ---- start the node as a child process ----
 fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
-    let bitcoind = find_binary(app, &format!("bitcoind{EXE_SUFFIX}")).ok_or("bitcoind not found")?;
+    let bitcoind = find_binary(app, &format!("bitcoind{EXE_SUFFIX}")).ok_or("ERR:NODE_BINARY_MISSING")?;
     std::fs::create_dir_all(&state.datadir).map_err(|e| e.to_string())?;
     // Wide rpcthreads/rpcworkqueue: the miner (getblocktemplate + submitblock) plus the UI polling make several
     // concurrent RPC calls; with the defaults (4 threads) the node rejects connections under load.
@@ -289,16 +373,73 @@ fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
         seeds = seeds
     );
     std::fs::write(state.datadir.join("bitcoin.conf"), conf).map_err(|e| e.to_string())?;
-    let mut cmd = Command::new(&bitcoind);
-    cmd.arg(format!("-datadir={}", state.datadir.display()))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    no_window(&mut cmd);
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("could not start the node: {}", e))?;
+    // Remember how big the log is BEFORE launching, so we only ever read what THIS attempt writes.
+    let mark = log_size(&state.datadir);
+    let mut child = spawn_node(&bitcoind, &state.datadir, None)?;
+
+    // A healthy node stays up. One that cannot open its database dies within a couple of seconds, so give it a
+    // short window: if it is still alive after that, this is a normal start and we get out of the way.
+    let died = wait_for_early_exit(&mut child, Duration::from_secs(6));
+    if !died {
+        *state.child.lock().unwrap() = Some(child);
+        let _ = std::fs::remove_file(repair_marker(&state.datadir)); // healthy start: clear any old marker
+        return Ok(());
+    }
+
+    // It died on startup. Only this attempt's log decides what happens next.
+    let what = classify_failure(&log_since(&state.datadir, mark));
+    let flag = match what {
+        Repair::None => return Err("ERR:NODE_START_FAILED".into()), // died for a reason we do not know
+        Repair::Blocked("disk") => return Err("ERR:NODE_DISK_FULL".into()),
+        Repair::Blocked("locked") => return Err("ERR:NODE_ALREADY_RUNNING".into()),
+        Repair::Blocked(_) => return Err("ERR:NODE_PERMISSIONS".into()),
+        Repair::Chainstate => "-reindex-chainstate",
+        Repair::Full => "-reindex",
+    };
+    // One shot only: if we already tried to repair and it is still failing, stop and say so honestly.
+    if repair_marker(&state.datadir).exists() {
+        return Err("ERR:NODE_REPAIR_FAILED".into());
+    }
+    let _ = std::fs::write(repair_marker(&state.datadir), flag);
+    let mark = log_size(&state.datadir);
+    let mut child = spawn_node(&bitcoind, &state.datadir, Some(flag))?;
+    // A rebuild takes a while, so we only check it did not die immediately again.
+    if wait_for_early_exit(&mut child, Duration::from_secs(6)) {
+        let what = classify_failure(&log_since(&state.datadir, mark));
+        return Err(match what {
+            Repair::Blocked("disk") => "ERR:NODE_DISK_FULL".into(),
+            _ => "ERR:NODE_REPAIR_FAILED".to_string(),
+        });
+    }
     *state.child.lock().unwrap() = Some(child);
     Ok(())
+}
+
+// Launches bitcoind, optionally with a repair flag.
+fn spawn_node(bitcoind: &Path, datadir: &Path, repair_flag: Option<&str>) -> Result<Child, String> {
+    let mut cmd = Command::new(bitcoind);
+    cmd.arg(format!("-datadir={}", datadir.display()))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(f) = repair_flag {
+        cmd.arg(f);
+    }
+    no_window(&mut cmd);
+    cmd.spawn()
+        .map_err(|e| format!("could not start the node: {}", e))
+}
+
+// True if the process exited within `window`. Polls instead of blocking so a healthy node is not delayed.
+fn wait_for_early_exit(child: &mut Child, window: Duration) -> bool {
+    let deadline = std::time::Instant::now() + window;
+    while std::time::Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) => return true, // exited
+            Ok(None) => std::thread::sleep(Duration::from_millis(150)),
+            Err(_) => return false,
+        }
+    }
+    false
 }
 
 // ---- orderly shutdown: stop mining -> stop RPC -> wait -> kill ----
@@ -656,7 +797,7 @@ fn descriptors_from_mnemonic(mnemonic: &Mnemonic) -> Result<(String, String, Str
 // version and would leave the wallet without spending keys). getdescriptorinfo["checksum"] is for the string we pass.
 fn checksummed(datadir: &PathBuf, desc: &str) -> Result<String, String> {
     let info = rpc(datadir, None, "getdescriptorinfo", json!([desc]))?;
-    let cs = info["checksum"].as_str().ok_or_else(|| "descriptor without checksum".to_string())?;
+    let cs = info["checksum"].as_str().ok_or_else(|| "ERR:WALLET_NOT_READY".to_string())?;
     Ok(format!("{}#{}", desc, cs))
 }
 
@@ -846,18 +987,18 @@ fn save_mining_prefs(datadir: &std::path::Path, mode: &str, addr: &str) {
 fn validate_pool_addr(host_port: &str) -> Result<(), String> {
     let hp = host_port.trim();
     if hp.chars().any(|c| c.is_control()) {
-        return Err("invalid characters".into());
+        return Err("ERR:POOL_ADDR_INVALID".into());
     }
-    let (host, port) = hp.rsplit_once(':').ok_or_else(|| "use host:port".to_string())?;
+    let (host, port) = hp.rsplit_once(':').ok_or_else(|| "ERR:POOL_ADDR_FORMAT".to_string())?;
     if host.is_empty() {
-        return Err("empty host".into());
+        return Err("ERR:POOL_ADDR_FORMAT".into());
     }
-    let port: u32 = port.parse().map_err(|_| "invalid port".to_string())?;
+    let port: u32 = port.parse().map_err(|_| "ERR:POOL_ADDR_PORT".to_string())?;
     if port == 0 || port > 65535 {
-        return Err("port out of range".into());
+        return Err("ERR:POOL_ADDR_PORT".into());
     }
     if host.eq_ignore_ascii_case("localhost") {
-        return Err("local address not allowed".into());
+        return Err("ERR:POOL_ADDR_LOCAL".into());
     }
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         let blocked = match ip {
@@ -867,7 +1008,7 @@ fn validate_pool_addr(host_port: &str) -> Result<(), String> {
             std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
         };
         if blocked {
-            return Err("local/private address not allowed".into());
+            return Err("ERR:POOL_ADDR_LOCAL".into());
         }
     }
     Ok(())
@@ -1000,6 +1141,112 @@ mod seed_crypto_tests {
         // Wrong password fails (AES-GCM auth tag mismatch).
         assert!(decrypt_phrase_file(&dir, "wrong-key").is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod repair_tests {
+    use super::{classify_failure, log_since, net_subdir, Repair};
+
+    // The real message bitcoind writes before refusing to start (it happened twice on the owner's machine
+    // after the process was killed). Without this, the app hangs at "Preparing wallet..." forever.
+    #[test]
+    fn a_broken_block_index_asks_for_a_full_rebuild() {
+        let log = "2026-07-14T10:00:00Z Loading block index...\n\
+                   2026-07-14T10:00:01Z Error opening block database.\n\
+                   2026-07-14T10:00:01Z Please restart with -reindex to recover.\n";
+        assert_eq!(classify_failure(log), Repair::Full);
+    }
+
+    // When the node names -reindex-chainstate, take the cheap fix: rebuilding the whole index would make the
+    // user wait far longer for nothing.
+    #[test]
+    fn a_broken_coins_database_asks_for_the_cheap_rebuild() {
+        let log = "2026-07-14T10:00:01Z Error opening coins database.\n\
+                   2026-07-14T10:00:01Z Please restart with -reindex-chainstate to recover.\n";
+        assert_eq!(classify_failure(log), Repair::Chainstate);
+    }
+
+    // THE DANGEROUS ONE. A full disk also makes the node fail while it complains about its database. Rebuilding
+    // needs MORE disk, so it cannot work: it would fail, retry and loop. Must be reported, never repaired.
+    #[test]
+    fn a_full_disk_is_never_repaired() {
+        let log = "2026-07-14T10:00:00Z Error: Disk space is too low!\n\
+                   2026-07-14T10:00:01Z Error opening block database.\n\
+                   2026-07-14T10:00:01Z Please restart with -reindex to recover.\n";
+        assert_eq!(classify_failure(log), Repair::Blocked("disk"));
+    }
+
+    // Two copies of the app open: the second cannot lock the datadir. Rebuilding would not fix that either.
+    #[test]
+    fn an_already_running_node_is_never_repaired() {
+        let log = "2026-07-14T10:00:00Z Cannot obtain a lock on data directory. Brisvia is probably already running.\n";
+        assert_eq!(classify_failure(log), Repair::Blocked("locked"));
+    }
+
+    #[test]
+    fn a_permissions_error_is_never_repaired() {
+        let log = "2026-07-14T10:00:00Z Error opening block database.\n\
+                   2026-07-14T10:00:00Z Permission denied\n";
+        assert_eq!(classify_failure(log), Repair::Blocked("permissions"));
+    }
+
+    // A healthy start must not trigger anything: rebuilding on every start would be a slow, pointless loop.
+    #[test]
+    fn a_healthy_start_repairs_nothing() {
+        let log = "2026-07-14T10:00:00Z Loading block index...\n\
+                   2026-07-14T10:00:02Z init message: Done loading\n\
+                   2026-07-14T10:00:03Z UpdateTip: new best=aa6bc268 height=1\n";
+        assert_eq!(classify_failure(log), Repair::None);
+    }
+
+    // CAUSALITY. The bug the audit caught: an OLD message, from a crash already fixed by hand, must not
+    // trigger a rebuild today. We only read what was written after the mark, so the old part is invisible.
+    #[test]
+    fn an_old_crash_message_does_not_trigger_a_rebuild_today() {
+        let dir = std::env::temp_dir().join("brisvia-repair-causality");
+        let net = dir.join(net_subdir());
+        std::fs::create_dir_all(&net).unwrap();
+        let old = "2026-01-01T00:00:00Z Please restart with -reindex to recover.\n";
+        std::fs::write(net.join("debug.log"), old).unwrap();
+        let mark = old.len() as u64; // what the log measured before today's attempt
+
+        // Today the node starts fine and appends a healthy line.
+        let mut all = old.to_string();
+        all.push_str("2026-07-14T10:00:03Z UpdateTip: new best=aa6bc268 height=1\n");
+        std::fs::write(net.join("debug.log"), &all).unwrap();
+
+        let this_attempt = log_since(&dir, mark);
+        assert!(!this_attempt.contains("Please restart")); // the old crash is not part of this attempt
+        assert_eq!(classify_failure(&this_attempt), Repair::None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The mirror case: a real crash right now IS seen, even with a big healthy log behind it.
+    #[test]
+    fn a_crash_right_now_is_seen_even_after_a_long_healthy_log() {
+        let dir = std::env::temp_dir().join("brisvia-repair-now");
+        let net = dir.join(net_subdir());
+        std::fs::create_dir_all(&net).unwrap();
+        let old = "2026-07-14T09:00:00Z UpdateTip: new best=deadbeef\n".repeat(6000);
+        std::fs::write(net.join("debug.log"), &old).unwrap();
+        let mark = old.len() as u64;
+
+        let mut all = old.clone();
+        all.push_str("2026-07-14T10:00:01Z Corrupted block database detected.\n");
+        all.push_str("2026-07-14T10:00:01Z Please restart with -reindex to recover.\n");
+        std::fs::write(net.join("debug.log"), &all).unwrap();
+
+        assert_eq!(classify_failure(&log_since(&dir, mark)), Repair::Full);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // No log at all (first ever run) must be silent, not a crash.
+    #[test]
+    fn a_missing_log_is_not_a_failure() {
+        let dir = std::env::temp_dir().join("brisvia-repair-nonexistent");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(classify_failure(&log_since(&dir, 0)), Repair::None);
     }
 }
 
@@ -1874,7 +2121,7 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
         .check()
         .await
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| "no update available".to_string())?;
+        .ok_or_else(|| "ERR:NO_UPDATE".to_string())?;
     // Stop the node and mining engine first so their .exe files aren't locked when the installer replaces them.
     {
         let state = app.state::<AppState>();
