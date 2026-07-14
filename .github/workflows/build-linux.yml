@@ -102,6 +102,12 @@ jobs:
         # Keeps releases/latest/download/Brisvia-Miner-Linux.AppImage working across every version.
         run: cp src-tauri/target/release/bundle/appimage/*.AppImage Brisvia-Miner-Linux.AppImage
 
+      - name: Guard - the app binary must target MAINNET (coin 9339)
+        run: |
+          BIN=$(find src-tauri/target/release -maxdepth 1 -name brisvia-miner -type f | head -1)
+          grep -a -q '9339h' "$BIN" || { echo 'FALLO: binario NO es mainnet (falta 9339h). Compilar con --features mainnet.'; exit 1; }
+          echo 'OK: binario mainnet (9339h)'
+
       - name: Attach the .AppImage, .deb and the signed updater artifact to the release
         uses: softprops/action-gh-release@v2
         with:

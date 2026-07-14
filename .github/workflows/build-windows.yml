@@ -86,6 +86,14 @@ jobs:
           $exe = Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter *-setup.exe | Select-Object -First 1
           Copy-Item $exe.FullName Brisvia-Miner-Windows.exe
 
+      - name: Guard - the app binary must target MAINNET (coin 9339)
+        shell: pwsh
+        run: |
+          $bin = Get-ChildItem -Path src-tauri/target/release -Filter brisvia-miner.exe -Recurse | Select-Object -First 1
+          $txt = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($bin.FullName))
+          if ($txt -notmatch '9339h') { throw 'FALLO: el binario NO es mainnet (falta coin 9339h). Compilar con --features mainnet.' }
+          Write-Host 'OK: binario mainnet (9339h presente)'
+
       - name: Attach the installer and the signed updater artifact to the release
         uses: softprops/action-gh-release@v2
         with:
