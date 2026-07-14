@@ -335,6 +335,39 @@ fn repair_marker(datadir: &Path) -> PathBuf {
     datadir.join("repair_attempted")
 }
 
+// How long a repair attempt keeps blocking further attempts. A real loop retries within seconds, so a short
+// window stops it; a genuinely new problem days later must still be repaired.
+const REPAIR_COOLDOWN_SECS: u64 = 600; // 10 minutes
+
+fn ahora_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+// Was a repair attempted so recently that trying again would just be a loop?
+//
+// This used to be a plain "does the file exist?", which was wrong in a way that only showed up on a real
+// machine: the marker was written before repairing but never removed when the repair WORKED. Since every
+// update force-closes the app (which is what corrupts the database in the first place), the second corruption
+// would find the old marker and refuse to repair -- telling the user "I could not repair it" without even
+// trying. Caught on the owner's machine: the marker was sitting there after a repair that had gone fine.
+//
+// The marker now carries the time of the attempt. Recent = a loop, refuse. Old = the previous incident is
+// long over, this is a new one, repair it.
+fn repair_blocked(datadir: &Path) -> bool {
+    let Ok(txt) = std::fs::read_to_string(repair_marker(datadir)) else {
+        return false; // no marker: nothing was attempted
+    };
+    match txt.rsplit_once('|').and_then(|(_, ts)| ts.trim().parse::<u64>().ok()) {
+        Some(ts) => ahora_secs().saturating_sub(ts) < REPAIR_COOLDOWN_SECS,
+        // A marker with no timestamp comes from the first version of this code. Treat it as old (do not block):
+        // that version left it behind after successful repairs, so honouring it would deny a repair for good.
+        None => false,
+    }
+}
+
 // ---- start the node as a child process ----
 fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
     let bitcoind = find_binary(app, &format!("bitcoind{EXE_SUFFIX}")).ok_or("ERR:NODE_BINARY_MISSING")?;
@@ -396,11 +429,12 @@ fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
         Repair::Chainstate => "-reindex-chainstate",
         Repair::Full => "-reindex",
     };
-    // One shot only: if we already tried to repair and it is still failing, stop and say so honestly.
-    if repair_marker(&state.datadir).exists() {
+    // If a repair was attempted moments ago and it is failing again, stop: retrying is a loop, and an
+    // automatic loop on someone's machine is worse than an honest error message.
+    if repair_blocked(&state.datadir) {
         return Err("ERR:NODE_REPAIR_FAILED".into());
     }
-    let _ = std::fs::write(repair_marker(&state.datadir), flag);
+    let _ = std::fs::write(repair_marker(&state.datadir), format!("{flag}|{}", ahora_secs()));
     let mark = log_size(&state.datadir);
     let mut child = spawn_node(&bitcoind, &state.datadir, Some(flag))?;
     // A rebuild takes a while, so we only check it did not die immediately again.
@@ -411,6 +445,9 @@ fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
             _ => "ERR:NODE_REPAIR_FAILED".to_string(),
         });
     }
+    // The repair took. The incident is over, so the marker goes: leaving it behind would deny the NEXT repair,
+    // and there is always a next one (every update force-closes the app, which is what corrupts the database).
+    let _ = std::fs::remove_file(repair_marker(&state.datadir));
     *state.child.lock().unwrap() = Some(child);
     Ok(())
 }
@@ -1141,6 +1178,58 @@ mod seed_crypto_tests {
         // Wrong password fails (AES-GCM auth tag mismatch).
         assert!(decrypt_phrase_file(&dir, "wrong-key").is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod repair_marker_tests {
+    use super::{ahora_secs, repair_blocked, repair_marker, REPAIR_COOLDOWN_SECS};
+
+    fn dir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("brisvia-marker-{name}"));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    // No marker: nothing was attempted, so a repair is allowed.
+    #[test]
+    fn without_a_marker_a_repair_is_allowed() {
+        let d = dir("none");
+        assert!(!repair_blocked(&d));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // A repair moments ago that is failing again = a loop. Refuse and tell the user honestly.
+    #[test]
+    fn a_repair_seconds_ago_blocks_another_one() {
+        let d = dir("recent");
+        std::fs::write(repair_marker(&d), format!("-reindex|{}", ahora_secs() - 5)).unwrap();
+        assert!(repair_blocked(&d), "repairing again seconds later is a loop");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // THE BUG THIS FIXES, caught on the owner's machine. The old code only asked "does the marker exist?" and
+    // never removed it after a repair that WORKED. Since every update force-closes the app -- which is exactly
+    // what corrupts the database -- the next corruption would find that stale marker and refuse to repair,
+    // telling the user "I could not repair it" without trying. An old marker must not block anything.
+    #[test]
+    fn an_old_marker_does_not_block_a_new_repair() {
+        let d = dir("old");
+        let hace_rato = ahora_secs() - REPAIR_COOLDOWN_SECS - 60;
+        std::fs::write(repair_marker(&d), format!("-reindex-chainstate|{hace_rato}")).unwrap();
+        assert!(!repair_blocked(&d), "a repair from long ago is a closed incident, not a loop");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // Markers written by the first version of this code carry no timestamp. Those are exactly the ones left
+    // behind by successful repairs, so honouring them would deny that machine a repair for good.
+    #[test]
+    fn a_marker_from_the_old_version_does_not_block_forever() {
+        let d = dir("legacy");
+        std::fs::write(repair_marker(&d), "-reindex-chainstate").unwrap(); // no timestamp
+        assert!(!repair_blocked(&d), "a marker with no date must not deny repairs for good");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
 
