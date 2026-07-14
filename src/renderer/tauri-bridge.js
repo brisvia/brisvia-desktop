@@ -28,6 +28,8 @@
       setIntensity: (intensity) => invoke('miner_set_intensity', { intensity }),
       wallet: {
         exists: () => call('wallet_exists'),
+        seedOnDisk: () => call('wallet_seed_on_disk'),
+        validatePhrase: (words) => call('wallet_validate_phrase', { words }),
         create: (password) => callE('wallet_create_bip39', { name: 'brisvia', password }),
         verifyBackup: (words) => call('wallet_verify_backup', { words }),
         checkBackup: (words) => call('wallet_check_backup', { words }),
