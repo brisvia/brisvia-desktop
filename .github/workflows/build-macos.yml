@@ -47,6 +47,14 @@ jobs:
           export RANDOMX_LIB_DIR="$PWD/core/src/randomx/build"
           cargo build --release --manifest-path crates/brisvia-randomx/Cargo.toml --bin mine-once
 
+      - name: Rust tests on this platform (golden vector + wallet battery + crate) - MAINNET
+        env:
+          BRISVIA_WALLET_CASES: "5000"
+        run: |
+          export RANDOMX_LIB_DIR="$PWD/core/src/randomx/build"
+          cargo test --manifest-path crates/brisvia-randomx/Cargo.toml -- --skip vector_fast
+          cargo test --manifest-path src-tauri/Cargo.toml --features mainnet --lib wallet_key_tests -- --nocapture
+
       - name: Stage binaries (no .exe on macOS) and point the config at them
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}

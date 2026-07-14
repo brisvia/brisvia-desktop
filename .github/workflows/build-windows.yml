@@ -54,6 +54,15 @@ jobs:
           $env:RANDOMX_LIB_DIR = (Split-Path $env:RANDOMX_LIB)
           cargo build --release --manifest-path crates/brisvia-randomx/Cargo.toml --bin mine-once
 
+      - name: Rust tests on this platform (golden vector + wallet battery + crate) - MAINNET
+        shell: pwsh
+        env:
+          BRISVIA_WALLET_CASES: "5000"
+        run: |
+          $env:RANDOMX_LIB_DIR = (Split-Path $env:RANDOMX_LIB)
+          cargo test --manifest-path crates/brisvia-randomx/Cargo.toml -- --skip vector_fast
+          cargo test --manifest-path src-tauri/Cargo.toml --features mainnet --lib wallet_key_tests -- --nocapture
+
       - name: Stage binaries (.exe)
         shell: pwsh
         run: |
