@@ -1703,6 +1703,11 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
         Some(purl) => { cmd.env("BRISVIA_POOL_URL", purl); }
         None => { cmd.env_remove("BRISVIA_POOL_URL"); }
     }
+    // The worker encrypts by default and only skips it if BRISVIA_POOL_PLAIN is set (the local e2e harness).
+    // Remove it ALWAYS: an inherited value -- from the user's environment, another program, or something
+    // hostile -- would silently downgrade the connection to plain text, and on a plain link anyone in the
+    // middle can rewrite the payout address and collect the rewards. The app must never mine unencrypted.
+    cmd.env_remove("BRISVIA_POOL_PLAIN");
     no_window(&mut cmd);
     let child = match cmd.spawn() {
         Ok(c) => c,

@@ -225,18 +225,98 @@ impl LoginError {
     }
 }
 
+/// The connection under the protocol: plain TCP, or TCP wrapped in TLS.
+///
+/// Why TLS matters here: the miner's PAYOUT ADDRESS travels on this connection. Without encryption anyone in
+/// the middle (a public wifi, a hostile network, an ISP) can rewrite it and collect the rewards of everyone
+/// mining through them, or feed fake jobs so the CPU works for nothing. No private key ever crosses this
+/// connection, so nothing can be stolen from the wallet -- but the earnings can be redirected, and the miner
+/// would never notice.
+///
+/// The two variants exist because the official pool is reached by name over the internet (must be encrypted),
+/// while tests talk to a loopback socket that has no certificate and never leaves the machine.
+enum Conn {
+    Plain(TcpStream),
+    Tls(Box<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>),
+}
+
+impl Conn {
+    fn socket(&self) -> &TcpStream {
+        match self {
+            Conn::Plain(s) => s,
+            Conn::Tls(s) => s.get_ref(),
+        }
+    }
+}
+
+impl Read for Conn {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Conn::Plain(s) => s.read(buf),
+            Conn::Tls(s) => s.read(buf),
+        }
+    }
+}
+
+impl Write for Conn {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Conn::Plain(s) => s.write(buf),
+            Conn::Tls(s) => s.write(buf),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Conn::Plain(s) => s.flush(),
+            Conn::Tls(s) => s.flush(),
+        }
+    }
+}
+
 /// A minimal, defensive stratum connection. Protocol layer only; the miner loop drives the hashing.
+///
+/// Reader and writer share ONE connection (a TLS session cannot be cloned like a raw socket, and duplicating
+/// it would corrupt the encrypted stream). BufReader owns it and writes go through `get_mut`.
 pub struct StratumClient {
-    writer: TcpStream,
-    reader: BufReader<TcpStream>,
+    io: BufReader<Conn>,
     line_buf: String, // persists a partial line across read timeouts (poll_message)
 }
 
 impl StratumClient {
+    /// Plain TCP. For tests and for a user's custom pool that explicitly opts out of encryption.
     pub fn connect(host_port: &str, timeout: Duration) -> Result<Self, String> {
         // Note: `validate_pool_addr` is applied UPSTREAM (the backend validates a user's custom URL before it
         // ever reaches the worker). connect() itself must be able to reach any resolved address (the official
         // pool, and loopback in tests), so it does not re-validate here.
+        let stream = Self::tcp(host_port, timeout)?;
+        Ok(StratumClient { io: BufReader::new(Conn::Plain(stream)), line_buf: String::new() })
+    }
+
+    /// Encrypted. The certificate must be valid AND match `host_port`'s hostname: an impostor that redirects
+    /// the traffic cannot present a certificate for pool.brisvia.com, so the connection fails instead of
+    /// quietly mining for someone else. Used for the official pool.
+    pub fn connect_tls(host_port: &str, timeout: Duration) -> Result<Self, String> {
+        let host = host_port
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .ok_or_else(|| "use host:port".to_string())?
+            .to_string();
+        let roots = rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        };
+        let cfg = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let server = rustls::pki_types::ServerName::try_from(host.clone())
+            .map_err(|_| format!("invalid pool hostname: {host}"))?;
+        let conn = rustls::ClientConnection::new(std::sync::Arc::new(cfg), server)
+            .map_err(|e| format!("TLS setup failed: {e}"))?;
+        let stream = Self::tcp(host_port, timeout)?;
+        let tls = rustls::StreamOwned::new(conn, stream);
+        Ok(StratumClient { io: BufReader::new(Conn::Tls(Box::new(tls))), line_buf: String::new() })
+    }
+
+    fn tcp(host_port: &str, timeout: Duration) -> Result<TcpStream, String> {
         let addr = host_port
             .to_socket_addrs()
             .map_err(|e| format!("resolve failed: {e}"))?
@@ -244,15 +324,14 @@ impl StratumClient {
             .ok_or_else(|| "no address resolved".to_string())?;
         let stream = TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("connect failed: {e}"))?;
         stream.set_read_timeout(Some(Duration::from_secs(90))).ok();
-        let reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
-        Ok(StratumClient { writer: stream, reader, line_buf: String::new() })
+        Ok(stream)
     }
 
     /// Read the next message but give up after `timeout`, returning `Poll::Timeout` so the caller can do other
     /// work (submit queued shares, check a stop flag) and poll again. A partial line is kept across timeouts.
     pub fn poll_message(&mut self, timeout: Duration) -> Result<Poll, String> {
-        self.reader.get_ref().set_read_timeout(Some(timeout)).ok();
-        match self.reader.read_line(&mut self.line_buf) {
+        self.io.get_ref().socket().set_read_timeout(Some(timeout)).ok();
+        match self.io.read_line(&mut self.line_buf) {
             Ok(0) => Ok(Poll::Closed),
             Ok(_) => {
                 let line = std::mem::take(&mut self.line_buf);
@@ -273,13 +352,15 @@ impl StratumClient {
 
     /// Shut down the connection (unblocks a reader parked in poll/next_message).
     pub fn shutdown(&self) {
-        let _ = self.writer.shutdown(std::net::Shutdown::Both);
+        let _ = self.io.get_ref().socket().shutdown(std::net::Shutdown::Both);
     }
 
     fn send_line(&mut self, line: &str) -> Result<(), String> {
-        self.writer.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
-        self.writer.write_all(b"\n").map_err(|e| e.to_string())?;
-        self.writer.flush().map_err(|e| e.to_string())
+        // Writes go through the same connection the reader owns: a TLS session cannot be split in two.
+        let w = self.io.get_mut();
+        w.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
+        w.write_all(b"\n").map_err(|e| e.to_string())?;
+        w.flush().map_err(|e| e.to_string())
     }
 
     /// Log in and WAIT for the pool's answer before mining a single hash.
@@ -334,7 +415,7 @@ impl StratumClient {
     /// Read the next message, bounded by MAX_MSG_BYTES. `Ok(None)` on a clean close.
     pub fn next_message(&mut self) -> Result<Option<Incoming>, String> {
         let mut line = String::new();
-        let n = (&mut self.reader)
+        let n = (&mut self.io)
             .by_ref()
             .take(MAX_MSG_BYTES as u64)
             .read_line(&mut line)
