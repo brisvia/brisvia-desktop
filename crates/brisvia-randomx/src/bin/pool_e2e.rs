@@ -36,6 +36,7 @@ fn main() {
             ss.store(true, Ordering::SeqCst);
         }
     };
-    run_pool_worker(&pool, &addr, "e2e", 2, &should_stop, on_event);
+    // El e2e habla con una pool local por loopback, que no tiene certificado: va en plano a proposito.
+    run_pool_worker(&pool, &addr, "e2e", 2, false, &should_stop, on_event);
     println!("== FIN ==  shares aceptados: {}", accepted.load(Ordering::SeqCst));
 }

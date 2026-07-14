@@ -227,9 +227,13 @@ fn main() {
     // RPC path below is untouched — this branch returns before it.
     if let Ok(pool_url) = std::env::var("BRISVIA_POOL_URL") {
         let worker_name = std::env::var("BRISVIA_POOL_WORKER").unwrap_or_else(|_| "rig".to_string());
+        // Encrypted by DEFAULT: if anything forgets to configure this, it fails on the safe side. The payout
+        // address travels on this link, and on a plain one anyone in the middle can rewrite it and collect the
+        // rewards. Only an explicit opt-out (the local e2e harness, which talks to loopback) turns it off.
+        let tls = std::env::var("BRISVIA_POOL_PLAIN").is_err();
         let stop = AtomicBool::new(false);
         if json_mode { ev(json!({"event":"started","threads":threads,"mode":"pool"})); }
-        brisvia_randomx::pool_worker::run_pool_worker(&pool_url, addr, &worker_name, threads, &stop, |e| {
+        brisvia_randomx::pool_worker::run_pool_worker(&pool_url, addr, &worker_name, threads, tls, &stop, |e| {
             use brisvia_randomx::pool_worker::PoolEvent;
             if !json_mode { return; }
             match e {

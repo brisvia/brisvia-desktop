@@ -201,7 +201,11 @@ where
 }
 
 /// The full worker: connect + run a session, reconnecting with capped backoff if the pool drops. Blocks.
-pub fn run_pool_worker<F>(host_port: &str, address: &str, worker: &str, threads: usize, should_stop: &AtomicBool, mut on_event: F)
+///
+/// `tls` encrypts the connection. It is NOT cosmetic: the miner's payout address travels on this link, so
+/// anyone in the middle of an unencrypted one can rewrite it and collect the rewards of everyone mining
+/// through them. The official pool always passes true; only a user's custom pool may opt out, knowingly.
+pub fn run_pool_worker<F>(host_port: &str, address: &str, worker: &str, threads: usize, tls: bool, should_stop: &AtomicBool, mut on_event: F)
 where
     F: FnMut(PoolEvent),
 {
@@ -210,7 +214,12 @@ where
     let guard = Arc::new(Mutex::new(crate::pool_miner::SeedGuard::new()));
     let mut backoff = 1u64;
     while !should_stop.load(Ordering::Relaxed) {
-        match StratumClient::connect(host_port, Duration::from_secs(15)) {
+        let intento = if tls {
+            StratumClient::connect_tls(host_port, Duration::from_secs(15))
+        } else {
+            StratumClient::connect(host_port, Duration::from_secs(15))
+        };
+        match intento {
             Ok(client) => {
                 backoff = 1; // reset after a good connection
                 let guard = guard.clone();
@@ -369,6 +378,36 @@ mod tests {
         assert_eq!(got_share_for, "easy2");
     }
 
+    // TLS IS NOT DECORATION. The payout address travels on this connection: on a plain one, anyone in the
+    // middle rewrites it and collects the rewards of everyone mining through them, and the miner never
+    // notices. So an encrypted client must REFUSE to talk to a server that cannot prove who it is.
+    //
+    // This points the TLS client at a plain TCP server (the stand-in for an impostor: something listening on
+    // the right port with no valid certificate for that name). It must fail, not fall back to plain.
+    #[test]
+    fn the_encrypted_client_refuses_a_server_that_cannot_prove_who_it_is() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        // Accept and answer garbage, as an impostor with no certificate would.
+        let server = std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let _ = sock.write_all(b"{\"type\":\"login_result\",\"ok\":true}\n");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        let r = StratumClient::connect_tls(&addr, Duration::from_secs(5));
+        // Either the setup rejects "127.0.0.1" as a name to verify, or the handshake fails. Both are correct:
+        // what must NEVER happen is a successful session against something that proved nothing.
+        match r {
+            Err(_) => {}
+            Ok(mut c) => {
+                let hablo = c.login("brv1qexample", "rig1", Duration::from_secs(2));
+                assert!(hablo.is_err(), "an encrypted client must not talk to a server with no valid certificate");
+            }
+        }
+        let _ = server.join();
+    }
+
     // A rejected login must NOT start mining: the pool credits nobody, so the CPU would burn for nothing.
     #[test]
     fn a_rejected_login_never_mines() {
@@ -433,7 +472,7 @@ mod tests {
         let stop = AtomicBool::new(false);
         let mut errores = Vec::new();
         // run_pool_worker blocks; a correct one returns on its own after the permanent rejection.
-        run_pool_worker(&addr, "brv1qbad", "rig1", 1, &stop, |e| {
+        run_pool_worker(&addr, "brv1qbad", "rig1", 1, false, &stop, |e| {
             if let PoolEvent::Disconnected(m) = e {
                 errores.push(m);
             }
