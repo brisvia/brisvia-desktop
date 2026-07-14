@@ -104,6 +104,12 @@ pub fn parse_incoming(line: &str) -> Incoming {
             accepted: v.get("accepted").and_then(Value::as_bool).unwrap_or(false),
         },
         Some("error") => Incoming::PoolError(get_str(&v, "error")),
+        // Explicit login answer. Every other message in this protocol is keyed by "type", but this case was
+        // missing, so a pool answering {"type":"login_result","ok":...} fell through to Other and the miner
+        // never learned whether it had been accepted.
+        Some("login_result") => Incoming::LoginResult {
+            ok: v.get("ok").and_then(Value::as_bool).unwrap_or(false),
+        },
         _ => {
             // Legacy stratum-style ack (result/error with an id).
             if v.get("result").is_some() || v.get("id").is_some() {
@@ -201,6 +207,24 @@ pub enum Poll {
     Closed,
 }
 
+/// Why a login failed, which decides whether reconnecting makes any sense.
+/// Permanent = the pool gave an answer that retrying cannot change (rejected address, banned worker, wrong
+/// version). Reconnecting there hammers the pool forever and hides the real reason from the user.
+/// Temporary = nobody answered (network, pool restarting): retrying is exactly right.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LoginError {
+    Permanent(String),
+    Temporary(String),
+}
+
+impl LoginError {
+    pub fn message(&self) -> &str {
+        match self {
+            LoginError::Permanent(m) | LoginError::Temporary(m) => m,
+        }
+    }
+}
+
 /// A minimal, defensive stratum connection. Protocol layer only; the miner loop drives the hashing.
 pub struct StratumClient {
     writer: TcpStream,
@@ -258,8 +282,49 @@ impl StratumClient {
         self.writer.flush().map_err(|e| e.to_string())
     }
 
-    pub fn login(&mut self, address: &str, worker: &str) -> Result<(), String> {
+    /// Log in and WAIT for the pool's answer before mining a single hash.
+    ///
+    /// Sending the login and starting to mine straight away (what this did before) means a miner whose address
+    /// the pool rejects burns its CPU for nothing: the pool credits no one, and the user is never told. So we
+    /// block here until the pool speaks.
+    ///
+    /// A pool that sends work IS an acceptance: several pools skip the explicit ok and just start sending jobs.
+    /// That first job is not thrown away — it is handed back so the session mines it.
+    ///
+    /// Silence is NOT a failure. Brisvia's own pool answers a good login with work, and sends nothing at all
+    /// while it has no template ready (starting up, or between blocks). Treating that as an error would drop a
+    /// perfectly good connection and reconnect in a loop. So the timeout means "accepted, no work yet": the
+    /// session goes on and waits for a job. Nothing is mined in the meantime — without a job there is nothing
+    /// to hash — so waiting is safe, and honest about what is happening.
+    ///
+    /// The error distinguishes PERMANENT from temporary, because the caller must not reconnect in a loop against
+    /// a pool that already said no.
+    pub fn login(&mut self, address: &str, worker: &str, timeout: Duration) -> Result<Option<PoolJob>, LoginError> {
         self.send_line(&login_msg(address, worker))
+            .map_err(LoginError::Temporary)?;
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return Ok(None); // accepted, no work yet — wait for a job instead of reconnecting
+            }
+            match self.poll_message(left.min(Duration::from_millis(500))) {
+                Ok(Poll::Message(Incoming::LoginResult { ok: true })) => return Ok(None),
+                // Rejected: the address is wrong, the worker is banned, the version does not match. Retrying
+                // cannot change the answer, so this must never become a reconnect loop.
+                Ok(Poll::Message(Incoming::LoginResult { ok: false })) => {
+                    return Err(LoginError::Permanent("the pool rejected the login".into()))
+                }
+                Ok(Poll::Message(Incoming::PoolError(e))) => return Err(LoginError::Permanent(e)),
+                // Work arrived without an explicit ok: that IS the acceptance. Keep the job.
+                Ok(Poll::Message(Incoming::Job(j))) => return Ok(Some(j)),
+                Ok(Poll::Message(_)) | Ok(Poll::Timeout) => continue, // anything else before the verdict: ignore
+                Ok(Poll::Closed) => {
+                    return Err(LoginError::Temporary("the pool closed the connection".into()))
+                }
+                Err(e) => return Err(LoginError::Temporary(e)),
+            }
+        }
     }
 
     pub fn submit(&mut self, job_id: &str, nonce: u32) -> Result<(), String> {
