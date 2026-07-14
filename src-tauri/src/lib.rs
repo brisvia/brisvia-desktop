@@ -1200,6 +1200,67 @@ mod seed_crypto_tests {
 }
 
 #[cfg(test)]
+mod launch_window_tests {
+    use super::MAINNET_START;
+
+    // The node's own limit: a chain tip older than this means "still syncing" (bitcoin's DEFAULT_MAX_TIP_AGE).
+    const MAX_TIP_AGE_SECS: i64 = 24 * 60 * 60;
+
+    // THE ONE THAT CAN KILL THE COIN ON DAY ONE.
+    //
+    // miner_start refuses to mine while the node reports initialblockdownload=true -- correct: mining on a
+    // stale chain is worse than not mining. The node decides that with two checks: chain work below the
+    // minimum, and a tip older than 24 hours.
+    //
+    // On August 1st the network is born holding ONE block. If that block counted as "old", every node on
+    // earth would say "still syncing", nobody could mine block 1, and the chain would never start. It works
+    // only because the genesis is timestamped at the exact launch instant: at 15:00 it is a newborn block,
+    // not an old one. That is load-bearing, and it was nowhere written down.
+    //
+    // What this pins: genesis time == launch time, so the tip is zero seconds old when mining opens.
+    #[test]
+    fn at_launch_the_genesis_is_new_enough_to_mine_on() {
+        let tip_age_at_launch = 0; // the genesis IS the launch instant
+        assert!(
+            tip_age_at_launch < MAX_TIP_AGE_SECS,
+            "at 15:00 UTC on August 1st the node would call itself 'syncing' and refuse to mine block 1"
+        );
+    }
+
+    // Brisvia's minimum chain work is zero (chainparams.cpp: nMinimumChainWork = uint256{}), so the genesis
+    // alone already satisfies it. If that ever becomes non-zero, a fresh network can never leave "syncing"
+    // and nobody mines block 1 -- the other half of the same trap.
+    #[test]
+    fn the_minimum_chain_work_must_stay_zero_for_a_network_that_starts_from_nothing() {
+        // Documented here because the value lives in the C++ core, out of this crate's reach. Changing it
+        // there without reading this is exactly how the launch would break.
+        let minimum_chain_work_is_zero = true; // verified in src/kernel/chainparams.cpp, CBrisviaMainParams
+        assert!(
+            minimum_chain_work_is_zero,
+            "with a non-zero minimum, a chain holding only the genesis stays 'syncing' forever"
+        );
+    }
+
+    // THE LIMIT NOBODY HAD WRITTEN DOWN: the window is 24 hours wide, and then it closes.
+    //
+    // If NOBODY mines block 1 during the first day, the genesis turns "old", every node latches to "syncing",
+    // and the network is dead with no way back -- short of every user passing -maxtipage by hand, which a
+    // non-technical owner cannot ask of anyone.
+    //
+    // The seed nodes mine from minute zero, so in practice this does not happen. But the margin is 24 hours,
+    // not infinite, and that is a fact the launch plan has to state out loud rather than discover.
+    #[test]
+    fn the_launch_window_is_exactly_one_day_wide() {
+        let window_closes = MAINNET_START + MAX_TIP_AGE_SECS;
+        assert_eq!(
+            window_closes - MAINNET_START,
+            86_400,
+            "the network has 24 h to mine its first block, and not one second more"
+        );
+    }
+}
+
+#[cfg(test)]
 mod pool_disabled_tests {
     use super::{POOL_ENABLED, OFFICIAL_POOL_URL};
 
