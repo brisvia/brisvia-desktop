@@ -105,7 +105,7 @@ jobs:
       - name: Attach the .AppImage, .deb and the signed updater artifact to the release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.5.0
+          tag_name: v1.0.0
           files: |
             src-tauri/target/release/bundle/appimage/*.AppImage
             src-tauri/target/release/bundle/appimage/*.AppImage.sig
