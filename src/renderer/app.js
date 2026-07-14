@@ -16,6 +16,19 @@ function transError(err) {
       NODE_SYNCING: 'errors.node_syncing', NO_PEERS: 'errors.no_peers', CLOCK_SKEW: 'errors.clock_skew',
       WALLET_NOT_READY: 'errors.wallet_not_ready', MINER_NOT_FOUND: 'errors.miner_not_found',
       POOL_ADDR_MISSING: 'errors.pool_addr_missing',
+      NODE_NOT_READY: 'errors.node_not_ready',
+      NODE_DISK_FULL: 'errors.node_disk_full',
+      NODE_ALREADY_RUNNING: 'errors.node_already_running',
+      NODE_PERMISSIONS: 'errors.node_permissions',
+      NODE_REPAIR_FAILED: 'errors.node_repair_failed',
+      NODE_START_FAILED: 'errors.node_start_failed',
+      NODE_BINARY_MISSING: 'errors.node_binary_missing',
+      INVALID_AMOUNT: 'errors.invalid_amount',
+      POOL_ADDR_INVALID: 'errors.pool_addr_invalid',
+      POOL_ADDR_FORMAT: 'errors.pool_addr_format',
+      POOL_ADDR_PORT: 'errors.pool_addr_port',
+      POOL_ADDR_LOCAL: 'errors.pool_addr_local',
+      NO_UPDATE: 'errors.no_update',
     };
     const key = map[err.slice(4)];
     if (key) return T(key);
@@ -811,6 +824,9 @@ function showAchievementToast(id) {
 // On startup (and every 6 h) it checks for a newer signed version; if there is one, it shows a pop-up with a button
 // that downloads it, verifies its signature, installs and restarts. It can also be checked manually from Settings.
 let updatePendingVersion = null;
+// The version actually running, read once from the app itself (app_version). Anything that needs to show
+// the current version reads THIS, never the text on screen.
+let runningVersion = '';
 async function checkForUpdate(manual) {
   const btn = $('#set-update');
   if (manual && btn) { btn.disabled = true; btn.textContent = T('update.checking'); }
@@ -818,7 +834,7 @@ async function checkForUpdate(manual) {
   try { res = window.brisvia.checkUpdate ? await window.brisvia.checkUpdate() : null; } catch {}
   if (res && res.available) {
     updatePendingVersion = res.version;
-    const cur = ($('#ver-label')?.textContent || '').trim();
+    const cur = runningVersion ? 'v' + runningVersion : '';
     if ($('#upd-ver')) $('#upd-ver').textContent = T('update.version_line', { v: res.version, cur });
     let dismissed = null; try { dismissed = localStorage.getItem('brv_update_dismissed'); } catch {}
     // On the automatic check, don't nag again if the user already chose "Later" for THIS version.
@@ -1105,10 +1121,13 @@ async function init() {
   window.I18N.setLang(lang);
   if (window.brisvia.setLanguage) window.brisvia.setLanguage(lang);
   updateTestnetBanner();
-  // Real version (from app_version), shown in the header chip and in the Settings footer — never a hard-coded number.
+  // Real version (from app_version, which reads it from the build itself), shown in the header chip and in the
+  // Settings footer, and remembered in runningVersion. Single source of truth: never a hard-coded number, and
+  // never read back from the DOM (a bug shipped a stale "v0.4.0" that way).
   try {
     const v = window.brisvia.appVersion ? await window.brisvia.appVersion() : null;
     if (v) {
+      runningVersion = v;
       const label = 'v' + v;
       const chip = $('#ver-chip'); if (chip) chip.textContent = label;
       const foot = $('#ver-label'); if (foot) foot.textContent = label;

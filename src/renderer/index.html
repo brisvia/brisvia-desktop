@@ -247,12 +247,12 @@
         </div>
         <div class="set-row" id="pool-info-row" hidden>
           <div><div class="set-title" data-i18n="settings.pool_name_title"></div><div class="muted small" id="pool-status" data-i18n="settings.pool_status_setup"></div></div>
-          <div class="muted small" id="pool-addr">pool.brisvia.com:3333 · 0% fee</div>
+          <div class="muted small" id="pool-addr" data-i18n="settings.pool_addr_info"></div>
         </div>
         <div class="set-row" id="pool-custom-row" hidden>
           <div><div class="set-title" data-i18n="settings.pool_custom_title"></div><div class="muted small" data-i18n="settings.pool_custom_sub"></div></div>
           <div class="pool-addr-wrap">
-            <input type="text" id="set-pool-addr" class="pool-addr-input" placeholder="host:puerto  ·  ej: pool.ejemplo.com:3333" spellcheck="false" autocomplete="off" autocapitalize="off">
+            <input type="text" id="set-pool-addr" class="pool-addr-input" data-i18n-attr="placeholder:settings.pool_addr_ph" spellcheck="false" autocomplete="off" autocapitalize="off">
             <button id="set-pool-save" class="btn small ghost" data-i18n="settings.pool_save"></button>
             <span id="set-pool-saved" class="pool-saved muted small" hidden data-i18n="settings.pool_saved"></span>
           </div>
@@ -287,7 +287,7 @@
         </div>
       </div>
 
-      <p class="foot-note muted small"><span data-i18n="settings.footnote"></span> <span id="ver-label">v0.4.0</span></p>
+      <p class="foot-note muted small"><span data-i18n="settings.footnote"></span> <span id="ver-label"></span></p>
     </section>
   </main>
 
@@ -319,7 +319,7 @@
         <button type="button" id="send-max" class="link small" data-i18n="send.max"></button>
       </div>
       <label class="field"><span class="muted small" data-i18n="send.amount"></span>
-        <input id="send-amount" type="text" inputmode="decimal" autocomplete="off" placeholder="0,00"></label>
+        <input id="send-amount" type="text" inputmode="decimal" autocomplete="off" data-i18n-attr="placeholder:send.amount_ph"></label>
       <p class="send-net muted small" data-i18n="send.testnet_note"></p>
       <label class="field" id="send-pass-field"><span class="muted small" data-i18n="send.password"></span>
         <input id="send-pass" type="password" autocomplete="current-password" placeholder="••••••••"></label>
