@@ -389,3 +389,8 @@ h1 { font-size: 26px; line-height: 1.14; letter-spacing: -.02em; max-width: 15ch
   .header-social { gap: 2px; }
   .hsocial { width: 28px; height: 28px; }
 }
+
+/* Modo de minado no disponible en esta version (la pool llega en la 1.1). El boton se ve apagado y no
+   reacciona: un control que parece andar y no anda es peor que uno claramente deshabilitado. */
+.seg-btn.seg-off { opacity: .38; cursor: not-allowed; }
+.pool-soon { margin: -2px 0 10px; line-height: 1.45; }
