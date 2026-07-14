@@ -47,6 +47,24 @@ const WALLET_NAME: &str = "brisvia";
 // stratum server. TODO: confirm the real port when the official pool is deployed.
 const OFFICIAL_POOL_URL: &str = "pool.brisvia.com:3333";
 
+/// Is pool mining available to users? OFF for the 1.0 line, and this is the switch that decides it — not the
+/// UI, which anyone can bypass by editing local settings.
+///
+/// The stratum engine is finished and tested against the live pool (encrypted, login confirmed, real jobs
+/// parsed), but what a POOL USER needs does not exist yet: connection state on screen, the difference between
+/// a share found, sent and ACCEPTED by the pool, what happens when the pool drops. Shipping the engine with
+/// no honest way to see what it is doing is how someone ends up believing they mined for hours and got paid
+/// nothing, with no way to tell whether the software or the pool was at fault. That is the day-one trust of
+/// the whole coin, over a feature nobody is asking for yet.
+///
+/// So mainnet launches with solo mining, which is the thing that must be flawless: create/restore the wallet,
+/// start the node, find peers, mine. Pool mining ships in 1.1 as its own release, with the UI and an end-to-end
+/// test, once it has been used for real on testnet.
+///
+/// Turning this to true is a deliberate decision, not a side effect: flip it, build the UI, and the pool
+/// becomes reachable again.
+const POOL_ENABLED: bool = false;
+
 struct AppState {
     child: Arc<Mutex<Option<Child>>>,
     datadir: PathBuf,
@@ -1182,6 +1200,34 @@ mod seed_crypto_tests {
 }
 
 #[cfg(test)]
+mod pool_disabled_tests {
+    use super::{POOL_ENABLED, OFFICIAL_POOL_URL};
+
+    // The 1.0 line ships with solo mining only. The stratum engine is finished and tested against the live
+    // pool, but what a pool USER needs is not: seeing the connection, and the difference between a share
+    // found, sent and ACCEPTED. Shipping the engine with no honest way to see what it does is how someone
+    // ends up believing they mined for hours and got paid nothing.
+    //
+    // This test is the reminder, not the mechanism: turning the switch on must be a deliberate act that
+    // fails here first, so nobody flips it "just to try" and ships pool mining by accident.
+    #[test]
+    fn pool_mining_is_off_in_this_release() {
+        assert!(
+            !POOL_ENABLED,
+            "pool mining is ON. That is only correct once the UI shows connection state and share \
+             accepted-vs-sent, and an end-to-end test covers it. If you meant it, update this test."
+        );
+    }
+
+    // The official pool address must stay pinned in the code: a pool read from anywhere the user can edit is
+    // an address an attacker can replace, and the payouts would go to them.
+    #[test]
+    fn the_official_pool_is_pinned_in_the_code() {
+        assert_eq!(OFFICIAL_POOL_URL, "pool.brisvia.com:3333");
+    }
+}
+
+#[cfg(test)]
 mod repair_marker_tests {
     use super::{ahora_secs, repair_blocked, repair_marker, REPAIR_COOLDOWN_SECS};
 
@@ -1674,6 +1720,7 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
     let pool_url = {
         let mode = state.mining_mode.lock().unwrap().clone();
         match mode.as_str() {
+            _ if !POOL_ENABLED => None, // pool mining is off in 1.0 (see POOL_ENABLED) — always mine solo
             "pool" => Some(OFFICIAL_POOL_URL.to_string()),
             "custom" => {
                 let a = state.pool_address.lock().unwrap().clone();
@@ -1683,7 +1730,7 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
         }
     };
     // N11: "custom" pool chosen but no address entered -> refuse to start instead of silently mining solo.
-    if state.mining_mode.lock().unwrap().as_str() == "custom" && pool_url.is_none() {
+    if POOL_ENABLED && state.mining_mode.lock().unwrap().as_str() == "custom" && pool_url.is_none() {
         state.mining.store(false, Ordering::SeqCst);
         return json!({ "mining": false, "error": "ERR:POOL_ADDR_MISSING" });
     }
@@ -2060,7 +2107,11 @@ fn settings_get(app: AppHandle, state: State<AppState>) -> Value {
         "autostart": autostart,
         "tray": state.tray_enabled.load(Ordering::SeqCst),
         "defaultIntensity": *state.intensity.lock().unwrap(),
-        "miningMode": state.mining_mode.lock().unwrap().clone(),
+        // The UI reads the same switch the backend obeys, so a screen offering pool mining and a backend
+        // refusing it can never disagree.
+        "poolEnabled": POOL_ENABLED,
+        // With pool mining off, report the honest truth: solo is what actually runs, whatever is stored.
+        "miningMode": if POOL_ENABLED { state.mining_mode.lock().unwrap().clone() } else { "solo".to_string() },
         "poolAddress": state.pool_address.lock().unwrap().clone()
     })
 }
