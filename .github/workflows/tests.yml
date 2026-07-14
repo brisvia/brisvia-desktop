@@ -59,9 +59,33 @@ jobs:
           # skip vector_fast: it allocates the ~2GB RandomX dataset (light mode covers the same hash)
           cargo test --manifest-path crates/brisvia-randomx/Cargo.toml -- --skip vector_fast
 
+      # Tauri's build script refuses to build unless every bundled resource exists, and tauri.conf.json lists
+      # the Windows names. Without these placeholders the step below fails with "resource path
+      # binaries/bitcoind.exe doesn't exist" BEFORE running a single test -- which is exactly what was
+      # happening: this battery had been red for hours, on every commit, and nobody noticed. Empty files are
+      # enough because these tests derive keys; they never execute the node.
+      - name: Placeholder binaries (the wallet tests never run the node, but the build script checks they exist)
+        run: |
+          mkdir -p src-tauri/binaries
+          touch src-tauri/binaries/bitcoind.exe src-tauri/binaries/bitcoin-cli.exe src-tauri/binaries/brisvia-worker.exe
+
       - name: Wallet derivation property battery (mainnet, 10000 fresh wallets)
         env:
           BRISVIA_WALLET_CASES: "10000"
         run: |
           export RANDOMX_LIB_DIR="$PWD/core/src/randomx/build"
           cargo test --manifest-path src-tauri/Cargo.toml --features mainnet --lib wallet_key_tests -- --nocapture
+
+      # The repair logic decides whether to rebuild the node's database on a user's machine. Its tests belong
+      # in the same battery that guards the wallet.
+      - name: Node self-repair tests (a full disk is never "repaired", an old crash is not today's)
+        run: |
+          export RANDOMX_LIB_DIR="$PWD/core/src/randomx/build"
+          cargo test --manifest-path src-tauri/Cargo.toml --features mainnet --lib repair_tests -- --nocapture
+
+      # The product guards: they are cheap and they catch what the audits did not.
+      - name: Candado - textos (idiomas completos, sin mezclas, sin texto fijo en el HTML)
+        run: python tools/check_textos.py
+
+      - name: Candado - errores (todo error del programa llega traducido en ES y EN)
+        run: python tools/check_error_contract.py
