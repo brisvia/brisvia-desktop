@@ -185,6 +185,7 @@
           <h1 id="hero-title" data-testid="hero-title"></h1>
           <p id="hero-sub" class="muted"></p>
           <button id="toggle" class="btn giant primary" data-testid="mine-toggle"></button>
+          <p id="mine-msg" class="verify-msg err" data-testid="mine-msg" hidden></p>
           <div class="intensity">
             <span class="muted small" data-tip-key="intensity" data-i18n="mine.how_much"></span>
             <div class="seg" role="group" data-i18n-attr="aria-label:mine.how_much">
@@ -250,7 +251,11 @@
         </div>
         <div class="set-row" id="pool-custom-row" hidden>
           <div><div class="set-title" data-i18n="settings.pool_custom_title"></div><div class="muted small" data-i18n="settings.pool_custom_sub"></div></div>
-          <input type="text" id="set-pool-addr" class="pool-addr-input" placeholder="host:port" spellcheck="false" autocomplete="off" autocapitalize="off">
+          <div class="pool-addr-wrap">
+            <input type="text" id="set-pool-addr" class="pool-addr-input" placeholder="host:puerto  ·  ej: pool.ejemplo.com:3333" spellcheck="false" autocomplete="off" autocapitalize="off">
+            <button id="set-pool-save" class="btn small ghost" data-i18n="settings.pool_save"></button>
+            <span id="set-pool-saved" class="pool-saved muted small" hidden data-i18n="settings.pool_saved"></span>
+          </div>
         </div>
         <div class="set-row">
           <div><div class="set-title" data-i18n="settings.intensity_title"></div><div class="muted small" data-i18n="settings.intensity_sub"></div></div>
