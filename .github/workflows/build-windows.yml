@@ -61,6 +61,13 @@ jobs:
           $rx = Get-ChildItem -Path core/src/randomx/build -Recurse -Filter randomx.lib | Select-Object -First 1
           echo "RANDOMX_LIB=$($rx.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+      - name: Mark job start (used to prove the sidecar was built by THIS run)
+        shell: pwsh
+        run: |
+          $t = (Get-Date).ToUniversalTime().ToString("o")
+          "JOB_START_UTC=$t" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "job start (UTC): $t"
+
       - name: Configure and build bitcoind + bitcoin-cli (MSVC + vcpkg, wallet only)
         shell: pwsh
         working-directory: core
@@ -85,13 +92,39 @@ jobs:
       - name: Stage binaries (.exe)
         shell: pwsh
         run: |
+          # PROVENANCE GUARD. This step used to do `Get-ChildItem -Recurse | Select-Object -First 1`: it
+          # picked a bitcoind by NAME and took whatever came first. With zero matches $bd was $null and any
+          # bitcoind already sitting in src-tauri/binaries would have shipped instead; with two matches it
+          # picked one non-deterministically. A stale node is not a loud failure — it is a DIFFERENT NETWORK
+          # that only reveals itself on launch day. (Real case, 2026-07-15: a 9-July bitcoind.exe carrying
+          # the pre-recalibration genesis 7f1cf9cf was found in a working tree.)
+          # Rules: the binary must be UNIQUE, must have been produced by THIS run, and its hash is recorded
+          # so the packaged copy can be compared against it later.
           New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
-          $bd  = Get-ChildItem -Path core/build -Recurse -Filter bitcoind.exe     | Select-Object -First 1
-          $cli = Get-ChildItem -Path core/build -Recurse -Filter bitcoin-cli.exe  | Select-Object -First 1
-          $mw  = Get-ChildItem -Path . -Recurse -Filter mine-once.exe | Where-Object { $_.FullName -match 'release' } | Select-Object -First 1
+          Remove-Item src-tauri/binaries/* -Force -ErrorAction SilentlyContinue  # nothing pre-existing survives
+
+          function Take-One($path, $filter, $extra) {
+            $all = @(Get-ChildItem -Path $path -Recurse -Filter $filter -ErrorAction SilentlyContinue)
+            if ($extra) { $all = @($all | Where-Object $extra) }
+            if ($all.Count -eq 0) { throw "FALLO: no se compilo ningun $filter en este job. NO se empaqueta un binario preexistente." }
+            if ($all.Count -gt 1) { throw "FALLO: hay $($all.Count) copias de $filter y no se cual es la de este build: $($all.FullName -join ', ')" }
+            if ($all[0].LastWriteTimeUtc -lt [datetime]::Parse($env:JOB_START_UTC)) {
+              throw "FALLO: $filter es anterior al inicio del job ($($all[0].LastWriteTimeUtc) < $env:JOB_START_UTC): no lo produjo esta compilacion."
+            }
+            return $all[0]
+          }
+
+          $bd  = Take-One "core/build" "bitcoind.exe" $null
+          $cli = Take-One "core/build" "bitcoin-cli.exe" $null
+          $mw  = Take-One "." "mine-once.exe" { $_.FullName -match 'release' }
           Copy-Item $bd.FullName  src-tauri/binaries/bitcoind.exe
           Copy-Item $cli.FullName src-tauri/binaries/bitcoin-cli.exe
           Copy-Item $mw.FullName  src-tauri/binaries/brisvia-worker.exe
+
+          # Record the hash of what we staged: the packaged sidecar is compared against this after the build.
+          $h = (Get-FileHash src-tauri/binaries/bitcoind.exe -Algorithm SHA256).Hash.ToLower()
+          "SIDECAR_SHA256=$h" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "sidecar bitcoind.exe SHA-256: $h"
           Get-ChildItem src-tauri/binaries
 
       # After staging the sidecar binaries, so the Tauri build script finds the resources it validates.
@@ -132,10 +165,59 @@ jobs:
           if ($txt -notmatch '9339h') { throw 'FALLO: el binario NO es mainnet (falta coin 9339h). Compilar con --features mainnet.' }
           Write-Host 'OK: binario mainnet (9339h presente)'
 
+      - name: Guard - the PACKAGED node is the one this job compiled
+        shell: pwsh
+        run: |
+          # The other half of the provenance guard: staging the right binary proves nothing if the packaged
+          # installer ends up carrying a different one. Extract the sidecar back OUT of the finished
+          # installer and compare it to the hash recorded at staging time. A mismatch means the thing users
+          # download is not the node we built and tested — a different network, discovered on launch day.
+          $setup = Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter *-setup.exe | Select-Object -First 1
+          if (-not $setup) { throw 'FALLO: no encuentro el instalador para verificar el nodo empaquetado' }
+          $out = Join-Path $env:RUNNER_TEMP 'unpack'
+          Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue
+          & 7z x "$($setup.FullName)" "-o$out" -y | Out-Null
+          $packed = Get-ChildItem -Path $out -Recurse -Filter bitcoind.exe | Select-Object -First 1
+          if (-not $packed) { throw 'FALLO: el instalador no contiene bitcoind.exe' }
+          $ph = (Get-FileHash $packed.FullName -Algorithm SHA256).Hash.ToLower()
+          Write-Host "nodo empaquetado : $ph"
+          Write-Host "nodo compilado   : $env:SIDECAR_SHA256"
+          if ($ph -ne $env:SIDECAR_SHA256) {
+            throw "FALLO: el nodo DENTRO del instalador ($ph) no es el que compilo este job ($env:SIDECAR_SHA256)."
+          }
+          Write-Host 'OK: el nodo empaquetado es exactamente el que compilo este job'
+
+      - name: Guard - the packaged node really is the Brisvia main network
+        shell: pwsh
+        run: |
+          # Run the packaged node and ask IT which chain and genesis it has, instead of trusting the source
+          # tree. Cheap, and it is the only check that would have caught a stale sidecar.
+          $out = Join-Path $env:RUNNER_TEMP 'unpack'
+          $bd  = (Get-ChildItem -Path $out -Recurse -Filter bitcoind.exe | Select-Object -First 1).FullName
+          $cli = (Get-ChildItem -Path $out -Recurse -Filter bitcoin-cli.exe | Select-Object -First 1).FullName
+          $dd  = Join-Path $env:RUNNER_TEMP 'chainprobe'
+          Remove-Item $dd -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $dd | Out-Null
+          "server=1`nrpcuser=t`nrpcpassword=t`nlisten=0`n[brisvia]`nrpcport=28455" | Out-File -Encoding ascii "$dd/bitcoin.conf"
+          $p = Start-Process -FilePath $bd -ArgumentList "-datadir=$dd","-chain=brisvia" -PassThru -WindowStyle Hidden
+          Start-Sleep -Seconds 15
+          $args = @("-datadir=$dd","-chain=brisvia","-rpcport=28455","-rpcuser=t","-rpcpassword=t")
+          $genesis = (& $cli @args getblockhash 0) 2>&1
+          $chain   = (& $cli @args getblockchaininfo) 2>&1 | Out-String
+          & $cli @args stop 2>&1 | Out-Null
+          Start-Sleep -Seconds 3
+          if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+          Write-Host "genesis del nodo empaquetado: $genesis"
+          if ("$genesis".Trim() -ne 'aa6bc268339aa9f4f2e39ae33aca7b7e48e395033d08d37c08f828890af7baf7') {
+            throw "FALLO: el nodo empaquetado tiene el genesis $genesis, no el de la red real de Brisvia."
+          }
+          if ($chain -notmatch '"chain":\s*"brisvia"') { throw 'FALLO: el nodo empaquetado no esta en la red brisvia' }
+          Write-Host 'OK: el nodo empaquetado es la red real de Brisvia (genesis aa6bc268...)'
+
       - name: Attach the installer and the signed updater artifact to the release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.5
+          tag_name: v1.0.6
           draft: true
           files: |
             src-tauri/target/release/bundle/nsis/*-setup.exe

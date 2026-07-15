@@ -69,6 +69,19 @@ struct AppState {
     child: Arc<Mutex<Option<Child>>>,
     datadir: PathBuf,
     wallet_loaded: Arc<AtomicBool>,
+    // Single-flight guard for wallet_send. Disabling the button in JS is UX, not a barrier: a second
+    // event, the Enter key, or any other caller reaches the backend all the same, and two sendtoaddress
+    // calls with funds available are TWO REAL PAYMENTS — Core has no idea the second one is a UI double
+    // click. Taken with try_lock and never awaited: queueing a second send would just pay twice a moment
+    // later. The loser gets ERR:SEND_IN_PROGRESS.
+    sending: Arc<Mutex<()>>,
+    // Exclusive guard for create/restore. The phrase is the ONE irreplaceable asset here (one encrypted
+    // file per datadir) and, until now, nothing in the backend protected it: both paths end in
+    // encrypt_phrase_file, which overwrites unconditionally. It was safe only because Core rejects a
+    // duplicate wallet name and the frontend hardcodes name="brisvia" — two assumptions the overwriting
+    // function does not control. This guard makes the invariant OURS: check-then-write happens under the
+    // lock, so two concurrent creates cannot both pass the check.
+    wallet_ops: Arc<Mutex<()>>,
     receive_addr: Arc<Mutex<String>>,
     mining: Arc<AtomicBool>,
     mined: Arc<AtomicU64>,
@@ -107,6 +120,86 @@ struct AppState {
 // Real-mining start on the main network: 2026-08-01 15:00:00 UTC (12:00 Argentina). Kept in sync with the
 // frontend countdown. Used to award the "pioneer" milestone achievements from the chain (they travel with the seed).
 const MAINNET_START: i64 = 1_785_596_400;
+
+// ---- Money. Integer base units only; floating point never touches an amount. ----
+//
+// 1 BRVA = 100_000_000 briv, the same 8-decimal split Bitcoin uses. Amounts used to cross the IPC
+// boundary as f64: "0.1 + 0.2" style drift, hidden 9th decimals and scientific notation could all reach
+// the node, and the amount shown could differ from the amount sent. The node's own RPC layer accepts a
+// STRING and parses it with ParseFixedPoint (exact), so a decimal string built from an integer is exact
+// end to end — safer than any float.
+const BRIV_PER_BRVA: u64 = 100_000_000;
+/// Emission cap: 100,000,000 BRVA. Mirrors MAX_MONEY in the node's consensus params.
+const MAX_MONEY_BRIV: u64 = 100_000_000 * BRIV_PER_BRVA;
+
+/// Parses a CANONICAL amount into integer base units (briv). Canonical means: digits and at most one DOT.
+///
+/// It does NOT accept a comma, and that is the whole point. This function used to do `replace(',', ".")`
+/// so an ES user could type "12,5" — which silently turned **"1,000" into 1 BRVA**. In English that means
+/// one thousand: someone sending 1,000 BRVA would have sent 1 and lost 999. A backend cannot know which
+/// convention the typist meant, so it refuses to guess: the frontend knows the active language and
+/// normalises to this canonical form (see toCanonicalAmount in app.js), rejecting the separator that does
+/// not belong to that language instead of reinterpreting it.
+///
+/// Rejects on purpose: empty, zero, signs, scientific notation, commas, more than 8 decimals, anything
+/// non-numeric, and amounts above the cap.
+fn parse_amount_briv(input: &str) -> Result<u64, String> {
+    let s = input.trim().to_string();
+    if s.is_empty() {
+        return Err("ERR:INVALID_AMOUNT".into());
+    }
+    // A comma here means the frontend did not normalise, or something called the backend directly. Either
+    // way the intent is ambiguous ("1,000" = 1 or 1000?) and money must never be guessed.
+    if s.contains(',') {
+        return Err("ERR:INVALID_AMOUNT".into());
+    }
+    // No signs and no exponent: "1e-8" and "-1" are rejected rather than silently reinterpreted.
+    if s.contains(['e', 'E', '+', '-']) {
+        return Err("ERR:INVALID_AMOUNT".into());
+    }
+    let (int_str, frac_str) = match s.split_once('.') {
+        Some((i, f)) => {
+            if f.contains('.') {
+                return Err("ERR:INVALID_AMOUNT".into()); // more than one separator
+            }
+            (i, f)
+        }
+        None => (s.as_str(), ""),
+    };
+    if int_str.is_empty() && frac_str.is_empty() {
+        return Err("ERR:INVALID_AMOUNT".into());
+    }
+    if !int_str.chars().all(|c| c.is_ascii_digit()) || !frac_str.chars().all(|c| c.is_ascii_digit()) {
+        return Err("ERR:INVALID_AMOUNT".into());
+    }
+    // The node would reject a 9th decimal with a raw English "Invalid amount"; refuse it here instead of
+    // rounding it away, because silently rounding someone's money is worse than telling them to retype it.
+    if frac_str.len() > 8 {
+        return Err("ERR:INVALID_AMOUNT".into());
+    }
+    let whole: u64 = if int_str.is_empty() { 0 } else { int_str.parse().map_err(|_| "ERR:INVALID_AMOUNT".to_string())? };
+    let mut padded = frac_str.to_string();
+    while padded.len() < 8 {
+        padded.push('0');
+    }
+    let frac: u64 = if padded.is_empty() { 0 } else { padded.parse().map_err(|_| "ERR:INVALID_AMOUNT".to_string())? };
+    let briv = whole
+        .checked_mul(BRIV_PER_BRVA)
+        .and_then(|w| w.checked_add(frac))
+        .ok_or_else(|| "ERR:INVALID_AMOUNT".to_string())?;
+    if briv == 0 {
+        return Err("ERR:INVALID_AMOUNT".into());
+    }
+    if briv > MAX_MONEY_BRIV {
+        return Err("ERR:INVALID_AMOUNT".into());
+    }
+    Ok(briv)
+}
+
+/// Renders base units back as the exact decimal string the node's ParseFixedPoint expects.
+fn briv_to_decimal(briv: u64) -> String {
+    format!("{}.{:08}", briv / BRIV_PER_BRVA, briv % BRIV_PER_BRVA)
+}
 const ONE_DAY: i64 = 86_400;
 const HALVING_HEIGHT: i64 = 1_000_000;
 
@@ -190,12 +283,54 @@ fn e2e_clock_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
 fn friendly_error(msg: &str) -> String {
     let m = msg.to_lowercase();
     if m.contains("insufficient funds") { return "ERR:INSUFFICIENT_FUNDS".into(); }
+    // Amount rules go BEFORE the address rule: both start with "invalid", and a message that named both
+    // would otherwise be reported as a bad address while the real problem is the amount. Core says
+    // "Invalid amount" when there are more than 8 decimals — the backend only rejects <= 0, so this is
+    // the path a user typing 9 decimals actually hits, on a screen that moves money.
+    if m.contains("invalid amount") || m.contains("amount out of range") || m.contains("amount is not a number") { return "ERR:INVALID_AMOUNT".into(); }
+    if m.contains("amount too small") || m.contains("dust") { return "ERR:AMOUNT_TOO_SMALL".into(); }
     if m.contains("invalid") && (m.contains("address") || m.contains("bech32")) { return "ERR:INVALID_ADDRESS".into(); }
     if m.contains("fee") && (m.contains("low") || m.contains("small") || m.contains("insufficient")) { return "ERR:FEE_TOO_LOW".into(); }
     if m.contains("starting") || m.contains("loading") || m.contains("warming up") || m.contains("rescanning") { return "ERR:NODE_STARTING".into(); }
     if m.contains("no available keys") || m.contains("not loaded") || m.contains("does not exist") { return "ERR:NODE_UNAVAILABLE".into(); }
     if m.contains("already exists") || m.contains("already loaded") || m.contains("database already") { return "ERR:WALLET_EXISTS".into(); }
-    msg.to_string()
+    // The wallet passphrase was WRONG. Core: "Error: The wallet passphrase entered was incorrect."
+    // Both words are required on purpose: "Error: Please enter the wallet passphrase with walletpassphrase
+    // first." also contains "passphrase", but it means the wallet is LOCKED, not that the password is wrong.
+    // Matching on "passphrase" alone would tell a user their password failed when they never typed one.
+    if m.contains("passphrase") && m.contains("incorrect") { return "ERR:BAD_PASSWORD".into(); }
+    // "Please enter the wallet passphrase with walletpassphrase first" = the wallet is LOCKED, which is a
+    // different problem from a wrong password and has a different fix. Without this it fell through to the
+    // generic "check the node is ready", which is useless advice for someone who just needs to unlock.
+    if m.contains("please enter the wallet passphrase") || m.contains("wallet is locked") { return "ERR:WALLET_LOCKED".into(); }
+    // Anything unmapped is SANITISED, never forwarded. The frontend shows unknown strings verbatim
+    // (app.js transError), and the node's raw text carries things a user must not be handed on a money
+    // screen: the word "Bitcoin", absolute paths with their home directory in them, internal RPC wording,
+    // English only. The detail goes to the log with paths stripped, so nothing is lost for diagnosis and
+    // the user still gets something actionable.
+    eprintln!("[brisvia] unmapped node error: {}", sanitize_for_log(msg));
+    "ERR:OPERATION_FAILED".into()
+}
+
+/// The raw node text for the log, with the obvious personal data stripped. Never the password or phrase:
+/// those are not part of an RPC error message and must not be reintroduced here.
+fn sanitize_for_log(msg: &str) -> String {
+    // Word by word: only a token that really looks like a path is replaced. Splitting on letter+':' alone
+    // also matched "Error: ..." and ate the space, mangling every message for no benefit.
+    msg.split_inclusive(char::is_whitespace)
+        .map(|tok| {
+            let t = tok.trim_matches(|c: char| c.is_whitespace() || c == '\'' || c == '"');
+            let low = t.to_lowercase();
+            let is_windows_path = t.len() > 2 && t.as_bytes()[0].is_ascii_alphabetic() && t[1..].starts_with(":\\");
+            let is_unix_home = low.starts_with("/home/") || low.starts_with("/users/");
+            if is_windows_path || is_unix_home {
+                let trailing: String = tok.chars().skip_while(|c| !c.is_whitespace()).collect();
+                format!("<path>{trailing}")
+            } else {
+                tok.to_string()
+            }
+        })
+        .collect()
 }
 
 // The node's RPC port. Override with BRISVIA_RPC_PORT to run an isolated test instance without clashing
@@ -205,6 +340,65 @@ fn rpc_port() -> u16 {
 }
 
 // ---- JSON-RPC call to bitcoind (cookie auth; the body is never logged) ----
+/// What happened to an RPC call, for the one case where the difference is money: a send.
+///
+/// "It failed" is not good enough for a payment. Three outcomes look identical to a caller today and mean
+/// opposite things:
+///   Rejected — the node answered with an error. Definitely NOT sent. Safe to retry.
+///   NotSent  — we never reached the node. Definitely NOT sent. Safe to retry.
+///   Unknown  — the request went out and no answer came back. The payment MAY have been broadcast.
+///              Retrying could pay twice. This is the only case that warns the user and never retries.
+#[derive(Debug, PartialEq)]
+enum RpcOutcome {
+    Rejected(String),
+    NotSent(String),
+    Unknown,
+}
+
+/// Classifies a ureq failure into the three outcomes above. Only a read timeout / IO failure AFTER the
+/// request went out is Unknown; DNS, a refused connection or a bad URL all mean the node never heard us.
+fn classify_transport(e: &ureq::Error) -> RpcOutcome {
+    use ureq::ErrorKind::*;
+    match e.kind() {
+        // We never got the request out: nothing was sent.
+        InvalidUrl | UnknownScheme | Dns | InsecureRequestHttpsOnly | ConnectionFailed => {
+            RpcOutcome::NotSent(e.to_string())
+        }
+        // The node answered something we could not read: it DID hear us.
+        BadStatus | BadHeader | TooManyRedirects => RpcOutcome::Unknown,
+        // Io covers the read timeout: the request left, the answer never arrived. Assume the worst.
+        _ => RpcOutcome::Unknown,
+    }
+}
+
+/// Like rpc(), but reports WHICH of the three outcomes happened. Used by wallet_send; every other caller
+/// keeps using rpc(), for which the distinction does not change what the user should do.
+fn rpc_classified(datadir: &PathBuf, wallet: Option<&str>, method: &str, params: Value) -> Result<Value, RpcOutcome> {
+    let cookie = read_cookie(datadir).ok_or_else(|| RpcOutcome::NotSent("ERR:NODE_NOT_READY".into()))?;
+    let url = match wallet {
+        Some(w) => format!("http://{}:{}/wallet/{}", RPC_HOST, rpc_port(), w),
+        None => format!("http://{}:{}/", RPC_HOST, rpc_port()),
+    };
+    let auth = format!("Basic {}", b64(cookie.trim().as_bytes()));
+    let body = json!({ "jsonrpc": "1.0", "id": "brisvia", "method": method, "params": params });
+    match ureq::post(&url).set("Authorization", &auth).timeout(Duration::from_secs(180)).send_json(body) {
+        Ok(r) => {
+            // The node answered. A body we cannot parse still means it heard us and acted.
+            let v: Value = r.into_json().map_err(|_| RpcOutcome::Unknown)?;
+            if !v["error"].is_null() {
+                return Err(RpcOutcome::Rejected(friendly_error(v["error"]["message"].as_str().unwrap_or("node error"))));
+            }
+            Ok(v["result"].clone())
+        }
+        // An HTTP error status: the node answered. For sendtoaddress this is a refusal, not a maybe.
+        Err(ureq::Error::Status(_, r)) => {
+            let v: Value = r.into_json().unwrap_or_else(|_| json!({}));
+            Err(RpcOutcome::Rejected(friendly_error(v["error"]["message"].as_str().unwrap_or("node error"))))
+        }
+        Err(e) => Err(classify_transport(&e)),
+    }
+}
+
 fn rpc(datadir: &PathBuf, wallet: Option<&str>, method: &str, params: Value) -> Result<Value, String> {
     // Translatable code instead of raw English: the user used to see "node is not ready yet" while the
     // node was still starting (or had died), with no idea what it meant.
@@ -691,7 +885,7 @@ fn wallet_addresses(state: State<AppState>) -> Value {
 
 #[tauri::command]
 fn wallet_new_address(state: State<AppState>) -> Result<Value, String> {
-    let addr = rpc(&state.datadir, Some(WALLET_NAME), "getnewaddress", json!([]))?;
+    let addr = rpc(&state.datadir, Some(WALLET_NAME), "getnewaddress", json!([])).map_err(|e| friendly_error(&e))?;
     let a = addr.as_str().unwrap_or("").to_string();
     *state.receive_addr.lock().unwrap() = a.clone();
     append_address(&state.datadir, &a);
@@ -699,26 +893,48 @@ fn wallet_new_address(state: State<AppState>) -> Result<Value, String> {
 }
 
 #[tauri::command]
-fn wallet_send(state: State<AppState>, address: String, amount: f64, password: String) -> Result<Value, String> {
-    if amount <= 0.0 {
-        return Err("ERR:INVALID_AMOUNT".into());
-    }
+// `amount` arrives as the STRING the user typed, never as f64: floating point must not touch money.
+// It is parsed into integer base units here and handed to the node as an exact decimal string, which its
+// RPC layer reads with ParseFixedPoint (exact). See parse_amount_briv.
+fn wallet_send(state: State<AppState>, address: String, amount: String, password: String) -> Result<Value, String> {
+    // Single-flight: only one send may be in flight. try_lock, NEVER lock() — waiting for the guard would
+    // just run the duplicate send a moment later, which is the exact thing being prevented. The guard is
+    // held to the end of the function (unlock, send, relock) and released on every return path.
+    let _sending = state
+        .sending
+        .try_lock()
+        .map_err(|_| "ERR:SEND_IN_PROGRESS".to_string())?;
+    let briv = parse_amount_briv(&amount)?;
+    let exact = briv_to_decimal(briv);
     // Encrypted wallets (new format): unlock briefly with the password, send, and lock again right away.
     // Old unencrypted wallets (created before password support): send directly, without a passphrase, so
     // updating the app never breaks an existing wallet. The UI offers to protect them with a password.
     if wallet_is_encrypted(&state.datadir) {
         rpc(&state.datadir, Some(WALLET_NAME), "walletpassphrase", json!([password, 30]))
-            .map_err(|e| {
-                let m = e.to_lowercase();
-                if m.contains("passphrase") || m.contains("incorrect") { "ERR:BAD_PASSWORD".to_string() } else { e }
-            })?;
-        let res = rpc(&state.datadir, Some(WALLET_NAME), "sendtoaddress", json!([address, amount]));
+            .map_err(|e| friendly_error(&e))?;
+        let res = rpc_classified(&state.datadir, Some(WALLET_NAME), "sendtoaddress", json!([address, exact]));
         let _ = rpc(&state.datadir, Some(WALLET_NAME), "walletlock", json!([]));
-        let txid = res?;
+        let txid = res.map_err(send_failure_to_code)?;
         Ok(json!({ "ok": true, "txid": txid }))
     } else {
-        let txid = rpc(&state.datadir, Some(WALLET_NAME), "sendtoaddress", json!([address, amount]))?;
+        let txid = rpc_classified(&state.datadir, Some(WALLET_NAME), "sendtoaddress", json!([address, exact]))
+            .map_err(send_failure_to_code)?;
         Ok(json!({ "ok": true, "txid": txid }))
+    }
+}
+
+/// Turns a send failure into the code the user sees. Only a genuinely ambiguous outcome gets the warning:
+/// telling someone "the payment may have gone out, check your transactions" when the node simply refused
+/// would scare them for nothing and invite a pointless double check. And staying silent about a real
+/// unknown could make them pay twice.
+fn send_failure_to_code(o: RpcOutcome) -> String {
+    match o {
+        // The node answered: it did not send. friendly_error already mapped the reason.
+        RpcOutcome::Rejected(code) => code,
+        // We never reached the node: nothing was sent, and it is not a money problem.
+        RpcOutcome::NotSent(_) => "ERR:NODE_NOT_READY".to_string(),
+        // The request went out and no answer came back. It may be on the network. NEVER auto-retry.
+        RpcOutcome::Unknown => "ERR:SEND_STATUS_UNKNOWN".to_string(),
     }
 }
 
@@ -789,7 +1005,8 @@ fn node_info(state: State<AppState>) -> Value {
 // ---- detail of a transaction (when a movement is clicked) ----
 #[tauri::command]
 fn tx_detail(state: State<AppState>, txid: String) -> Result<Value, String> {
-    let tx = rpc(&state.datadir, Some(WALLET_NAME), "gettransaction", json!([txid]))?;
+    let tx = rpc(&state.datadir, Some(WALLET_NAME), "gettransaction", json!([txid]))
+        .map_err(|e| friendly_error(&e))?;
     // A mined (coinbase) block reports amount 0 at the top level until it matures; the real reward lives in "details".
     let details = tx["details"].as_array();
     let is_coinbase = details
@@ -830,7 +1047,7 @@ fn wallet_backup(state: State<AppState>) -> Result<Value, String> {
     let path = dir.join(format!("brisvia-wallet-{}.dat", ts));
     // bitcoind accepts / as separator on Windows
     let path_str = path.to_string_lossy().replace('\\', "/");
-    rpc(&state.datadir, Some(WALLET_NAME), "backupwallet", json!([path_str]))?;
+    rpc(&state.datadir, Some(WALLET_NAME), "backupwallet", json!([path_str])).map_err(|e| friendly_error(&e))?;
     Ok(json!({ "ok": true, "path": path.to_string_lossy() }))
 }
 
@@ -934,6 +1151,13 @@ fn activate_wallet(state: &AppState, name: &str) {
 // Create a NEW wallet with a 12-word backup. Returns the words (to show once) + fingerprint.
 #[tauri::command]
 fn wallet_create_bip39(state: State<AppState>, name: String, password: String) -> Result<Value, String> {
+    // Exclusive: the exists-check below and the phrase write must not interleave with another create.
+    let _ops = state.wallet_ops.lock().map_err(|_| "ERR:WALLET_EXISTS".to_string())?;
+    // Fail closed BEFORE touching Core. Until now the only thing standing between a second create and a
+    // destroyed phrase was Core refusing a duplicate wallet name — an assumption this function does not own.
+    if enc_seed_path(&state.datadir).exists() {
+        return Err("ERR:WALLET_EXISTS".to_string());
+    }
     validate_password(&password)?;
     let mnemonic = Mnemonic::generate(12).map_err(|e| e.to_string())?;
     let (fp, ext, int) = descriptors_from_mnemonic(&mnemonic)?;
@@ -941,11 +1165,11 @@ fn wallet_create_bip39(state: State<AppState>, name: String, password: String) -
     rpc(&state.datadir, None, "createwallet", json!([name, false, true, "", false, true])).map_err(|e| friendly_error(&e))?;
     import_descriptors(&state.datadir, &name, &ext, &int, false)?;
     // Encrypt the Core wallet's private keys with the user's password (wallet is left locked afterwards).
-    rpc(&state.datadir, Some(&name), "encryptwallet", json!([password]))?;
+    rpc(&state.datadir, Some(&name), "encryptwallet", json!([password])).map_err(|e| friendly_error(&e))?;
     let mut words = mnemonic.to_string();
     *state.pending_mnemonic.lock().unwrap() = Some(words.clone());
     // Store the phrase ENCRYPTED (Argon2id + AES-256-GCM), never plaintext.
-    encrypt_phrase_file(&state.datadir, &words, &password)?;
+    encrypt_phrase_file_ex(&state.datadir, &words, &password, false)?;
     activate_wallet(&state, &name);
     let result = {
         let list: Vec<&str> = words.split(' ').collect();
@@ -982,17 +1206,26 @@ fn wallet_verify_backup(state: State<AppState>, words: Vec<String>) -> Value {
 // Restore from 12 words into a NEW wallet (never overwrites an existing one). Rescan from genesis.
 #[tauri::command]
 fn wallet_restore_bip39(state: State<AppState>, phrase: String, name: String, password: String) -> Result<Value, String> {
+    let _ops = state.wallet_ops.lock().map_err(|_| "ERR:WALLET_EXISTS".to_string())?;
+    // Restoring over an existing wallet would overwrite its phrase: same guard as create.
+    if enc_seed_path(&state.datadir).exists() {
+        return Err("ERR:WALLET_EXISTS".to_string());
+    }
     let phrase = zeroize::Zeroizing::new(phrase); // wiped from memory on every return path
     validate_password(&password)?;
     let mnemonic = Mnemonic::parse(phrase.trim())
         .map_err(|_| "ERR:INVALID_PHRASE".to_string())?;
     let (fp, ext, int) = descriptors_from_mnemonic(&mnemonic)?;
-    // new name: NEVER overwrites a wallet with funds
-    rpc(&state.datadir, None, "createwallet", json!([name, false, true, "", false, true]))?;
+    // Core refuses a duplicate wallet name, so an existing wallet is NEVER overwritten: this call fails
+    // first and the phrase file below is never reached (verified against a real node on regtest).
+    // Translated, or the user restoring over an existing wallet gets Core's raw "Failed to create database
+    // path 'C:\...'. Database already exists." instead of "you already have a wallet".
+    rpc(&state.datadir, None, "createwallet", json!([name, false, true, "", false, true]))
+        .map_err(|e| friendly_error(&e))?;
     import_descriptors(&state.datadir, &name, &ext, &int, true)?; // rescan from genesis
     // Encrypt the restored wallet's keys and store the phrase encrypted with the new password.
-    rpc(&state.datadir, Some(&name), "encryptwallet", json!([password]))?;
-    encrypt_phrase_file(&state.datadir, phrase.trim(), &password)?;
+    rpc(&state.datadir, Some(&name), "encryptwallet", json!([password])).map_err(|e| friendly_error(&e))?;
+    encrypt_phrase_file_ex(&state.datadir, phrase.trim(), &password, false)?;
     activate_wallet(&state, &name);
     Ok(json!({ "ok": true, "fingerprint": fp }))
 }
@@ -1010,7 +1243,7 @@ fn wallet_reveal_seed(state: State<AppState>, password: String) -> Result<Value,
 fn wallet_migrate_encrypt(state: State<AppState>, password: String) -> Result<Value, String> {
     validate_password(&password)?;
     let old = load_seed_phrase(&state.datadir); // plaintext phrase from the old format, if any
-    rpc(&state.datadir, Some(WALLET_NAME), "encryptwallet", json!([password]))?;
+    rpc(&state.datadir, Some(WALLET_NAME), "encryptwallet", json!([password])).map_err(|e| friendly_error(&e))?;
     if !old.is_empty() {
         encrypt_phrase_file(&state.datadir, &old.join(" "), &password)?;
         let _ = std::fs::remove_file(seed_phrase_path(&state.datadir)); // remove the plaintext file
@@ -1151,7 +1384,25 @@ fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32], String> {
 }
 
 // File layout: version(1) | salt(16) | nonce(12) | ciphertext+tag
+// Writes the encrypted phrase. `allow_overwrite` is false for create/restore (the phrase must never be
+// replaced) and true only for wallet_migrate_encrypt, whose whole job is rewriting an existing wallet's
+// phrase under a new password. Callers MUST hold AppState.wallet_ops: the exists-check and the write are
+// not atomic on their own.
+fn encrypt_phrase_file_ex(datadir: &std::path::Path, phrase: &str, password: &str, allow_overwrite: bool) -> Result<(), String> {
+    if !allow_overwrite && enc_seed_path(datadir).exists() {
+        // Fail closed. Reaching here means a wallet already exists and something tried to write a
+        // different phrase over it, which would destroy the only way to recover the old funds.
+        return Err("ERR:WALLET_EXISTS".to_string());
+    }
+    encrypt_phrase_file_inner(datadir, phrase, password)
+}
+
+// Kept for callers that legitimately rewrite the file (migration) and for the crypto round-trip tests.
 fn encrypt_phrase_file(datadir: &std::path::Path, phrase: &str, password: &str) -> Result<(), String> {
+    encrypt_phrase_file_inner(datadir, phrase, password)
+}
+
+fn encrypt_phrase_file_inner(datadir: &std::path::Path, phrase: &str, password: &str) -> Result<(), String> {
     use aes_gcm::{Aes256Gcm, Key, Nonce, aead::{Aead, KeyInit}};
     use rand::RngCore;
     use zeroize::Zeroize;
@@ -2471,6 +2722,8 @@ pub fn run() {
         child: Arc::new(Mutex::new(None)),
         datadir,
         wallet_loaded: Arc::new(AtomicBool::new(false)),
+        sending: Arc::new(Mutex::new(())),
+        wallet_ops: Arc::new(Mutex::new(())),
         receive_addr: Arc::new(Mutex::new(String::new())),
         mining: Arc::new(AtomicBool::new(false)),
         mined: Arc::new(AtomicU64::new(0)),
@@ -2719,4 +2972,435 @@ fn dirs_data_dir() -> PathBuf {
         }
     }
     std::env::temp_dir().join("Brisvia")
+}
+
+// Error messages that reach the user must be translated codes, never Core's raw English.
+// The frontend maps "ERR:CODE" to the active language and passes UNKNOWN strings through unchanged
+// (app.js transError), so a missing translation here surfaces raw English — including the word "Bitcoin"
+// and Windows paths — on a screen that handles money.
+//
+// Every string below was CAPTURED from a real bitcoind v30.2 on regtest, not written from memory.
+// That matters: an invented message would let a wrong rule pass green. This exact battery caught one.
+#[cfg(test)]
+mod error_translation_tests {
+    use super::friendly_error;
+
+    // Captured: bitcoin-cli createwallet <name> twice on the same datadir.
+    const CORE_WALLET_EXISTS: &str = r"Wallet file verification failed. Failed to create database path 'C:\Users\g43343\AppData\Local\Temp\wtest\regtest\wallets\w2'. Database already exists.";
+    // Captured: bitcoin-cli walletpassphrase "wrongpassword" 10
+    const CORE_BAD_PASSWORD: &str = "Error: The wallet passphrase entered was incorrect.";
+    // Captured: bitcoin-cli sendtoaddress on a locked wallet. Contains "passphrase" but is NOT a wrong password.
+    const CORE_WALLET_LOCKED: &str = "Error: Please enter the wallet passphrase with walletpassphrase first.";
+
+    #[test]
+    fn restoring_over_an_existing_wallet_says_so_instead_of_leaking_a_windows_path() {
+        assert_eq!(friendly_error(CORE_WALLET_EXISTS), "ERR:WALLET_EXISTS");
+        // The raw message must not survive: it carries the user's home directory.
+        assert!(!friendly_error(CORE_WALLET_EXISTS).contains("C:\\"));
+    }
+
+    #[test]
+    fn a_wrong_wallet_password_is_reported_as_a_wrong_password() {
+        assert_eq!(friendly_error(CORE_BAD_PASSWORD), "ERR:BAD_PASSWORD");
+    }
+
+    // Regression guard. A rule of `contains("passphrase") || contains("incorrect")` translates BOTH Core
+    // messages to BAD_PASSWORD, telling a user their password was wrong when the wallet was merely locked
+    // and they never typed one. Both words must be required.
+    #[test]
+    fn a_locked_wallet_is_never_reported_as_a_wrong_password() {
+        assert_ne!(friendly_error(CORE_WALLET_LOCKED), "ERR:BAD_PASSWORD");
+    }
+
+    #[test]
+    fn the_money_errors_are_translated() {
+        assert_eq!(friendly_error("Insufficient funds"), "ERR:INSUFFICIENT_FUNDS");
+        assert_eq!(friendly_error("Invalid Bitcoin address"), "ERR:INVALID_ADDRESS");
+        // Core names the wrong coin in that string; the user must never read "Bitcoin" inside Brisvia.
+        assert!(!friendly_error("Invalid Bitcoin address").contains("Bitcoin"));
+    }
+
+    // The backend only rejects amount <= 0, so an amount with 9+ decimals reaches Core and comes back as
+    // "Invalid amount". Both this and the bad-address message start with "invalid": the amount rules must
+    // win, or a user with a typo in the amount is told their address is wrong and goes looking in the
+    // wrong place — on a screen that moves money.
+    #[test]
+    fn a_bad_amount_is_not_reported_as_a_bad_address() {
+        assert_eq!(friendly_error("Invalid amount"), "ERR:INVALID_AMOUNT");
+        assert_eq!(friendly_error("Invalid amount for send"), "ERR:INVALID_AMOUNT");
+        assert_eq!(friendly_error("Amount out of range"), "ERR:INVALID_AMOUNT");
+        assert_eq!(friendly_error("Transaction amount too small"), "ERR:AMOUNT_TOO_SMALL");
+        // and the address rule still works for actual address problems
+        assert_eq!(friendly_error("Invalid Bitcoin address"), "ERR:INVALID_ADDRESS");
+    }
+
+    // Changed on purpose (it used to pass the raw text through). The frontend renders unknown strings
+    // verbatim, so forwarding Core's English meant users read internal wording — and their own home
+    // directory — on a screen that moves money. Unknown now means a sanitised, actionable message, with
+    // the detail kept in the log.
+    #[test]
+    fn an_unknown_message_is_never_shown_raw() {
+        assert_eq!(friendly_error("something nobody mapped"), "ERR:OPERATION_FAILED");
+        assert_eq!(friendly_error("Error: unknown internal RPC failure at some/path"), "ERR:OPERATION_FAILED");
+    }
+
+    #[test]
+    fn no_error_ever_reaches_the_user_carrying_their_home_directory() {
+        // Every message the node can hand us must come back as a code, never as text with a path in it.
+        for raw in [CORE_WALLET_EXISTS, CORE_BAD_PASSWORD, CORE_WALLET_LOCKED, "Insufficient funds", "boom at C:\\Users\\fernando\\x"] {
+            let shown = friendly_error(raw);
+            assert!(shown.starts_with("ERR:"), "not a code: {shown}");
+            assert!(!shown.to_lowercase().contains("users"), "leaked a path: {shown}");
+            assert!(!shown.contains("Bitcoin"), "said Bitcoin inside Brisvia: {shown}");
+        }
+    }
+
+    #[test]
+    fn the_log_keeps_the_detail_but_strips_personal_paths() {
+        let leaky = "boom at C:\\Users\\fernando\\AppData\\Local\\Temp\\x.dat while doing the thing";
+        let logged = super::sanitize_for_log(leaky);
+        assert!(!logged.contains("fernando"), "the log leaked the user name: {logged}");
+        assert!(logged.contains("boom") && logged.contains("while doing the thing"), "the log lost the detail: {logged}");
+    }
+}
+
+// Two clicks on "Send" must never become two payments. Core cannot tell a duplicate apart: two
+// sendtoaddress calls with funds available are two real, irreversible transactions. Disabling the button
+// in JS is UX, not a barrier — a second event, the Enter key, or any other caller reaches the backend.
+//
+// These tests exercise the exact guard wallet_send uses (try_lock on AppState.sending), with real threads
+// and a barrier so the race is deterministic rather than a lucky interleaving.
+#[cfg(test)]
+mod send_single_flight_tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Barrier, Mutex};
+
+    // Mirrors wallet_send's guard: try_lock, and on failure return the error WITHOUT waiting.
+    fn guarded_send(sending: &Arc<Mutex<()>>, rpc_calls: &Arc<AtomicU64>) -> Result<&'static str, String> {
+        let _g = sending.try_lock().map_err(|_| "ERR:SEND_IN_PROGRESS".to_string())?;
+        rpc_calls.fetch_add(1, Ordering::SeqCst); // stands in for the real sendtoaddress
+        std::thread::sleep(std::time::Duration::from_millis(60)); // hold the guard, widening the race window
+        Ok("txid")
+    }
+
+    #[test]
+    fn two_simultaneous_sends_reach_the_node_exactly_once() {
+        let sending = Arc::new(Mutex::new(()));
+        let calls = Arc::new(AtomicU64::new(0));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let hs: Vec<_> = (0..2)
+            .map(|_| {
+                let (s, c, b) = (sending.clone(), calls.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    b.wait(); // both threads start at the same instant
+                    guarded_send(&s, &c)
+                })
+            })
+            .collect();
+        let results: Vec<_> = hs.into_iter().map(|h| h.join().unwrap()).collect();
+
+        // The money invariant: the node was asked to send ONCE.
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "the node was asked to send more than once");
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1, "more than one send succeeded");
+        let rejected = results.iter().filter_map(|r| r.as_ref().err()).next().unwrap();
+        assert_eq!(rejected, "ERR:SEND_IN_PROGRESS");
+    }
+
+    // The loser must be REJECTED, not queued. A queued second send pays twice a moment later — the very
+    // thing being prevented. This is why the guard is try_lock and never lock().
+    #[test]
+    fn the_second_send_is_rejected_and_never_queued() {
+        let sending = Arc::new(Mutex::new(()));
+        let calls = Arc::new(AtomicU64::new(0));
+        let held = sending.try_lock().expect("first send takes the guard");
+        let start = std::time::Instant::now();
+        let r = guarded_send(&sending, &calls);
+        assert!(r.is_err(), "a second send got through while one was in flight");
+        assert!(start.elapsed().as_millis() < 50, "the second send WAITED instead of being rejected");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "the rejected send still reached the node");
+        drop(held);
+    }
+
+    // The guard must be released on every path, or one failed send would freeze sending forever.
+    #[test]
+    fn a_failed_send_does_not_lock_sending_forever() {
+        let sending = Arc::new(Mutex::new(()));
+        let calls = Arc::new(AtomicU64::new(0));
+        {
+            let _g = sending.try_lock().expect("take it");
+            assert!(guarded_send(&sending, &calls).is_err()); // busy while held
+        } // guard dropped, as it is when wallet_send returns
+        assert!(guarded_send(&sending, &calls).is_ok(), "sending stayed locked after the guard was dropped");
+    }
+}
+
+// The 12-word phrase is the ONE irreplaceable asset in this app: lose it and the coins are gone, with no
+// support line and no undo. There is exactly one encrypted phrase file per datadir, and both create and
+// restore used to end in an unconditional overwrite. The only thing preventing disaster was Core rejecting
+// a duplicate wallet name plus the frontend hardcoding name="brisvia" — two assumptions the overwriting
+// function does not control. These tests make the invariant ours instead of incidental.
+#[cfg(test)]
+mod phrase_never_overwritten_tests {
+    use super::{decrypt_phrase_file, enc_seed_path, encrypt_phrase_file_ex};
+
+    fn tmpdir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("brisvia_phrase_{}_{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    const OLD: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const NEW: &str = "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong";
+
+    #[test]
+    fn a_second_wallet_can_never_replace_the_first_phrase() {
+        let d = tmpdir("overwrite");
+        encrypt_phrase_file_ex(&d, OLD, "first-password-1", false).unwrap();
+        let before = std::fs::read(enc_seed_path(&d)).unwrap();
+
+        let r = encrypt_phrase_file_ex(&d, NEW, "second-password-2", false);
+        assert_eq!(r.unwrap_err(), "ERR:WALLET_EXISTS", "a second wallet was allowed to overwrite the phrase");
+
+        // The file must be byte-for-byte what it was: not rewritten, not truncated, not re-encrypted.
+        assert_eq!(std::fs::read(enc_seed_path(&d)).unwrap(), before, "the phrase file changed on disk");
+        // And the original phrase must still come back with the original password.
+        assert_eq!(decrypt_phrase_file(&d, "first-password-1").unwrap().trim(), OLD);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_first_wallet_on_a_clean_profile_is_allowed() {
+        let d = tmpdir("clean");
+        assert!(encrypt_phrase_file_ex(&d, OLD, "pw-first-time-1", false).is_ok());
+        assert_eq!(decrypt_phrase_file(&d, "pw-first-time-1").unwrap().trim(), OLD);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // Migration (an old unencrypted wallet gaining a password) is the ONE caller that must rewrite the
+    // file. It passes allow_overwrite = true on purpose.
+    #[test]
+    fn migration_may_rewrite_the_phrase_on_purpose() {
+        let d = tmpdir("migrate");
+        encrypt_phrase_file_ex(&d, OLD, "old-password-11", false).unwrap();
+        assert!(encrypt_phrase_file_ex(&d, OLD, "new-password-22", true).is_ok());
+        // Same phrase, now readable with the new password.
+        assert_eq!(decrypt_phrase_file(&d, "new-password-22").unwrap().trim(), OLD);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+// Money must never touch floating point. Amounts used to cross the IPC boundary as f64, where "0.1 + 0.2"
+// drift, a hidden 9th decimal or scientific notation could reach the node and the amount shown could differ
+// from the amount sent. Now the raw string the user typed is parsed into integer base units here, and the
+// node receives an exact decimal string built from that integer (its RPC layer reads it with
+// ParseFixedPoint — exact). These are the boundary cases; each one is a way real money goes wrong.
+#[cfg(test)]
+mod amount_tests {
+    use super::{briv_to_decimal, parse_amount_briv, MAX_MONEY_BRIV};
+
+    #[test]
+    fn the_smallest_unit_is_one_briv() {
+        assert_eq!(parse_amount_briv("0.00000001").unwrap(), 1);
+    }
+
+    #[test]
+    fn one_coin_is_one_hundred_million_briv() {
+        assert_eq!(parse_amount_briv("1").unwrap(), 100_000_000);
+        assert_eq!(parse_amount_briv("1.0").unwrap(), 100_000_000);
+        assert_eq!(parse_amount_briv("1.00000000").unwrap(), 100_000_000);
+    }
+
+    // The reason this module exists: 0.1 is not representable in binary floating point. As f64 it is
+    // 0.1000000000000000055511151231257827; as text it is exactly 10_000_000 briv.
+    #[test]
+    fn one_tenth_is_exact_not_a_float_approximation() {
+        assert_eq!(parse_amount_briv("0.1").unwrap(), 10_000_000);
+        assert_eq!(parse_amount_briv("0.30000000").unwrap(), 30_000_000);
+        // The classic: 0.1 + 0.2 = 0.30000000000000004 in f64. As integers it is exact.
+        assert_eq!(parse_amount_briv("0.1").unwrap() + parse_amount_briv("0.2").unwrap(), parse_amount_briv("0.3").unwrap());
+    }
+
+    // A 9th decimal must be REFUSED, never rounded: silently rounding someone's money is worse than
+    // asking them to retype it. The node would answer a raw English "Invalid amount" here.
+    #[test]
+    fn nine_decimals_are_refused_not_rounded() {
+        assert_eq!(parse_amount_briv("0.000000001").unwrap_err(), "ERR:INVALID_AMOUNT");
+        assert_eq!(parse_amount_briv("1.123456789").unwrap_err(), "ERR:INVALID_AMOUNT");
+    }
+
+    // "1e-8" parses as a number in JS and Rust alike. It must not be reinterpreted as 0.00000001.
+    #[test]
+    fn scientific_notation_and_signs_are_refused() {
+        for bad in ["1e-8", "1E8", "1e8", "-1", "+1", "-0.5"] {
+            assert_eq!(parse_amount_briv(bad).unwrap_err(), "ERR:INVALID_AMOUNT", "accepted {bad}");
+        }
+    }
+
+    #[test]
+    fn junk_is_refused() {
+        for bad in ["", "   ", "abc", "1.2.3", "1,2,3", "0", "0.0", "0.00000000", "1 000", "$5", "1.5x", ".", ","] {
+            assert_eq!(parse_amount_briv(bad).unwrap_err(), "ERR:INVALID_AMOUNT", "accepted {bad:?}");
+        }
+    }
+
+    // THE BUG THIS CAUGHT: this function used to do replace(',', '.') so an ES user could type "12,5".
+    // That silently turned "1,000" into 1 BRVA — but in English "1,000" is one thousand, so a person
+    // sending 1,000 BRVA would have sent 1 and lost 999. A backend cannot know which convention was meant,
+    // so it no longer guesses: commas are refused here, and the frontend (which knows the active language)
+    // normalises to this canonical form, rejecting the separator that does not belong to that language.
+    // See tests/amount-separator.test.js for the language-aware half.
+    #[test]
+    fn a_comma_is_refused_because_its_meaning_depends_on_the_language() {
+        // The exact amount that used to lose 999 coins.
+        assert_eq!(parse_amount_briv("1,000").unwrap_err(), "ERR:INVALID_AMOUNT");
+        assert_eq!(parse_amount_briv("12,5").unwrap_err(), "ERR:INVALID_AMOUNT");
+        assert_eq!(parse_amount_briv("1,00000000").unwrap_err(), "ERR:INVALID_AMOUNT");
+        assert_eq!(parse_amount_briv("1,000.50").unwrap_err(), "ERR:INVALID_AMOUNT");
+        assert_eq!(parse_amount_briv("1.000,50").unwrap_err(), "ERR:INVALID_AMOUNT");
+        // The canonical form the frontend sends instead:
+        assert_eq!(parse_amount_briv("12.5").unwrap(), 1_250_000_000);
+        assert_eq!(parse_amount_briv("0.00000001").unwrap(), 1);
+        // "1.000" is unambiguous once canonical: one coin, three decimals. NOT one thousand.
+        assert_eq!(parse_amount_briv("1.000").unwrap(), 100_000_000);
+    }
+
+    #[test]
+    fn surrounding_spaces_are_trimmed_not_rejected() {
+        assert_eq!(parse_amount_briv("  1.5  ").unwrap(), 150_000_000);
+    }
+
+    // The cap is 100,000,000 BRVA = 10,000,000,000,000,000 briv (1e16).
+    //
+    // Be precise about WHY f64 is wrong here, or this comment documents a false reason (an earlier version
+    // of it did). Two claims that sound right and are NOT:
+    //   "100,000,000 can't be represented in an f64" — false, it is far below 2^53 and exact.
+    //   "1e16 can't be represented"                  — also false, 1e16 happens to be exact.
+    // The true statement is about NEIGHBOURS: 1e16 > 2^53 (≈9.007e15), so past that point consecutive
+    // integers are no longer distinguishable — `1e16 == 1e16 + 1.0` is true in f64. At the top of the money
+    // range, one briv apart is the same double.
+    //
+    // And that is not even the everyday reason to drop f64. The everyday reason is 0.1, which is not exact
+    // at ANY magnitude (see one_tenth_is_exact_not_a_float_approximation): it bites at ordinary amounts,
+    // not at the cap.
+    #[test]
+    fn the_money_cap_is_the_boundary() {
+        assert_eq!(parse_amount_briv("100000000").unwrap(), MAX_MONEY_BRIV);
+        assert_eq!(parse_amount_briv("100000000.00000001").unwrap_err(), "ERR:INVALID_AMOUNT");
+        assert_eq!(parse_amount_briv("999999999999").unwrap_err(), "ERR:INVALID_AMOUNT");
+    }
+
+    #[test]
+    fn an_absurd_number_does_not_overflow_it_is_refused() {
+        assert_eq!(parse_amount_briv("99999999999999999999999999").unwrap_err(), "ERR:INVALID_AMOUNT");
+    }
+
+    // What the node actually receives must round-trip back to the same integer.
+    #[test]
+    fn what_the_node_receives_is_the_exact_amount() {
+        for s in ["0.00000001", "0.1", "1", "1.5", "12.34567891".get(0..11).unwrap(), "100000000"] {
+            let briv = parse_amount_briv(s).unwrap();
+            let sent = briv_to_decimal(briv);
+            assert_eq!(parse_amount_briv(&sent).unwrap(), briv, "{s} -> {sent} changed the amount");
+            assert!(sent.matches('.').count() == 1 && sent.split('.').nth(1).unwrap().len() == 8, "bad shape: {sent}");
+        }
+        assert_eq!(briv_to_decimal(1), "0.00000001");
+        assert_eq!(briv_to_decimal(100_000_000), "1.00000000");
+        assert_eq!(briv_to_decimal(10_000_000), "0.10000000");
+    }
+}
+
+// A send that fails is not one thing. "Rejected" and "we never reached the node" both mean the money did
+// NOT move and a retry is safe. "The request went out and no answer came back" means it MAY have been
+// broadcast — retrying there could pay twice. Only that last case warns the user, and nothing ever retries
+// on its own. Getting this wrong in either direction costs real money: a false warning invites a needless
+// double-check, a missing one invites a double payment.
+#[cfg(test)]
+mod send_outcome_tests {
+    use super::{send_failure_to_code, RpcOutcome};
+
+    #[test]
+    fn a_node_that_refuses_is_not_reported_as_maybe_sent() {
+        assert_eq!(send_failure_to_code(RpcOutcome::Rejected("ERR:INSUFFICIENT_FUNDS".into())), "ERR:INSUFFICIENT_FUNDS");
+        assert_eq!(send_failure_to_code(RpcOutcome::Rejected("ERR:INVALID_ADDRESS".into())), "ERR:INVALID_ADDRESS");
+    }
+
+    #[test]
+    fn never_reaching_the_node_is_not_reported_as_maybe_sent() {
+        assert_eq!(send_failure_to_code(RpcOutcome::NotSent("connection refused".into())), "ERR:NODE_NOT_READY");
+    }
+
+    #[test]
+    fn a_lost_answer_is_the_only_case_that_warns() {
+        assert_eq!(send_failure_to_code(RpcOutcome::Unknown), "ERR:SEND_STATUS_UNKNOWN");
+    }
+
+    // The three outcomes must stay distinct: collapsing them is exactly the bug this classification fixes.
+    #[test]
+    fn the_three_outcomes_never_collapse_into_one_message() {
+        let rejected = send_failure_to_code(RpcOutcome::Rejected("ERR:INSUFFICIENT_FUNDS".into()));
+        let not_sent = send_failure_to_code(RpcOutcome::NotSent("x".into()));
+        let unknown = send_failure_to_code(RpcOutcome::Unknown);
+        assert_ne!(rejected, unknown);
+        assert_ne!(not_sent, unknown);
+        assert_ne!(rejected, not_sent);
+        // Only the ambiguous one may tell the user the payment might have gone out.
+        assert_eq!(unknown, "ERR:SEND_STATUS_UNKNOWN");
+        assert_ne!(rejected, "ERR:SEND_STATUS_UNKNOWN");
+        assert_ne!(not_sent, "ERR:SEND_STATUS_UNKNOWN");
+    }
+}
+
+// The amount must leave this process as TEXT. Keeping a String in Rust proves nothing on its own: the JSON
+// layer is where a number could quietly come back, and the node parses a JSON number as a double. This
+// asserts on the exact bytes of the request body that goes to the node.
+#[cfg(test)]
+mod rpc_wire_format_tests {
+    use super::{briv_to_decimal, parse_amount_briv};
+    use serde_json::{json, Value};
+
+    // Mirrors the body rpc()/rpc_classified() build, so the assertion is about what really goes on the wire.
+    fn wire_body(address: &str, typed: &str) -> String {
+        let briv = parse_amount_briv(typed).unwrap();
+        let exact = briv_to_decimal(briv);
+        let params: Value = json!([address, exact]);
+        json!({ "jsonrpc": "1.0", "id": "brisvia", "method": "sendtoaddress", "params": params }).to_string()
+    }
+
+    #[test]
+    fn the_amount_leaves_as_a_json_string_not_a_number() {
+        let body = wire_body("brv1qtest", "1.5");
+        // Quoted => JSON string => the node reads it with ParseFixedPoint (exact).
+        assert!(body.contains(r#""1.50000000""#), "amount is not a quoted string: {body}");
+        // Unquoted after the comma would mean a JSON number => parsed as a double by the node.
+        assert!(!body.contains(",1.5]"), "amount went out as a bare number: {body}");
+        assert!(!body.contains(",1.50000000]"), "amount went out as a bare number: {body}");
+    }
+
+    #[test]
+    fn every_amount_is_sent_with_exactly_eight_decimals_and_quoted() {
+        for typed in ["0.00000001", "0.1", "1", "12.5", "100000000"] {
+            let body = wire_body("brv1qtest", typed);
+            let v: Value = serde_json::from_str(&body).unwrap();
+            let amount = &v["params"][1];
+            assert!(amount.is_string(), "{typed} was serialised as {amount:?}, not a string");
+            let s = amount.as_str().unwrap();
+            assert_eq!(s.split('.').nth(1).map(|f| f.len()), Some(8), "{typed} -> {s}");
+            // And it round-trips back to the same integer: nothing was lost on the way out.
+            assert_eq!(parse_amount_briv(s).unwrap(), parse_amount_briv(typed).unwrap());
+        }
+    }
+
+    // The float that started all this: as f64, 0.1 serialises to 0.1 but 0.1+0.2 does not serialise to 0.3.
+    #[test]
+    fn the_wire_carries_the_exact_amount_a_float_would_have_distorted() {
+        let v: Value = serde_json::from_str(&wire_body("brv1qtest", "0.1")).unwrap();
+        assert_eq!(v["params"][1].as_str().unwrap(), "0.10000000");
+        // What a float boundary would have put on the wire, for contrast:
+        let as_float = json!(0.1_f64 + 0.2_f64).to_string();
+        assert_eq!(as_float, "0.30000000000000004");
+        let v2: Value = serde_json::from_str(&wire_body("brv1qtest", "0.3")).unwrap();
+        assert_eq!(v2["params"][1].as_str().unwrap(), "0.30000000");
+    }
 }
