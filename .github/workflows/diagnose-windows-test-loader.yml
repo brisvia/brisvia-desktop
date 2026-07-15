@@ -61,10 +61,77 @@ permissions:
   contents: read
 
 jobs:
+  # Two minutes that decide whether eighty are worth spending. The long job cannot start until this
+  # passes: see `needs:` below.
+  #
+  # This exists because building this diagnostic cost seven self-inflicted bugs, each found by burning a
+  # 40-to-80 minute run. On its very first local run this gate found four more -- including a real bug in
+  # its own process capture and a metatest that asserted something untrue. Every one of them was in the
+  # tool, none in the product.
+  preflight:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prove the diagnostic tool works before spending an hour on it
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/ci/Test-DiagnosticPreflight.ps1 -ManifestPath preflight-manifest.json
+
+      - name: The manifest must be readable by something other than PowerShell
+        shell: pwsh
+        run: |
+          # Read it back as bytes, not through PowerShell's reader: it opens its own BOM'd files happily
+          # and would report success while json.load, jq and fromJSON all choke on the first character.
+          $bytes = [IO.File]::ReadAllBytes("$PWD/preflight-manifest.json")
+          if ($bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+            throw "the manifest has a UTF-8 BOM: the consuming side cannot parse it"
+          }
+          $m = [Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json
+          Write-Host "status=$($m.status)  checks=$($m.checks_total)  failed=$($m.checks_failed)"
+          if ($m.status -ne 'PASS') { throw "preflight says $($m.status): the long diagnostic does not start" }
+          foreach ($k in $m.script_hashes.PSObject.Properties.Name) {
+            Write-Host "  $k = $($m.script_hashes.$k)"
+          }
+          "MANIFEST_SHA256=$((Get-FileHash preflight-manifest.json -Algorithm SHA256).Hash)" |
+            Out-File -Append $env:GITHUB_ENV
+
+      - name: Keep the manifest whatever happens
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: preflight-manifest
+          path: preflight-manifest.json
+
   compare:
+    # The whole point: no long run starts on an unproven tool.
+    needs: preflight
     # windows-2022, exactly like the real job. windows-latest is a moving target.
     runs-on: windows-2022
     steps:
+      # The helper comes from the APPROVED commit, and lives OUTSIDE the workspace.
+      #
+      # Two reasons, both of which would have cost an 80-minute run to discover:
+      #   1. rc5 and rc6 do not contain tools/ci/ -- it was written after both tags. Dot-sourcing it from
+      #      the workspace would fail with "file not found" on the very first use.
+      #   2. The workspace gets wiped between the two halves. Anything left in it disappears.
+      #
+      # It also has to be the version the preflight approved, not whatever a tag happens to carry:
+      # measuring rc5 and rc6 with two different rulers would be its own bug.
+      - name: Bring in the approved diagnostic tool, outside the workspace
+        uses: actions/checkout@v4
+        with:
+          path: approved-tools
+
+      - name: Park it where the wipe cannot reach it
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path C:\tools | Out-Null
+          Copy-Item approved-tools\tools\ci\*.ps1 C:\tools\ -Force
+          Get-ChildItem C:\tools | ForEach-Object {
+            "$($_.Name)  $((Get-FileHash $_.FullName -Algorithm SHA256).Hash)"
+          } | Tee-Object C:\tools\hashes.txt
+          Remove-Item approved-tools -Recurse -Force
+
       - name: MSVC tools (dumpbin lives here)
         uses: ilammy/msvc-dev-cmd@v1
 
@@ -207,12 +274,21 @@ jobs:
         shell: pwsh
         run: |
           # THE gate. --list needs the executable to LOAD but runs no test.
-          & C:\evidence\test-good.exe --list 2>&1 | Tee-Object C:\evidence\good-list.txt | Select-Object -First 10
-          $c = $LASTEXITCODE
-          $hex = '0x{0:X8}' -f $c
-          "exit=$c hex=$hex" | Tee-Object -Append C:\evidence\good-list.txt
-          if ($c -ne 0) {
-            throw "INVALID DIAGNOSTIC: the baseline does not load either (exit $c / $hex). The environment still differs from the real job. Find that difference before comparing anything."
+          #
+          # This used to be a pipeline into Select-Object -First 10, which stops the pipeline and leaves
+          # $LASTEXITCODE unset. The evidence read `exit= hex=0x`, the step threw, and a baseline that
+          # may have loaded perfectly was rejected. The helper takes the code from the process object and
+          # never puts the executable in a pipeline; truncating for display happens afterwards and cannot
+          # reach it. Proven by the preflight this job depends on.
+          . C:	ools\Invoke-NativeProcess.ps1
+          $r = Invoke-NativeProcess -FilePath C:\evidence\test-good.exe -Arguments @('--list') -OutputDir C:\evidence
+          Write-NativeProcessReport -Result $r -PreviewLines 10
+          $r | ConvertTo-Json -Depth 4 | Out-File C:\evidence\good-list.json
+          if (-not $r.Launched) {
+            throw "INVALID DIAGNOSTIC: the baseline executable did not even start: $($r.Error)"
+          }
+          if ($r.ExitCode -ne 0) {
+            throw "INVALID DIAGNOSTIC: the baseline does not load either (exit $($r.ExitCode) / $($r.ExitCodeHex)). The environment still differs from the real job. Find that difference before comparing anything."
           }
           Write-Host "the baseline loads and lists its tests. Gate open."
 
@@ -349,16 +425,31 @@ jobs:
         shell: pwsh
         continue-on-error: true
         run: |
-          # The point of the whole workflow. Non-zero here with the baseline at zero proves the failure
-          # belongs to LOADING the executable, not to any test's logic.
-          & C:\evidence\test-bad.exe --list 2>&1 | Tee-Object C:\evidence\bad-list.txt | Select-Object -First 10
-          $c = $LASTEXITCODE
-          $hex = '0x{0:X8}' -f $c
-          "exit=$c hex=$hex" | Tee-Object -Append C:\evidence\bad-list.txt
-          Write-Host "candidate exit: $c ($hex)"
-          if ($hex -eq '0xC0000139') { Write-Host "REPRODUCED: the same loader failure as the real job." }
-          elseif ($c -eq 0)          { Write-Host "IT LOADS HERE. Then the real job's failure needs another explanation: compare against run 29448577901." }
-          else                       { Write-Host "a different failure ($hex): not the one under investigation." }
+          # The point of the whole workflow. A non-zero code here with the baseline at zero proves the
+          # failure belongs to LOADING the executable, not to any test's logic -- and specifically not to
+          # wallet_key_tests, which the real job's message names only because it was the first on the
+          # list when the loader gave up.
+          #
+          # A loader failure produces no output at all: the process dies before reaching its own code. So
+          # the exit code IS the evidence, which is exactly why it cannot be read through a pipeline.
+          . C:	ools\Invoke-NativeProcess.ps1
+          $r = Invoke-NativeProcess -FilePath C:\evidence\test-bad.exe -Arguments @('--list') -OutputDir C:\evidence
+          Write-NativeProcessReport -Result $r -PreviewLines 10
+          $r | ConvertTo-Json -Depth 4 | Out-File C:\evidence\bad-list.json
+
+          if (-not $r.Launched) {
+            Write-Host "the candidate executable did not start at all: $($r.Error)"
+          }
+          elseif ($r.ExitCodeHex -eq '0xC0000139') {
+            Write-Host "CASE A - REPRODUCED: the same loader failure as the real job (exit $($r.ExitCode))."
+          }
+          elseif ($r.ExitCode -eq 0) {
+            Write-Host "CASE C - IT LOADS HERE. The real job's failure needs another explanation: compare"
+            Write-Host "         this environment against run 29448577901 before attributing any cause."
+          }
+          else {
+            Write-Host "a different failure ($($r.ExitCodeHex)): not the one under investigation."
+          }
 
       - name: CANDIDATE - what it imports
         shell: pwsh
