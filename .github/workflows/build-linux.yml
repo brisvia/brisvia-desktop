@@ -183,6 +183,12 @@ jobs:
           # Allowed: only what any Linux ships (glibc and company). Todo lo de terceros
           # (libevent, boost, sqlite...) tiene que ir ADENTRO del binario, via depends.
           NODE=src-tauri/binaries/bitcoind
+          # Si el archivo no esta, el guard FALLA. Sin esto pasa lo peor que puede pasarle a un candado:
+          # cuando el binario no existe, la herramienta falla, el grep no encuentra nada, el if no se
+          # cumple y el guard dice OK. Verde sin haber verificado nada. Paso de verdad: el guard estaba
+          # mal ubicado (antes del staging) y dio "success" mirando un archivo inexistente.
+          [ -f "$NODE" ] || { echo "FALLO: no existe $NODE. El guard no puede verificar nada."; exit 1; }
+          [ -s "$NODE" ] || { echo "FALLO: $NODE esta vacio"; exit 1; }
           echo "--- ldd ---"; ldd "$NODE" || true
           PERMITIDAS="linux-vdso libc libm libgcc_s libstdc++ libpthread libdl librt ld-linux libatomic libresolv"
           MALAS=""
