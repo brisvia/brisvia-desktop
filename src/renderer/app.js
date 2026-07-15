@@ -32,6 +32,7 @@ function transError(err) {
       POOL_ADDR_PORT: 'errors.pool_addr_port',
       POOL_ADDR_LOCAL: 'errors.pool_addr_local',
       NO_UPDATE: 'errors.no_update',
+      NODE_STILL_RUNNING: 'errors.node_still_running',
     };
     const key = map[err.slice(4)];
     if (key) return T(key);
