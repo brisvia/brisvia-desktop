@@ -734,25 +734,84 @@ fn wait_for_early_exit(child: &mut Child, window: Duration) -> bool {
 }
 
 // ---- orderly shutdown: stop mining -> stop RPC -> wait -> kill ----
-fn stop_node(state: &AppState) {
+/// How long the node is allowed to take to close on its own.
+///
+/// It used to be 5.5 seconds, and then the app killed it. That is the defect: Bitcoin Core flushes the
+/// chainstate on shutdown and its own docs say it can take several minutes. Killing it mid-flush is
+/// exactly how a block database ends up half-written, and the user pays for it on the next start with a
+/// repair -- or with a corrupted database.
+///
+/// 180 seconds is not a guess: it is the ceiling agreed for this, and it is a ceiling, not a wait. The
+/// common case still returns in a second or two, as soon as the process is actually gone.
+const NODE_SHUTDOWN_MAX: Duration = Duration::from_secs(180);
+
+/// Ask the node to close and WAIT for it to actually be gone. Never kill it.
+///
+/// Returns true if the process exited on its own, false if it was still alive after NODE_SHUTDOWN_MAX.
+/// A `false` here is serious: the caller must not go on to replace files underneath a live node.
+///
+/// What this deliberately does NOT do any more: kill the node. There is no timeout after which killing
+/// it becomes acceptable, because the whole point of waiting is that the node is busy writing. The one
+/// case where killing looks tempting -- "it is taking too long" -- is precisely the case where killing
+/// does the damage.
+fn stop_node_and_wait(state: &AppState) -> bool {
+    stop_node_and_wait_max(state, NODE_SHUTDOWN_MAX)
+}
+
+/// El mismo cierre, con el plazo por parametro. Existe para poder PROBARLO: 180 segundos
+/// en un test no es viable, y un candado que no se puede probar no es un candado.
+fn stop_node_and_wait_max(state: &AppState, plazo: Duration) -> bool {
     state.mining.store(false, Ordering::SeqCst);
-    // stop the miner (sidecar) first so it stops asking the node for work
+    // The miner first: it keeps asking the node for work, and while it holds the .exe open the
+    // installer cannot replace it either. This one is ours and holds no chain data, so kill+wait is
+    // fine -- and we wait, so it cannot outlive us as an orphan.
     if let Some(mut m) = state.miner_child.lock().unwrap().take() {
         let _ = m.kill();
         let _ = m.wait();
     }
-    let _ = rpc(&state.datadir, None, "stop", json!([]));
-    std::thread::sleep(Duration::from_millis(1500));
-    if let Some(mut child) = state.child.lock().unwrap().take() {
-        // give it a moment to close on its own; kill it otherwise
-        for _ in 0..20 {
-            match child.try_wait() {
-                Ok(Some(_)) => return,
-                _ => std::thread::sleep(Duration::from_millis(200)),
+
+    // The node's own orderly-shutdown request. This is what writes "Shutdown in progress..." and then
+    // "Shutdown done" to debug.log; those two lines are the evidence that it closed properly.
+    let pedido = rpc(&state.datadir, None, "stop", json!([]));
+    if pedido.is_err() {
+        eprintln!("[brisvia] the node did not accept `stop`; waiting for it anyway");
+    }
+
+    let Some(mut child) = state.child.lock().unwrap().take() else {
+        return true; // we never started one
+    };
+    let arranque = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                eprintln!("[brisvia] the node closed on its own in {:.1}s", arranque.elapsed().as_secs_f32());
+                return true;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("[brisvia] cannot check on the node: {e}");
+                return false;
             }
         }
-        let _ = child.kill();
+        if arranque.elapsed() >= plazo {
+            // Put it back: it is still running, and whoever we hand `false` to needs to be able to
+            // find it. Dropping the handle here would orphan it.
+            *state.child.lock().unwrap() = Some(child);
+            eprintln!("[brisvia] the node is STILL running after {}s. Not killing it.",
+                      plazo.as_secs());
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+/// Close the node on the way out of the app.
+///
+/// Same wait, and the same refusal to kill. If it is still writing when the user closes the window, the
+/// right thing is to let it finish -- the app going away a few seconds later is invisible, a repaired
+/// database is not.
+fn stop_node(state: &AppState) {
+    let _ = stop_node_and_wait(state);
 }
 
 // ================= commands exposed to the UI =================
@@ -2691,15 +2750,24 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "ERR:NO_UPDATE".to_string())?;
-    // Stop the node and mining engine first so their .exe files aren't locked when the installer replaces them.
+    // The node has to be COMPLETELY gone before the installer touches a single file.
+    //
+    // This used to stop the node and start installing straight after, and `stop_node` gave it 5.5
+    // seconds before killing it. Two ways to corrupt a block database in one line: kill it mid-flush,
+    // or replace the binary underneath a process that is still writing.
+    //
+    // Now it waits for the process to really disappear, and if it does not, the update is CANCELLED.
+    // A user who has to press the button again is a nuisance. A user whose chain is corrupted has to
+    // resync from zero, and it happened silently while they were told it was updating.
     {
         let state = app.state::<AppState>();
+        // No new sends and no new mining from here on: the node is on its way out, and a transaction
+        // accepted now would be answered by a node that is closing.
         state.mining.store(false, Ordering::SeqCst);
-        if let Some(mut child) = state.miner_child.lock().unwrap().take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        if !stop_node_and_wait(&state) {
+            // Deliberately no kill: it is still running because it is still writing.
+            return Err("ERR:NODE_STILL_RUNNING".to_string());
         }
-        stop_node(&state);
     }
     update
         .download_and_install(|_chunk, _total| {}, || {})
@@ -3402,5 +3470,110 @@ mod rpc_wire_format_tests {
         assert_eq!(as_float, "0.30000000000000004");
         let v2: Value = serde_json::from_str(&wire_body("brv1qtest", "0.3")).unwrap();
         assert_eq!(v2["params"][1].as_str().unwrap(), "0.30000000");
+    }
+}
+
+// ============================================================================================
+// El nodo NO se mata. Nunca.
+//
+// The defect that led to these tests: `stop_node` gave the node 1.5s + 4s and then killed it.
+// Bitcoin Core flushes the chainstate on shutdown and its own documentation warns it can take several
+// minutes. Killing it in the middle of that write is exactly how a block database ends up half-written,
+// y el usuario lo paga en el arranque siguiente con una reparación — o con la base corrupta.
+//
+// The comment "do not kill it" does not stop anyone from killing it. These tests do: if one appears again
+// kill en el camino del nodo, se ponen en rojo.
+// ============================================================================================
+#[cfg(test)]
+mod node_shutdown_tests {
+    use super::*;
+
+    /// Un proceso que NO se va a cerrar solo, para representar al nodo ocupado escribiendo.
+    fn proceso_terco() -> std::process::Child {
+        #[cfg(target_os = "windows")]
+        let c = std::process::Command::new("cmd").args(["/c", "ping -n 60 127.0.0.1 >nul"]).spawn();
+        #[cfg(not(target_os = "windows"))]
+        let c = std::process::Command::new("sleep").arg("60").spawn();
+        c.expect("no se pudo lanzar el proceso de prueba")
+    }
+
+    fn estado_con(child: Option<std::process::Child>) -> AppState {
+        AppState {
+            child: Arc::new(Mutex::new(child)),
+            datadir: std::env::temp_dir().join("brisvia-test-shutdown"),
+            wallet_loaded: Arc::new(AtomicBool::new(false)),
+            sending: Arc::new(Mutex::new(())),
+            wallet_ops: Arc::new(Mutex::new(())),
+            receive_addr: Arc::new(Mutex::new(String::new())),
+            mining: Arc::new(AtomicBool::new(false)),
+            mined: Arc::new(AtomicU64::new(0)),
+            stale: Arc::new(AtomicU64::new(0)),
+            mine_start: Arc::new(Mutex::new(None)),
+            keep_session_on_relaunch: Arc::new(AtomicBool::new(false)),
+            intensity: Arc::new(Mutex::new("equilibrado".to_string())),
+            miner_child: Arc::new(Mutex::new(None)),
+            hashrate: Arc::new(Mutex::new(0.0)),
+            miner_ready: Arc::new(AtomicBool::new(false)),
+            tray_enabled: Arc::new(AtomicBool::new(true)),
+            mining_mode: Arc::new(Mutex::new("solo".to_string())),
+            pool_address: Arc::new(Mutex::new(String::new())),
+            pending_mnemonic: Arc::new(Mutex::new(None)),
+            lang: Arc::new(Mutex::new("es".to_string())),
+            tray: Arc::new(Mutex::new(None)),
+            cores: 2,
+            miner_threads: Arc::new(AtomicU64::new(0)),
+            total_mined_secs: Arc::new(Mutex::new(0)),
+            ach_cache: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[test]
+    fn el_plazo_es_de_180_segundos_no_de_cinco() {
+        // 5.5 s era el valor viejo, y era la causa del defecto. Si alguien lo vuelve a bajar "porque
+        // takes long", this test stops it: taking long is exactly when killing it does the damage.
+        assert_eq!(NODE_SHUTDOWN_MAX, Duration::from_secs(180),
+                   "el plazo de cierre del nodo no puede bajarse: Core avisa que puede tardar minutos");
+    }
+
+    #[test]
+    fn si_el_nodo_no_cierra_devuelve_false_y_NO_lo_mata() {
+        let mut terco = proceso_terco();
+        let pid = terco.id();
+        let s = estado_con(Some(terco));
+
+        // Short window on purpose: what is tested is the decision, not the wait.
+        let cerro = stop_node_and_wait_max(&s, Duration::from_millis(600));
+        assert!(!cerro, "it must report that it did NOT close, not lie");
+
+        // And what really matters: it is still alive. It was not killed.
+        let mut guard = s.child.lock().unwrap();
+        let child = guard.as_mut().expect("the process must be kept, not released as an orphan");
+        assert_eq!(child.id(), pid, "tiene que ser el mismo proceso, devuelto al estado");
+        assert!(matches!(child.try_wait(), Ok(None)),
+                "RECHAZADO: el nodo fue terminado. Nunca se mata: puede estar guardando.");
+        let _ = child.kill(); // limpieza del test
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn si_el_nodo_cierra_solo_devuelve_true_enseguida() {
+        // Un proceso que termina solo: representa el caso normal, que es el 99% de las veces.
+        #[cfg(target_os = "windows")]
+        let c = std::process::Command::new("cmd").args(["/c", "exit"]).spawn().unwrap();
+        #[cfg(not(target_os = "windows"))]
+        let c = std::process::Command::new("true").spawn().unwrap();
+        let s = estado_con(Some(c));
+        let t = std::time::Instant::now();
+        assert!(stop_node_and_wait_max(&s, Duration::from_secs(30)), "closed by itself: it must say true");
+        assert!(t.elapsed() < Duration::from_secs(5),
+                "no puede esperar el plazo completo cuando el proceso ya se fue");
+        assert!(s.child.lock().unwrap().is_none(), "el proceso terminado no se guarda");
+    }
+
+    #[test]
+    fn sin_nodo_lanzado_no_falla() {
+        let s = estado_con(None);
+        assert!(stop_node_and_wait_max(&s, Duration::from_secs(1)),
+                "if a node was never started, there is nothing to wait for");
     }
 }
