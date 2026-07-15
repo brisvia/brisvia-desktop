@@ -83,23 +83,6 @@ jobs:
             -DBRISVIA_RANDOMX_INCLUDE="$PWD/src/randomx/src"
           cmake --build build --target bitcoind bitcoin-cli -j3
 
-      - name: Guard - el nodo no puede depender de Homebrew
-        run: |
-          # Este guard nace de un P0 real: cmake enlazaba el nodo contra /opt/homebrew/opt/libevent porque
-          # el runner tiene Homebrew. Un usuario de Mac NO lo tiene y el nodo moria con "Abort trap: 6".
-          # Ejecutarlo en el runner no lo detecta (ahi la ruta existe): hay que mirar contra que quedo atado.
-          NODE=src-tauri/binaries/bitcoind
-          echo "--- otool -L ---"; otool -L "$NODE" || true
-          if otool -L "$NODE" | grep -qE "/opt/homebrew|/usr/local"; then
-            echo "FALLO: el nodo esta enlazado contra Homebrew. En un Mac sin Homebrew no arranca."
-            echo "       Compilar con el toolchain de depends, no contra las libs del runner."
-            exit 1
-          fi
-          if otool -L "$NODE" | grep -qi "libevent"; then
-            echo "FALLO: el nodo depende de libevent dinamica"; exit 1
-          fi
-          echo "OK: solo librerias del sistema; nada de Homebrew"
-
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -184,6 +167,21 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm install
+
+      - name: Guard - el nodo solo puede depender de librerias del sistema
+        run: |
+          # ALLOWLIST: solo /usr/lib y /System/Library, que estan en TODA Mac. Cualquier otra ruta
+          # (Homebrew, /usr/local, el workspace) no existe en la maquina del usuario.
+          NODE=src-tauri/binaries/bitcoind
+          echo "--- otool -L ---"; otool -L "$NODE"
+          MALAS=$(otool -L "$NODE" | tail -n +2 | awk '{print $1}'                   | grep -vE "^/usr/lib/|^/System/Library/" || true)
+          if [ -n "$MALAS" ]; then
+            echo "FALLO: el nodo depende de librerias fuera del sistema:"; echo "$MALAS"
+            echo "       En una Mac sin Homebrew no arranca. Compilar con el toolchain de depends."
+            exit 1
+          fi
+          echo "--- arquitectura real ---"; file "$NODE"; lipo -info "$NODE" || true
+          echo "OK: solo /usr/lib y /System/Library"
 
       - name: Build the Tauri app (.dmg + signed updater artifact)
         run: npm run tauri build -- --features mainnet

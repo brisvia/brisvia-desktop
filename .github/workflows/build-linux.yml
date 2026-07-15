@@ -91,26 +91,6 @@ jobs:
             -DBRISVIA_RANDOMX_INCLUDE="$PWD/src/randomx/src"
           cmake --build build --target bitcoind bitcoin-cli -j3
 
-      - name: Guard - el nodo no puede depender de librerias que el usuario no tiene
-        run: |
-          # Este guard nace de un P0 real: el nodo salia enlazado contra las libs del runner y moria en la
-          # maquina del usuario con "libevent_extra-2.1.so.7 => not found". El runner TIENE esas libs, asi
-          # que ldd sin errores no alcanza: hay que exigir que libevent NO aparezca como dependencia.
-          NODE=src-tauri/binaries/bitcoind
-          echo "--- ldd ---"; ldd "$NODE" || true
-          if ldd "$NODE" | grep -qi "libevent"; then
-            echo "FALLO: el nodo depende de libevent dinamica. El usuario no la tiene: no va a arrancar."
-            echo "       Compilar con el toolchain de depends (su receta fuerza EVENT__LIBRARY_TYPE=STATIC)."
-            exit 1
-          fi
-          if ldd "$NODE" | grep -qi "not found"; then
-            echo "FALLO: al nodo le faltan librerias"; exit 1
-          fi
-          if ldd "$NODE" | grep -qiE "/home/runner|/opt/hostedtoolcache|$PWD"; then
-            echo "FALLO: el nodo apunta a una ruta del runner: no existe en la maquina del usuario"; exit 1
-          fi
-          echo "OK: sin libevent dinamica, sin faltantes, sin rutas del runner"
-
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -195,6 +175,33 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm install
+
+      - name: Guard - el nodo solo puede depender de librerias que TODA maquina tiene
+        run: |
+          # ALLOWLIST, no denylist. Buscar solo "libevent" seria apuntar al ultimo bug conocido; el
+          # proximo va a ser con otra libreria. Se declara lo PERMITIDO y se rechaza todo lo demas.
+          # Allowed: only what any Linux ships (glibc and company). Todo lo de terceros
+          # (libevent, boost, sqlite...) tiene que ir ADENTRO del binario, via depends.
+          NODE=src-tauri/binaries/bitcoind
+          echo "--- ldd ---"; ldd "$NODE" || true
+          PERMITIDAS="linux-vdso libc libm libgcc_s libstdc++ libpthread libdl librt ld-linux libatomic libresolv"
+          MALAS=""
+          while read -r lib resto; do
+            case "$lib" in ""|"statically"|"linux-vdso.so.1") continue ;; esac
+            base=$(echo "$lib" | sed -E 's/-[0-9].*//; s/\.so.*//')
+            ok=0
+            for p in $PERMITIDAS; do [ "$base" = "$p" ] && ok=1 && break; done
+            [ "$ok" -eq 0 ] && MALAS="$MALAS $lib"
+          done < <(ldd "$NODE" | awk '{print $1}')
+          if [ -n "$MALAS" ]; then
+            echo "FALLO: el nodo depende de librerias que el usuario puede no tener:$MALAS"
+            echo "       Todo lo de terceros debe ir dentro del binario (toolchain de depends)."
+            exit 1
+          fi
+          ldd "$NODE" | grep -qi "not found" && { echo "FALLO: faltan librerias"; exit 1; } || true
+          ldd "$NODE" | grep -qiE "/home/runner|/opt/hostedtoolcache" && { echo "FALLO: apunta a una ruta del runner"; exit 1; } || true
+          echo "--- readelf: dependencias declaradas ---"; readelf -d "$NODE" | grep NEEDED || true
+          echo "OK: solo librerias del sistema; nada de terceros, nada del runner"
 
       - name: Build the Tauri app (.AppImage + .deb + signed updater artifact)
         run: npm run tauri build -- --features mainnet
