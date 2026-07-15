@@ -1,33 +1,45 @@
 name: Diagnose Windows test loader failure
 
-# Disposable diagnostic. Builds nothing that ships, publishes nothing, touches no tag.
+# Disposable diagnostic. Builds nothing that ships, publishes nothing, touches no tag, fixes nothing.
+# Read-only permissions on purpose: this workflow has no business writing anywhere.
 #
-# WHAT IT IS FOR
-# --------------
+# THE QUESTION
+# ------------
 # rc6's Windows job died at the Rust test step:
 #
 #   brisvia_miner_lib-2916f99034f113b9.exe wallet_key_tests --nocapture
 #   (exit code: 0xc0000139, STATUS_ENTRYPOINT_NOT_FOUND)
 #
-# rc4 and rc5 passed that same step; rc6 failed. Bisection therefore bounds the regression to the change
-# between rc5 and rc6. The MECHANISM is not proven, and that is what this workflow is for.
+# rc4 and rc5 passed that same step, so bisection narrows the regression to the rc5-rc6 change set. The
+# MECHANISM is not proven, and that is the only thing this workflow is for.
 #
-# What 0xc0000139 actually means, precisely: Windows loaded a DLL and could NOT find inside it a
-# procedure the executable imports. It is NOT "a DLL is missing" -- that would be 0xc0000135. So the
-# honest statement is: the new test executable imports a function that does not exist in the version of
-# some DLL that Windows resolves. Which DLL, and which function, is unknown so far.
+# 0xc0000139 means Windows loaded a DLL and could not find inside it a procedure the executable imports.
+# It is NOT "a DLL is missing" -- that is 0xc0000135. The honest statement is: the new test executable
+# imports a function that does not exist in the version of some DLL Windows resolves. Which DLL and
+# which function are unknown.
 #
 # `wallet_key_tests` in the message does not incriminate that test. Cargo builds ONE executable for the
 # whole library and applies the name filter at run time. If the loader cannot start the .exe, no test
-# runs at all -- the first name on the list is simply the one it was about to try.
+# runs at all -- that name is just the one it was about to try.
 #
-# HOW IT PROVES IT
-# ----------------
-# Both tags are built on the SAME runner, same Rust, same environment, caches off. Anything that differs
-# between the two binaries is then attributable to the source change and to nothing else -- which is the
-# whole point, and why this cannot be done by comparing a local build against a CI one.
+# WHY THE FIRST TWO ATTEMPTS WERE WORTHLESS
+# -----------------------------------------
+# They did not reproduce the real job. Five differences, every one of them mine:
 #
-# Nothing is fixed here. It reports; someone reads it and then decides.
+#   windows-latest instead of windows-2022   a different image entirely
+#   RandomX never built                      so RANDOMX_LIB was never set
+#   RANDOMX_LIB_DIR absent                   this is what made build.rs fail
+#   --features mainnet omitted               not even the same binary
+#   two parallel trees, different cwd        relative paths resolve elsewhere
+#
+# It was not compiling what it claimed to compare. Everything below is copied from the real job that
+# built rc5 successfully. Nothing is simplified because it "looks unnecessary": reproducibility gets
+# proven first and optimised never.
+#
+# THE GATE
+# --------
+# If rc5 does not build and list its tests here, this diagnostic is STILL invalid and it stops. Running
+# dumpbin over two broken things proves nothing.
 
 on:
   workflow_dispatch:
@@ -41,158 +53,259 @@ on:
         required: true
         default: "v1.0.6-rc6"
 
+permissions:
+  contents: read
+
 jobs:
   compare:
-    runs-on: windows-latest
+    # windows-2022, same as the real job. windows-latest is a moving target and was one of the five
+    # differences that made the earlier attempts meaningless.
+    runs-on: windows-2022
     steps:
-      - name: Toolchain, pinned so the two builds differ only in source
-        uses: dtolnay/rust-toolchain@stable
-
       - name: MSVC tools (dumpbin lives here)
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Record the environment once, since both builds share it
+      - name: Rust, once, so both halves get the identical toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Record the environment both halves share
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path evidence | Out-Null
-          $env:PATH | Out-File evidence/PATH.txt
-          rustc -Vv    | Tee-Object evidence/rustc.txt
-          cargo -V     | Tee-Object evidence/cargo.txt
-          Write-Host "runner: $env:RUNNER_OS $env:RUNNER_ARCH  image: $env:ImageOS $env:ImageVersion"
-          "runner=$env:RUNNER_OS $env:RUNNER_ARCH image=$env:ImageOS $env:ImageVersion" |
-            Out-File evidence/runner.txt
+          New-Item -ItemType Directory -Force -Path C:\evidence | Out-Null
+          rustc -Vv | Tee-Object C:\evidence\rustc.txt
+          cargo -V  | Tee-Object C:\evidence\cargo.txt
+          $env:PATH | Out-File C:\evidence\PATH.txt
+          "image=$env:ImageOS $env:ImageVersion runner=$env:RUNNER_OS $env:RUNNER_ARCH" |
+            Tee-Object C:\evidence\runner.txt
 
-      # Each tag gets its own checkout and its own target dir. No shared cache: a cache would let one
-      # build reuse artifacts from the other, and then a difference could come from the cache rather
-      # than from the source, which is exactly what must not happen here.
-      - name: Check out the baseline
+      # ============================== BASELINE ==============================
+      # Both halves build one after the other in the SAME physical path. Two parallel trees would put
+      # src-tauri at a different depth, and tauri.conf.json resolves frontendDist as ../src/renderer --
+      # relative. Same path, in sequence, removes that as a variable.
+      - name: BASELINE - check out the tag that passes
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.good_tag }}
-          path: good
+          clean: true
 
-      - name: Check out the failing one
+      - name: BASELINE - check out core (with the RandomX submodule)
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.bad_tag }}
-          path: bad
+          repository: brisvia/brisvia
+          submodules: recursive
+          path: core
 
-      - name: Build both test executables (no run)
+      - name: BASELINE - build RandomX
+        shell: pwsh
+        run: |
+          # Copied from the real job. Static MSVC runtime (MultiThreaded) to match the vs2022-static
+          # preset; otherwise the final link fails with LNK1169 (multiply defined symbols from libucrt).
+          cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release -DARCH=default -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          cmake --build core/src/randomx/build --config Release -j
+          $rx = Get-ChildItem -Path core/src/randomx/build -Recurse -Filter randomx.lib | Select-Object -First 1
+          if (-not $rx) { throw "INVALID DIAGNOSTIC: RandomX did not produce randomx.lib" }
+          echo "RANDOMX_LIB=$($rx.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "RANDOMX_LIB=$($rx.FullName)"
+
+      - name: BASELINE - build the test executable (no run)
         shell: pwsh
         env:
           CARGO_INCREMENTAL: 0
         run: |
-          # --no-run stops before executing: what is wanted is the binary, not a verdict.
-          # --message-format=json is how cargo says WHERE it put it. Guessing the path from the target
-          # dir would work until the hash in the filename changes, which is precisely when it matters.
-          foreach ($v in @('good', 'bad')) {
-            Write-Host "=== building $v ==="
-            Push-Location "$v/src-tauri"
-            $json = cargo test --lib --no-run --message-format=json
-            Pop-Location
-            # The marker is profile.test, not target.test. target.test says the target CAN be tested;
-            # profile.test says THIS artifact was built as a test binary. Asking for the wrong one found
-            # nothing and this step threw after a clean 3.5-minute build -- a bug in the diagnostic, not
-            # in what it was diagnosing.
-            $exe = $null
-            $vistos = 0
-            foreach ($line in $json) {
-              if ($line -notmatch '^\s*\{') { continue }
-              try { $m = $line | ConvertFrom-Json } catch { continue }
-              if ($m.reason -eq 'compiler-artifact' -and $m.executable) {
-                $vistos++
-                if ($m.profile.test -eq $true) { $exe = $m.executable }
-              }
+          # RANDOMX_LIB_DIR is what the real job sets before touching cargo, and its absence is exactly
+          # what made the previous attempt die with "failed to run custom build command". --features
+          # mainnet and --manifest-path come from the real job too: without them this builds a different
+          # binary and compares nothing.
+          $env:RANDOMX_LIB_DIR = (Split-Path $env:RANDOMX_LIB)
+          "tag=${{ inputs.good_tag }}"           | Tee-Object -Append C:\evidence\good-env.txt
+          "sha=$(git rev-parse HEAD)"            | Tee-Object -Append C:\evidence\good-env.txt
+          "cwd=$PWD"                             | Tee-Object -Append C:\evidence\good-env.txt
+          "RANDOMX_LIB=$env:RANDOMX_LIB"         | Tee-Object -Append C:\evidence\good-env.txt
+          "RANDOMX_LIB_DIR=$env:RANDOMX_LIB_DIR" | Tee-Object -Append C:\evidence\good-env.txt
+
+          $json = cargo test --manifest-path src-tauri/Cargo.toml --features mainnet --lib --no-run --message-format=json
+          $json | Out-File C:\evidence\good-cargo-json.txt
+
+          # profile.test marks THIS artifact as a test binary. target.test only says a target CAN be
+          # tested -- filtering on that matched nothing and cost a whole run.
+          $found = @()
+          foreach ($line in $json) {
+            if ($line -notmatch '^\s*\{') { continue }
+            try { $m = $line | ConvertFrom-Json } catch { continue }
+            if ($m.reason -eq 'compiler-artifact' -and $m.executable -and $m.profile.test -eq $true) {
+              $found += $m.executable
             }
-            if (-not $exe) {
-              Write-Host "artifacts with an executable: $vistos"
-              $json | Select-String '"executable"' | Select-Object -First 5 | ForEach-Object { Write-Host "  $_" }
-              throw "FAIL: cargo reported no test executable for $v"
+          }
+          if ($found.Count -eq 0) {
+            Write-Host "artifacts cargo did report:"
+            $json | Select-String '"executable":"' | Select-Object -First 5 | ForEach-Object { Write-Host "  $_" }
+            throw "INVALID DIAGNOSTIC: the baseline built no test executable. Nothing to compare."
+          }
+          if ($found.Count -gt 1) {
+            $found | ForEach-Object { Write-Host "  $_" }
+            throw "INVALID DIAGNOSTIC: $($found.Count) test executables; cannot tell which one is under test."
+          }
+          $exe = $found[0]
+          Copy-Item $exe C:\evidence\test-good.exe
+          $h = (Get-FileHash $exe -Algorithm SHA256).Hash
+          "exe=$exe" | Tee-Object -Append C:\evidence\good-env.txt
+          "size=$((Get-Item $exe).Length)" | Tee-Object -Append C:\evidence\good-env.txt
+          "sha256=$h" | Tee-Object -Append C:\evidence\good-env.txt
+          Get-ChildItem (Split-Path $exe) -Filter *.dll -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.Name } | Out-File C:\evidence\good-dlls-next-to-exe.txt
+
+      - name: BASELINE - does it load? (--list)
+        shell: pwsh
+        run: |
+          # THE gate. --list needs the executable to LOAD but runs no test.
+          & C:\evidence\test-good.exe --list 2>&1 | Tee-Object C:\evidence\good-list.txt | Select-Object -First 10
+          $c = $LASTEXITCODE
+          $hex = '0x{0:X8}' -f $c
+          "exit=$c hex=$hex" | Tee-Object -Append C:\evidence\good-list.txt
+          if ($c -ne 0) {
+            throw "INVALID DIAGNOSTIC: the baseline does not load either (exit $c / $hex). The environment still differs from the real job. Find that difference before comparing anything."
+          }
+          Write-Host "the baseline loads and lists its tests. Gate open."
+
+      - name: BASELINE - what it imports
+        shell: pwsh
+        run: |
+          dumpbin /DEPENDENTS C:\evidence\test-good.exe > C:\evidence\dependents-good.txt 2>&1
+          dumpbin /IMPORTS    C:\evidence\test-good.exe > C:\evidence\imports-good.txt    2>&1
+
+      - name: Wipe the workspace between halves
+        shell: pwsh
+        run: |
+          # Everything of the baseline goes, so none of it can be mistaken for the candidate's later.
+          Get-ChildItem -Path . -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          $left = @(Get-ChildItem -Path . -Force -ErrorAction SilentlyContinue).Count
+          Write-Host "files left in the workspace: $left"
+          if ($left -gt 0) { throw "the workspace is not clean; the candidate would build on top of the baseline" }
+
+      # ============================== CANDIDATE ==============================
+      - name: CANDIDATE - check out the tag that fails
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.bad_tag }}
+          clean: true
+
+      - name: CANDIDATE - check out core (with the RandomX submodule)
+        uses: actions/checkout@v4
+        with:
+          repository: brisvia/brisvia
+          submodules: recursive
+          path: core
+
+      - name: CANDIDATE - build RandomX
+        shell: pwsh
+        run: |
+          cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release -DARCH=default -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          cmake --build core/src/randomx/build --config Release -j
+          $rx = Get-ChildItem -Path core/src/randomx/build -Recurse -Filter randomx.lib | Select-Object -First 1
+          if (-not $rx) { throw "RandomX did not produce randomx.lib" }
+          echo "RANDOMX_LIB=$($rx.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "RANDOMX_LIB=$($rx.FullName)"
+
+      - name: CANDIDATE - build the test executable (no run)
+        shell: pwsh
+        env:
+          CARGO_INCREMENTAL: 0
+        run: |
+          $env:RANDOMX_LIB_DIR = (Split-Path $env:RANDOMX_LIB)
+          "tag=${{ inputs.bad_tag }}"            | Tee-Object -Append C:\evidence\bad-env.txt
+          "sha=$(git rev-parse HEAD)"            | Tee-Object -Append C:\evidence\bad-env.txt
+          "cwd=$PWD"                             | Tee-Object -Append C:\evidence\bad-env.txt
+          "RANDOMX_LIB=$env:RANDOMX_LIB"         | Tee-Object -Append C:\evidence\bad-env.txt
+          "RANDOMX_LIB_DIR=$env:RANDOMX_LIB_DIR" | Tee-Object -Append C:\evidence\bad-env.txt
+
+          $json = cargo test --manifest-path src-tauri/Cargo.toml --features mainnet --lib --no-run --message-format=json
+          $json | Out-File C:\evidence\bad-cargo-json.txt
+          $found = @()
+          foreach ($line in $json) {
+            if ($line -notmatch '^\s*\{') { continue }
+            try { $m = $line | ConvertFrom-Json } catch { continue }
+            if ($m.reason -eq 'compiler-artifact' -and $m.executable -and $m.profile.test -eq $true) {
+              $found += $m.executable
             }
-            Write-Host "  $v -> $exe"
-            "$v=$exe" | Out-File -Append evidence/exe-paths.txt
-            if ($v -eq 'good') { "EXE_GOOD=$exe" | Out-File -Append $env:GITHUB_ENV }
-            else               { "EXE_BAD=$exe"  | Out-File -Append $env:GITHUB_ENV }
           }
+          if ($found.Count -ne 1) { throw "the candidate reported $($found.Count) test executables, expected exactly 1" }
+          $exe = $found[0]
+          Copy-Item $exe C:\evidence\test-bad.exe
+          $h = (Get-FileHash $exe -Algorithm SHA256).Hash
+          "exe=$exe" | Tee-Object -Append C:\evidence\bad-env.txt
+          "size=$((Get-Item $exe).Length)" | Tee-Object -Append C:\evidence\bad-env.txt
+          "sha256=$h" | Tee-Object -Append C:\evidence\bad-env.txt
+          Get-ChildItem (Split-Path $exe) -Filter *.dll -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.Name } | Out-File C:\evidence\bad-dlls-next-to-exe.txt
 
-      - name: Identity of each executable
-        shell: pwsh
-        run: |
-          foreach ($p in @(@{n='good'; e=$env:EXE_GOOD}, @{n='bad'; e=$env:EXE_BAD})) {
-            $f = Get-Item $p.e
-            $h = (Get-FileHash $p.e -Algorithm SHA256).Hash
-            Write-Host "$($p.n): $($f.Length) bytes  SHA256=$h"
-            "$($p.n)  $($f.Length)  $h  $($p.e)" | Out-File -Append evidence/identity.txt
-            # DLLs sitting next to the binary: the loader looks there first, so this is part of the
-            # environment the executable actually starts in.
-            Get-ChildItem $f.DirectoryName -Filter *.dll -ErrorAction SilentlyContinue |
-              ForEach-Object { "$($p.n)  $($_.Name)  $($_.Length)" } |
-              Out-File -Append evidence/dlls-next-to-exe.txt
-          }
-
-      # THE decisive step. If the baseline lists its tests and the other one dies with 0xc0000139
-      # before running a single one, the failure belongs to loading the executable -- not to the logic
-      # of any test, and not to wallet_key_tests in particular.
-      - name: Can each executable even start? (--list)
-        shell: pwsh
-        run: |
-          foreach ($p in @(@{n='good'; e=$env:EXE_GOOD}, @{n='bad'; e=$env:EXE_BAD})) {
-            Write-Host "=== $($p.n) --list ==="
-            & $p.e --list 2>&1 | Select-Object -First 12 | Tee-Object -Append evidence/list-$($p.n).txt
-            $code = $LASTEXITCODE
-            $hex = '0x{0:X8}' -f $code
-            Write-Host "  exit code: $code  ($hex)"
-            "$($p.n) exit=$code hex=$hex" | Out-File -Append evidence/list-exit-codes.txt
-          }
-          Write-Host "`n--- what this shows ---"
-          Write-Host "baseline starting + the other dying here = a load failure, before any test runs."
-
-      - name: What each executable imports
-        shell: pwsh
-        run: |
-          foreach ($p in @(@{n='good'; e=$env:EXE_GOOD}, @{n='bad'; e=$env:EXE_BAD})) {
-            dumpbin /DEPENDENTS $p.e > "evidence/dependents-$($p.n).txt" 2>&1
-            dumpbin /IMPORTS    $p.e > "evidence/imports-$($p.n).txt"    2>&1
-          }
-          Write-Host "=== DLLs the failing one needs and the baseline does not ==="
-          $g = (Select-String -Path evidence/dependents-good.txt -Pattern '^\s+(\S+\.dll)$' -AllMatches).Matches.Groups[1].Value
-          $b = (Select-String -Path evidence/dependents-bad.txt  -Pattern '^\s+(\S+\.dll)$' -AllMatches).Matches.Groups[1].Value
-          $nuevas = Compare-Object $g $b | Where-Object SideIndicator -eq '=>' | ForEach-Object InputObject
-          if ($nuevas) { $nuevas | ForEach-Object { Write-Host "  NEW: $_" } } else { Write-Host "  (none)" }
-          $nuevas | Out-File evidence/new-dlls.txt
-
-          Write-Host "`n=== imported functions the failing one has and the baseline does not ==="
-          # /IMPORTS lists each function under its DLL. A diff of those lines is the evidence that
-          # matters for 0xc0000139: the error is about a FUNCTION, not about a file.
-          $fg = Get-Content evidence/imports-good.txt | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[0-9A-F]+\s+\w' }
-          $fb = Get-Content evidence/imports-bad.txt  | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[0-9A-F]+\s+\w' }
-          $df = Compare-Object $fg $fb | Where-Object SideIndicator -eq '=>' | ForEach-Object InputObject
-          Write-Host "  $($df.Count) new imported symbols"
-          $df | Select-Object -First 40 | ForEach-Object { Write-Host "    $_" }
-          $df | Out-File evidence/new-imports.txt
-
-      - name: For every new DLL, does it export what is being asked of it?
+      - name: CANDIDATE - does it load? (--list)
         shell: pwsh
         continue-on-error: true
         run: |
-          # The proof is a pair: the executable imports FunctionX from LibraryY.dll, and the LibraryY.dll
-          # that Windows actually resolves does not export FunctionX. Anything less is still a guess.
-          if (-not (Test-Path evidence/new-dlls.txt)) { Write-Host "no new DLLs"; exit 0 }
-          foreach ($d in (Get-Content evidence/new-dlls.txt | Where-Object { $_ })) {
+          # The point of the whole workflow. Non-zero here with the baseline at zero proves the failure
+          # belongs to LOADING the executable, not to any test's logic.
+          & C:\evidence\test-bad.exe --list 2>&1 | Tee-Object C:\evidence\bad-list.txt | Select-Object -First 10
+          $c = $LASTEXITCODE
+          $hex = '0x{0:X8}' -f $c
+          "exit=$c hex=$hex" | Tee-Object -Append C:\evidence\bad-list.txt
+          Write-Host "candidate exit: $c ($hex)"
+          if ($hex -eq '0xC0000139')  { Write-Host "REPRODUCED: the same loader failure as the real job." }
+          elseif ($c -eq 0)           { Write-Host "IT LOADS HERE. Then the real job's failure needs another explanation." }
+          else                        { Write-Host "a different failure ($hex): not the one under investigation." }
+
+      - name: CANDIDATE - what it imports
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          dumpbin /DEPENDENTS C:\evidence\test-bad.exe > C:\evidence\dependents-bad.txt 2>&1
+          dumpbin /IMPORTS    C:\evidence\test-bad.exe > C:\evidence\imports-bad.txt    2>&1
+
+      - name: What the candidate asks for and the baseline does not
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Write-Host "=== DLLs only the candidate needs ==="
+          $rxDll = '^\s+(\S+\.dll)\s*$'
+          $g = @(Select-String -Path C:\evidence\dependents-good.txt -Pattern $rxDll | ForEach-Object { $_.Matches.Groups[1].Value })
+          $b = @(Select-String -Path C:\evidence\dependents-bad.txt  -Pattern $rxDll | ForEach-Object { $_.Matches.Groups[1].Value })
+          $new = @(Compare-Object $g $b | Where-Object { $_.SideIndicator -eq '=>' } | ForEach-Object { $_.InputObject })
+          if ($new.Count -gt 0) { $new | ForEach-Object { Write-Host "  NEW: $_" } } else { Write-Host "  (none)" }
+          $new | Out-File C:\evidence\new-dlls.txt
+
+          # /IMPORTS is the evidence that matters: 0xc0000139 is about a FUNCTION, not about a file.
+          Write-Host "=== imported symbols only the candidate has ==="
+          $rxSym = '^\s+[0-9A-F]{1,8}\s+(\w\S*)\s*$'
+          $fg = @(Select-String -Path C:\evidence\imports-good.txt -Pattern $rxSym | ForEach-Object { $_.Matches.Groups[1].Value })
+          $fb = @(Select-String -Path C:\evidence\imports-bad.txt  -Pattern $rxSym | ForEach-Object { $_.Matches.Groups[1].Value })
+          $df = @(Compare-Object $fg $fb | Where-Object { $_.SideIndicator -eq '=>' } | ForEach-Object { $_.InputObject })
+          Write-Host "  $($df.Count) new imported symbols"
+          $df | Select-Object -First 40 | ForEach-Object { Write-Host "    $_" }
+          $df | Out-File C:\evidence\new-imports.txt
+
+      - name: For each new DLL, does the copy Windows resolves export what is asked?
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          # The proof is a PAIR: the executable imports FunctionX from LibraryY.dll, and the LibraryY.dll
+          # Windows actually resolves does not export FunctionX. Anything short of that is a guess, and
+          # guesses have already cost six corrections today.
+          if (-not (Test-Path C:\evidence\new-dlls.txt)) { Write-Host "no new DLLs"; exit 0 }
+          foreach ($d in (Get-Content C:\evidence\new-dlls.txt | Where-Object { $_ })) {
             $real = (Get-Command $d -ErrorAction SilentlyContinue).Source
             if (-not $real) {
-              $near = Join-Path (Split-Path $env:EXE_BAD) $d
+              $near = Join-Path (Split-Path C:\evidence\test-bad.exe) $d
               if (Test-Path $near) { $real = $near }
             }
             if ($real) {
               $h = (Get-FileHash $real -Algorithm SHA256).Hash
               $v = (Get-Item $real).VersionInfo.FileVersion
-              Write-Host "$d -> $real  (version $v, SHA256 $h)"
-              "$d  $real  $v  $h" | Out-File -Append evidence/resolved-dlls.txt
-              dumpbin /EXPORTS $real > "evidence/exports-$($d -replace '\.dll$','').txt" 2>&1
+              Write-Host "$d -> $real (version $v, sha256 $h)"
+              "$d $real $v $h" | Out-File -Append C:\evidence\resolved-dlls.txt
+              $out = "C:\evidence\exports-" + ($d -replace '\.dll$', '') + ".txt"
+              dumpbin /EXPORTS $real > $out 2>&1
             } else {
               Write-Host "$d -> NOT FOUND on PATH or next to the executable"
-              "$d  NOT-FOUND" | Out-File -Append evidence/resolved-dlls.txt
+              "$d NOT-FOUND" | Out-File -Append C:\evidence\resolved-dlls.txt
             }
           }
 
@@ -201,4 +314,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-loader-evidence
-          path: evidence/
+          path: C:\evidence\
