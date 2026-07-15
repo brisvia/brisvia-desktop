@@ -76,11 +76,37 @@ jobs:
       - name: Build bitcoind and bitcoin-cli
         run: |
           cd core
-          cmake -B build \
+          # Las dependencias se construyen con el sistema `depends` de Core, que existe justamente para esto:
+          # su receta de libevent fuerza EVENT__LIBRARY_TYPE=STATIC. Antes se compilaba contra las libs del
+          # runner, asi que el nodo salia atado a paquetes que la maquina del usuario no tiene y moria con
+          # "libevent_extra-2.1.so.7 => not found". Un nodo que no arranca es una app que no puede minar.
+          # Encontrado ejecutando el nodo extraido del .deb ya instalado, no leyendo el codigo.
+          make -C depends -j"$(nproc)" HOST=x86_64-pc-linux-gnu NO_QT=1 NO_ZMQ=1 NO_IPC=1
+          cmake -B build --toolchain depends/x86_64-pc-linux-gnu/toolchain.cmake -DBUILD_SHARED_LIBS=OFF \
             -DENABLE_IPC=OFF -DBUILD_TESTS=OFF -DBUILD_GUI=OFF -DWITH_ZMQ=OFF -DBUILD_BENCH=OFF \
             -DBRISVIA_RANDOMX_LIB="$PWD/src/randomx/build/librandomx.a" \
             -DBRISVIA_RANDOMX_INCLUDE="$PWD/src/randomx/src"
           cmake --build build --target bitcoind bitcoin-cli -j3
+
+      - name: Guard - el nodo no puede depender de librerias que el usuario no tiene
+        run: |
+          # Este guard nace de un P0 real: el nodo salia enlazado contra las libs del runner y moria en la
+          # maquina del usuario con "libevent_extra-2.1.so.7 => not found". El runner TIENE esas libs, asi
+          # que ldd sin errores no alcanza: hay que exigir que libevent NO aparezca como dependencia.
+          NODE=src-tauri/binaries/bitcoind
+          echo "--- ldd ---"; ldd "$NODE" || true
+          if ldd "$NODE" | grep -qi "libevent"; then
+            echo "FALLO: el nodo depende de libevent dinamica. El usuario no la tiene: no va a arrancar."
+            echo "       Compilar con el toolchain de depends (su receta fuerza EVENT__LIBRARY_TYPE=STATIC)."
+            exit 1
+          fi
+          if ldd "$NODE" | grep -qi "not found"; then
+            echo "FALLO: al nodo le faltan librerias"; exit 1
+          fi
+          if ldd "$NODE" | grep -qiE "/home/runner|/opt/hostedtoolcache|$PWD"; then
+            echo "FALLO: el nodo apunta a una ruta del runner: no existe en la maquina del usuario"; exit 1
+          fi
+          echo "OK: sin libevent dinamica, sin faltantes, sin rutas del runner"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
