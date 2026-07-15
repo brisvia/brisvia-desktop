@@ -55,7 +55,7 @@ jobs:
 
       - name: Build RandomX (static lib)
         run: |
-          cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release -DARCH=native
+          cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release -DARCH=default   # portable: -march=native compilaria para el CPU del runner, no el del usuario
           cmake --build core/src/randomx/build -j3
 
       - name: Mark job start (used to prove the sidecar was built by THIS run)
@@ -67,11 +67,32 @@ jobs:
       - name: Build bitcoind and bitcoin-cli
         run: |
           cd core
-          cmake -B build \
+          # Igual que Linux, con `depends` en vez de Homebrew. El runner TIENE Homebrew (es una maquina de
+          # desarrollo) y cmake enlazaba el nodo contra /opt/homebrew/opt/libevent/... Un usuario de Mac no
+          # tiene Homebrew: el nodo moria con "Abort trap: 6" y la app abria sin poder minar.
+          gmake -C depends -j"$(sysctl -n hw.ncpu)" HOST=arm64-apple-darwin NO_QT=1 NO_ZMQ=1 NO_IPC=1
+          cmake -B build --toolchain depends/arm64-apple-darwin/toolchain.cmake -DBUILD_SHARED_LIBS=OFF \
             -DENABLE_IPC=OFF -DBUILD_TESTS=OFF -DBUILD_GUI=OFF -DWITH_ZMQ=OFF -DBUILD_BENCH=OFF \
             -DBRISVIA_RANDOMX_LIB="$PWD/src/randomx/build/librandomx.a" \
             -DBRISVIA_RANDOMX_INCLUDE="$PWD/src/randomx/src"
           cmake --build build --target bitcoind bitcoin-cli -j3
+
+      - name: Guard - el nodo no puede depender de Homebrew
+        run: |
+          # Este guard nace de un P0 real: cmake enlazaba el nodo contra /opt/homebrew/opt/libevent porque
+          # el runner tiene Homebrew. Un usuario de Mac NO lo tiene y el nodo moria con "Abort trap: 6".
+          # Ejecutarlo en el runner no lo detecta (ahi la ruta existe): hay que mirar contra que quedo atado.
+          NODE=src-tauri/binaries/bitcoind
+          echo "--- otool -L ---"; otool -L "$NODE" || true
+          if otool -L "$NODE" | grep -qE "/opt/homebrew|/usr/local"; then
+            echo "FALLO: el nodo esta enlazado contra Homebrew. En un Mac sin Homebrew no arranca."
+            echo "       Compilar con el toolchain de depends, no contra las libs del runner."
+            exit 1
+          fi
+          if otool -L "$NODE" | grep -qi "libevent"; then
+            echo "FALLO: el nodo depende de libevent dinamica"; exit 1
+          fi
+          echo "OK: solo librerias del sistema; nada de Homebrew"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
