@@ -168,26 +168,16 @@ jobs:
       - name: Install frontend dependencies
         run: npm install
 
-      - name: Guard - el nodo solo puede depender de librerias del sistema
+      - name: Guard - el nodo tiene que abrir en la Mac de un usuario, no solo en esta
         run: |
-          # ALLOWLIST: solo /usr/lib y /System/Library, que estan en TODA Mac. Cualquier otra ruta
-          # (Homebrew, /usr/local, el workspace) no existe en la maquina del usuario.
-          NODE=src-tauri/binaries/bitcoind
-          # Si el archivo no esta, el guard FALLA. Sin esto pasa lo peor que puede pasarle a un candado:
-          # cuando el binario no existe, la herramienta falla, el grep no encuentra nada, el if no se
-          # cumple y el guard dice OK. Verde sin haber verificado nada. Paso de verdad: el guard estaba
-          # mal ubicado (antes del staging) y dio "success" mirando un archivo inexistente.
-          [ -f "$NODE" ] || { echo "FALLO: no existe $NODE. El guard no puede verificar nada."; exit 1; }
-          [ -s "$NODE" ] || { echo "FALLO: $NODE esta vacio"; exit 1; }
-          echo "--- otool -L ---"; otool -L "$NODE"
-          MALAS=$(otool -L "$NODE" | tail -n +2 | awk '{print $1}'                   | grep -vE "^/usr/lib/|^/System/Library/" || true)
-          if [ -n "$MALAS" ]; then
-            echo "FALLO: el nodo depende de librerias fuera del sistema:"; echo "$MALAS"
-            echo "       En una Mac sin Homebrew no arranca. Compilar con el toolchain de depends."
-            exit 1
-          fi
-          echo "--- arquitectura real ---"; file "$NODE"; lipo -info "$NODE" || true
-          echo "OK: solo /usr/lib y /System/Library"
+          # Mismo verificador que Linux y Windows: lee la estructura del Mach-O con lief en vez de
+          # parsear la salida de otool. Ademas del listado de librerias chequea el MINIMO DE macOS y la
+          # arquitectura real, que otool no dice y deciden si la app abre. Ver tools/check_portable.py.
+          python3 -m pip install --quiet --break-system-packages lief || python3 -m pip install --quiet lief
+          python3 tools/check_portable.py --self-test
+          python3 tools/check_portable.py src-tauri/binaries/bitcoind src-tauri/binaries/bitcoin-cli
+          echo "--- otool, para dejarlo en el registro ---"; otool -L src-tauri/binaries/bitcoind
+          echo "--- arquitectura ---"; file src-tauri/binaries/bitcoind; lipo -info src-tauri/binaries/bitcoind || true
 
       - name: Build the Tauri app (.dmg + signed updater artifact)
         run: npm run tauri build -- --features mainnet
