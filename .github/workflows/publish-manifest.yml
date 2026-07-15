@@ -56,3 +56,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python tools/check_updater.py "${{ steps.tag.outputs.tag }}"
+
+      # The website publishes a SHA-256 next to each download button and asks people to verify the file before
+      # running it. The buttons point at /releases/latest/, but the hashes are written BY HAND -- so publishing
+      # a version silently leaves the old ones there. All six were wrong when 1.0.5 went out: anyone who did
+      # the check the site itself asks for would conclude they had been handed a tampered file. The mechanism
+      # that exists to build trust was doing the opposite, and nothing said a word.
+      #
+      # This does NOT block the release (the site is deployed separately): it fails loudly so the hashes get
+      # fixed right after publishing, instead of being discovered by a user.
+      - name: Aviso - la web publica los hashes de ESTA version
+        continue-on-error: true
+        run: python tools/check_web_hashes.py
