@@ -296,7 +296,7 @@ jobs:
           # may have loaded perfectly was rejected. The helper takes the code from the process object and
           # never puts the executable in a pipeline; truncating for display happens afterwards and cannot
           # reach it. Proven by the preflight this job depends on.
-          . C:	ools\Invoke-NativeProcess.ps1
+          . "C:\tools\Invoke-NativeProcess.ps1"
           $r = Invoke-NativeProcess -FilePath C:\evidence\test-good.exe -Arguments @('--list') -OutputDir C:\evidence
           Write-NativeProcessReport -Result $r -PreviewLines 10
           $r | ConvertTo-Json -Depth 4 | Out-File C:\evidence\good-list.json
@@ -448,7 +448,7 @@ jobs:
           #
           # A loader failure produces no output at all: the process dies before reaching its own code. So
           # the exit code IS the evidence, which is exactly why it cannot be read through a pipeline.
-          . C:	ools\Invoke-NativeProcess.ps1
+          . "C:\tools\Invoke-NativeProcess.ps1"
           $r = Invoke-NativeProcess -FilePath C:\evidence\test-bad.exe -Arguments @('--list') -OutputDir C:\evidence
           Write-NativeProcessReport -Result $r -PreviewLines 10
           $r | ConvertTo-Json -Depth 4 | Out-File C:\evidence\bad-list.json
