@@ -1,0 +1,249 @@
+name: Publish approved release
+
+# El unico camino por el que la 1.0.6 puede llegar a la gente.
+#
+# NO CONFIA EN EL .BAT. El .bat corre en la maquina de Fernando y cualquiera con acceso a esa maquina
+# podria editarlo. Este workflow rehace TODAS las verificaciones de identidad por su cuenta. El .bat es
+# la mano que gira la llave; esta es la cerradura.
+#
+# Orden, y por que ese orden:
+#   1) verificar todo ANTES de publicar. Publicar es irreversible.
+#   2) publicar el borrador EXACTO. No recompilar, no reemplazar assets: los bytes aprobados son los que
+#      salen. Recompilar produciria bytes distintos de los que se probaron, y entonces las pruebas no
+#      valdrian para lo que la gente descarga.
+#   3) despues de publicar, bajar todo DE NUEVO y sin credenciales, como un desconocido, y volver a
+#      comparar. Publicar cambia la URL: la que se probo era la del borrador.
+#   4) recien ahi activar latest.json.
+#
+# Si algo falla DESPUES de publicar: NO se activa latest.json y el workflow queda en rojo. Una release
+# publicada que nadie recibe por el actualizador es un problema chico. Un actualizador que empuja una
+# version rota a todas las maquinas es un problema grande.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version exacta (ej: 1.0.6)"
+        required: true
+      tag:
+        description: "Tag inmutable del candidato aprobado (ej: v1.0.6-rc5)"
+        required: true
+      sha:
+        description: "SHA completo del commit aprobado (40 caracteres)"
+        required: true
+      manifest_sha256:
+        description: "SHA-256 de release-go-v1.0.6.json"
+        required: true
+      approval_sha256:
+        description: "SHA-256 de owner-approval-v1.0.6.json"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  publicar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Traer el repo en el punto aprobado
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 0
+
+      - name: Identidad — el SHA pedido es EXACTAMENTE el del tag aprobado?
+        run: |
+          set -euo pipefail
+          echo "::group::identidad"
+          TAG_SHA=$(git rev-list -n 1 "${{ inputs.tag }}")
+          echo "  tag ${{ inputs.tag }} -> $TAG_SHA"
+          echo "  sha pedido           -> ${{ inputs.sha }}"
+          [ "$TAG_SHA" = "${{ inputs.sha }}" ] || {
+            echo "RECHAZADO: el SHA pedido no es el del tag aprobado."; exit 1; }
+          # El tag tiene que existir de verdad y ser inmutable: si alguien lo movio, el SHA no coincide.
+          echo "  version en tauri.conf.json: $(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")"
+          python3 - <<'PY'
+          import json, os, sys
+          v = json.load(open("src-tauri/tauri.conf.json"))["version"]
+          if v != os.environ["V"]:
+              sys.exit(f"RECHAZADO: el codigo dice {v} y se pide publicar {os.environ['V']}")
+          print(f"  OK: el codigo del tag dice {v}")
+          PY
+          echo "::endgroup::"
+        env:
+          V: ${{ inputs.version }}
+
+      - name: main contiene el candidato?
+        run: |
+          set -euo pipefail
+          # Una moneda abierta tiene que poder reconstruirse desde su repo publico. Si main no tiene el
+          # arbol del candidato, lo que publicamos no es lo que cualquiera puede compilar.
+          git fetch -q origin main
+          MT=$(git rev-parse origin/main^{tree})
+          CT=$(git rev-parse "${{ inputs.sha }}^{tree}")
+          echo "  arbol de main:      $MT"
+          echo "  arbol del candidato: $CT"
+          [ "$MT" = "$CT" ] || {
+            echo "RECHAZADO: main NO tiene el arbol del candidato. No seria reproducible."; exit 1; }
+          echo "  OK: main es reproducible contra el candidato"
+
+      - name: El manifiesto GO no fue tocado, y dice GO
+        run: |
+          set -euo pipefail
+          M=release-go-${{ inputs.version && format('v{0}', inputs.version) }}.json
+          [ -f "$M" ] || { echo "RECHAZADO: falta $M en el repo"; exit 1; }
+          H=$(sha256sum "$M" | cut -d' ' -f1)
+          echo "  $M -> $H"
+          [ "$H" = "${{ inputs.manifest_sha256 }}" ] || {
+            echo "RECHAZADO: el manifiesto cambio despues de aprobarse."
+            echo "  esperado: ${{ inputs.manifest_sha256 }}"; exit 1; }
+          python3 - "$M" <<'PY'
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          if d.get("status") != "GO":
+              sys.exit(f"RECHAZADO: el manifiesto dice status={d.get('status')!r}, no GO")
+          faltan = [k for k in ("version", "tag", "commit_sha", "tree_sha", "assets", "gates",
+                                "repo", "generated_utc") if k not in d]
+          if faltan:
+              sys.exit(f"RECHAZADO: al manifiesto le faltan campos: {faltan}")
+          malas = [g for g, r in d["gates"].items() if r != "PASS"]
+          if malas:
+              sys.exit(f"RECHAZADO: hay compuertas que no pasaron: {malas}")
+          print(f"  OK: GO, {len(d['assets'])} assets, {len(d['gates'])} compuertas en PASS")
+          PY
+
+      - name: La release sigue en BORRADOR y no se publico antes? (idempotencia)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Idempotente: si ya esta publicada, esto PARA y lo explica. No republica ni pisa nada.
+          D=$(gh api repos/${{ github.repository }}/releases --jq \
+              '.[] | select(.tag_name=="v${{ inputs.version }}") | "\(.id) \(.draft)"')
+          [ -n "$D" ] || { echo "RECHAZADO: no existe la release v${{ inputs.version }}"; exit 1; }
+          ID=$(echo "$D" | cut -d' ' -f1); DR=$(echo "$D" | cut -d' ' -f2)
+          echo "  release id=$ID borrador=$DR"
+          if [ "$DR" != "true" ]; then
+            echo "PARADA: v${{ inputs.version }} YA ESTA PUBLICADA. No hay nada que hacer."
+            echo "        Esto no es un error: es el workflow negandose a repetir una operacion."
+            exit 1
+          fi
+          echo "RELEASE_ID=$ID" >> "$GITHUB_ENV"
+
+      - name: latest.json todavia ofrece la 1.0.5?
+        run: |
+          set -euo pipefail
+          # Si ya fue alterado, alguien publico por otro camino y este workflow no debe seguir.
+          C=$(curl -s -o /tmp/lj -w "%{http_code}" https://brisvia.com/latest.json || echo 000)
+          echo "  https://brisvia.com/latest.json -> $C"
+          if [ "$C" = "200" ]; then
+            V=$(python3 -c "import json;print(json.load(open('/tmp/lj')).get('version','?'))")
+            echo "  version que ofrece: $V"
+            [ "$V" != "${{ inputs.version }}" ] || {
+              echo "PARADA: latest.json YA ofrece la ${{ inputs.version }}."; exit 1; }
+          else
+            echo "  (no esta publicado todavia: correcto para este momento)"
+          fi
+
+      - name: Los assets del borrador son EXACTAMENTE los aprobados
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${{ github.repository }}/releases/$RELEASE_ID/assets" > /tmp/assets.json
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess, sys, urllib.request
+          man = json.load(open(f"release-go-v{os.environ['V']}.json"))
+          reales = {a["name"]: a for a in json.load(open("/tmp/assets.json"))}
+          esperados = {a["name"]: a for a in man["assets"]}
+          mal = []
+          for f in sorted(set(esperados) - set(reales)):
+              mal.append(f"FALTA en el borrador: {f}")
+          for f in sorted(set(reales) - set(esperados)):
+              mal.append(f"SOBRA en el borrador (nadie lo aprobo): {f}")
+          tok = os.environ["GH_TOKEN"]
+          for n, e in sorted(esperados.items()):
+              if n not in reales:
+                  continue
+              r = reales[n]
+              if r["size"] != e["size"]:
+                  mal.append(f"{n}: pesa {r['size']} y se aprobo {e['size']}")
+                  continue
+              req = urllib.request.Request(r["url"], headers={
+                  "Accept": "application/octet-stream", "Authorization": f"Bearer {tok}"})
+              h = hashlib.sha256()
+              with urllib.request.urlopen(req, timeout=900) as f:
+                  while (b := f.read(1 << 20)):
+                      h.update(b)
+              if h.hexdigest() != e["sha256"]:
+                  mal.append(f"{n}: SHA-256 distinto del aprobado\n"
+                             f"      aprobado: {e['sha256']}\n      ahora:    {h.hexdigest()}")
+              else:
+                  print(f"  ok  {n}  {r['size']:,}")
+          if mal:
+              print("\nRECHAZADO: el borrador no es el que se aprobo:")
+              for m in mal:
+                  print("  -", m)
+              sys.exit(1)
+          print(f"\n  OK: los {len(esperados)} assets aprobados, ninguno de mas, hash por hash.")
+          PY
+        env:
+          V: ${{ inputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: PUBLICAR el borrador aprobado (irreversible)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Exactamente estos bytes. Sin recompilar, sin reemplazar assets: si se recompilara, lo que
+          # baja la gente no seria lo que se probo.
+          echo "  publicando release id=$RELEASE_ID con el commit ${{ inputs.sha }}"
+          gh api -X PATCH "repos/${{ github.repository }}/releases/$RELEASE_ID" \
+            -f draft=false -f target_commitish="${{ inputs.sha }}" -f make_latest=true > /dev/null
+          echo "  PUBLICADA"
+
+      - name: Bajar todo DE NUEVO, como un desconocido, y comparar
+        run: |
+          set -euo pipefail
+          # Sin credenciales: publicar cambia la URL de descarga. La que se verifico era la del borrador.
+          # Esto prueba lo que recibe una persona cualquiera.
+          python3 - <<'PY'
+          import hashlib, json, os, sys, urllib.request
+          man = json.load(open(f"release-go-v{os.environ['V']}.json"))
+          base = f"https://github.com/{os.environ['R']}/releases/download/v{os.environ['V']}"
+          mal = []
+          for a in sorted(man["assets"], key=lambda x: x["name"]):
+              url = f"{base}/{urllib.parse.quote(a['name'])}"
+              try:
+                  h, n = hashlib.sha256(), 0
+                  with urllib.request.urlopen(url, timeout=900) as f:
+                      while (b := f.read(1 << 20)):
+                          h.update(b); n += len(b)
+              except Exception as e:
+                  mal.append(f"{a['name']}: no se puede descargar en publico ({e})"); continue
+              if n != a["size"] or h.hexdigest() != a["sha256"]:
+                  mal.append(f"{a['name']}: lo publico NO es lo aprobado ({n} bytes, {h.hexdigest()})")
+              else:
+                  print(f"  ok  {a['name']}  {n:,}")
+          if mal:
+              print("\nFALLO DESPUES DE PUBLICAR. latest.json NO se activa:")
+              for m in mal: print("  -", m)
+              print("\nNo se reconstruye ni se reemplaza nada: eso taparia la evidencia.")
+              sys.exit(1)
+          print("\n  OK: lo que descarga cualquiera es byte por byte lo aprobado.")
+          PY
+        env:
+          V: ${{ inputs.version }}
+          R: ${{ github.repository }}
+
+      - name: latest.json — PENDIENTE, no se activa aca
+        run: |
+          echo "=================================================================="
+          echo " v${{ inputs.version }} PUBLICADA y verificada en publico."
+          echo ""
+          echo " latest.json sigue ofreciendo la 1.0.5 A PROPOSITO."
+          echo " Activarlo empuja la version a TODAS las maquinas instaladas de una:"
+          echo " es la operacion de mas alcance del release y la mas cara de revertir."
+          echo " Se hace despues del canary real desde una 1.0.5, no antes."
+          echo "=================================================================="
