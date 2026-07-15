@@ -51,17 +51,33 @@ jobs:
           path: core
 
       - name: Install build dependencies
-        run: brew install cmake boost libevent sqlite
+        run: |
+          # SOLO las herramientas para compilar. NADA de libevent/boost/sqlite: las construye `depends`,
+          # y tenerlas instaladas es justo lo que hacia que cmake enlazara el nodo contra /opt/homebrew
+          # y muriera en la maquina del usuario. Si no estan en el sistema, no se pueden colar.
+          brew install cmake make
+          # macOS no trae GNU make; depends lo necesita. brew lo instala como `gmake`.
+          gmake --version | head -1
 
       - name: Build RandomX (static lib)
         run: |
-          cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release -DARCH=native
+          cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release -DARCH=default   # portable: -march=native compilaria para el CPU del runner, no el del usuario
           cmake --build core/src/randomx/build -j3
+
+      - name: Mark job start (used to prove the sidecar was built by THIS run)
+        run: |
+          JOB_START_FILE=$(mktemp)
+          echo "JOB_START_FILE=$JOB_START_FILE" >> "$GITHUB_ENV"
+          echo "job start marker (UTC): $(date -u)"
 
       - name: Build bitcoind and bitcoin-cli
         run: |
           cd core
-          cmake -B build \
+          # Igual que Linux, con `depends` en vez de Homebrew. El runner TIENE Homebrew (es una maquina de
+          # desarrollo) y cmake enlazaba el nodo contra /opt/homebrew/opt/libevent/... Un usuario de Mac no
+          # tiene Homebrew: el nodo moria con "Abort trap: 6" y la app abria sin poder minar.
+          gmake -C depends -j"$(sysctl -n hw.ncpu)" HOST=arm64-apple-darwin NO_QT=1 NO_ZMQ=1 NO_IPC=1
+          cmake -B build --toolchain depends/arm64-apple-darwin/toolchain.cmake -DBUILD_SHARED_LIBS=OFF \
             -DENABLE_IPC=OFF -DBUILD_TESTS=OFF -DBUILD_GUI=OFF -DWITH_ZMQ=OFF -DBUILD_BENCH=OFF \
             -DBRISVIA_RANDOMX_LIB="$PWD/src/randomx/build/librandomx.a" \
             -DBRISVIA_RANDOMX_INCLUDE="$PWD/src/randomx/src"
@@ -80,11 +96,48 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           mkdir -p src-tauri/binaries
+          rm -f src-tauri/binaries/*   # nada preexistente sobrevive
           cp core/build/bin/bitcoind src-tauri/binaries/bitcoind
           cp core/build/bin/bitcoin-cli src-tauri/binaries/bitcoin-cli
           cp crates/brisvia-randomx/target/release/mine-once src-tauri/binaries/brisvia-worker || \
             cp target/release/mine-once src-tauri/binaries/brisvia-worker
           chmod +x src-tauri/binaries/*
+          # PROVENANCE GUARD. Nothing pre-existing may survive into the package, and the node must have been
+          # produced by THIS run. A stale node is not a loud failure: it is a DIFFERENT NETWORK that only
+          # shows up on launch day. (Real case, 2026-07-15: a 9-July bitcoind carrying the pre-recalibration
+          # genesis 7f1cf9cf was found sitting in a working tree.)
+          for f in core/build/bin/bitcoind core/build/bin/bitcoin-cli; do
+            [ -f "$f" ] || { echo "FALLO: $f no existe: este job no lo compilo"; exit 1; }
+            if [ -n "$JOB_START_FILE" ] && [ "$f" -ot "$JOB_START_FILE" ]; then
+              echo "FALLO: $f es anterior al inicio del job: no lo produjo esta compilacion"; exit 1
+            fi
+          done
+          SIDECAR_SHA256=$(sha256sum src-tauri/binaries/bitcoind | cut -d' ' -f1)
+          echo "SIDECAR_SHA256=$SIDECAR_SHA256" >> "$GITHUB_ENV"
+          echo "sidecar bitcoind SHA-256: $SIDECAR_SHA256"
+
+          # Ask the node ITSELF which network it is, instead of trusting the source tree. This is the check
+          # that would have caught a stale sidecar, and it costs 15 seconds.
+          DD=$(mktemp -d)
+          {
+            echo "server=1"
+            echo "rpcuser=t"
+            echo "rpcpassword=t"
+            echo "listen=0"
+            echo "[brisvia]"
+            echo "rpcport=28461"
+          } > "$DD/bitcoin.conf"
+          src-tauri/binaries/bitcoind -datadir="$DD" -chain=brisvia &
+          sleep 15
+          CLI="src-tauri/binaries/bitcoin-cli -datadir=$DD -chain=brisvia -rpcport=28461 -rpcuser=t -rpcpassword=t"
+          GEN=$($CLI getblockhash 0 2>&1 | tr -d '[:space:]')
+          $CLI stop >/dev/null 2>&1 || true
+          sleep 3
+          echo "genesis del nodo que se va a empaquetar: $GEN"
+          if [ "$GEN" != "aa6bc268339aa9f4f2e39ae33aca7b7e48e395033d08d37c08f828890af7baf7" ]; then
+            echo "FALLO: el nodo tiene el genesis $GEN, no el de la red real de Brisvia"; exit 1
+          fi
+          echo "OK: el nodo empaquetado es la red real de Brisvia (genesis aa6bc268...)"
           python3 - <<'PY'
           import json, os
           p = "src-tauri/tauri.conf.json"
@@ -115,6 +168,17 @@ jobs:
       - name: Install frontend dependencies
         run: npm install
 
+      - name: Guard - el nodo tiene que abrir en la Mac de un usuario, no solo en esta
+        run: |
+          # Mismo verificador que Linux y Windows: lee la estructura del Mach-O con lief en vez de
+          # parsear la salida de otool. Ademas del listado de librerias chequea el MINIMO DE macOS y la
+          # arquitectura real, que otool no dice y deciden si la app abre. Ver tools/check_portable.py.
+          python3 -m pip install --quiet --break-system-packages lief || python3 -m pip install --quiet lief
+          python3 tools/check_portable.py --self-test
+          python3 tools/check_portable.py src-tauri/binaries/bitcoind src-tauri/binaries/bitcoin-cli
+          echo "--- otool, para dejarlo en el registro ---"; otool -L src-tauri/binaries/bitcoind
+          echo "--- arquitectura ---"; file src-tauri/binaries/bitcoind; lipo -info src-tauri/binaries/bitcoind || true
+
       - name: Build the Tauri app (.dmg + signed updater artifact)
         run: npm run tauri build -- --features mainnet
         env:
@@ -139,7 +203,7 @@ jobs:
       - name: Attach the .dmg and the signed updater artifact to the release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.5
+          tag_name: v1.0.6
           draft: true
           files: |
             src-tauri/target/release/bundle/dmg/*.dmg

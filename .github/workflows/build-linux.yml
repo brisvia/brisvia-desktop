@@ -53,10 +53,13 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          # bitcoind deps + Tauri v2 Linux deps (webkit2gtk 4.1) + AppImage tooling (patchelf)
+          # Las deps de bitcoind (boost/libevent/sqlite) NO se instalan a proposito: las construye
+          # `depends`, estaticas. Tenerlas en el sistema es exactamente lo que hacia que cmake enlazara el
+          # nodo contra las libs del runner y muriera en la maquina del usuario con
+          # "libevent_extra-2.1.so.7 => not found". Si no estan instaladas, no se pueden colar.
+          # Lo de abajo es solo para compilar, para Tauri (webkit2gtk 4.1) y para la AppImage (patchelf).
           sudo apt-get install -y \
-            cmake build-essential pkg-config \
-            libboost-dev libevent-dev libsqlite3-dev libssl-dev \
+            cmake build-essential pkg-config curl \
             libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
             libayatana-appindicator3-dev patchelf
 
@@ -67,11 +70,36 @@ jobs:
           cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release
           cmake --build core/src/randomx/build -j3
 
+      - name: Mark job start (used to prove the sidecar was built by THIS run)
+        run: |
+          JOB_START_FILE=$(mktemp)
+          echo "JOB_START_FILE=$JOB_START_FILE" >> "$GITHUB_ENV"
+          echo "job start marker (UTC): $(date -u)"
+
       - name: Build bitcoind and bitcoin-cli
         run: |
           cd core
-          cmake -B build \
+          # Las dependencias se construyen con el sistema `depends` de Core, que existe justamente para esto:
+          # su receta de libevent fuerza EVENT__LIBRARY_TYPE=STATIC. Antes se compilaba contra las libs del
+          # runner, asi que el nodo salia atado a paquetes que la maquina del usuario no tiene y moria con
+          # "libevent_extra-2.1.so.7 => not found". Un nodo que no arranca es una app que no puede minar.
+          # Encontrado ejecutando el nodo extraido del .deb ya instalado, no leyendo el codigo.
+          make -C depends -j"$(nproc)" HOST=x86_64-pc-linux-gnu NO_QT=1 NO_ZMQ=1 NO_IPC=1
+          # -static-libstdc++ -static-libgcc: la libreria de C++ va ADENTRO del binario.
+          #
+          # `depends` arregla las dependencias de terceros (libevent, boost, sqlite) pero NO estas dos, que
+          # las pone el compilador. El nodo salia pidiendo libstdc++.so.6 con GLIBCXX_3.4.30 — o sea la
+          # version de GCC 12. La lista de librerias permitidas del propio Core (contrib/guix/symbol-check.py)
+          # NO incluye libstdc++.so.6, justamente por esto: Core la mete adentro en todos sus releases.
+          #
+          # Medido sobre el bitcoind sacado del .deb de la rc4, no supuesto:
+          #     libstdc++.so.6, libm.so.6, libgcc_s.so.1, libc.so.6, ld-linux-x86-64.so.2
+          #     GLIBCXX -> 3.4.30 | CXXABI -> 1.3.13 | GCC -> 7.0.0 | GLIBC -> 2.34
+          # Con esto quedan solo libm, libc y el cargador, y desaparecen las exigencias de GLIBCXX/CXXABI.
+          # Lo que quede de piso es GLIBC 2.34, que se declara y se prueba en maquinas limpias.
+          cmake -B build --toolchain depends/x86_64-pc-linux-gnu/toolchain.cmake -DBUILD_SHARED_LIBS=OFF \
             -DENABLE_IPC=OFF -DBUILD_TESTS=OFF -DBUILD_GUI=OFF -DWITH_ZMQ=OFF -DBUILD_BENCH=OFF \
+            -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc" \
             -DBRISVIA_RANDOMX_LIB="$PWD/src/randomx/build/librandomx.a" \
             -DBRISVIA_RANDOMX_INCLUDE="$PWD/src/randomx/src"
           cmake --build build --target bitcoind bitcoin-cli -j3
@@ -89,11 +117,48 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           mkdir -p src-tauri/binaries
+          rm -f src-tauri/binaries/*   # nada preexistente sobrevive
           cp core/build/bin/bitcoind src-tauri/binaries/bitcoind
           cp core/build/bin/bitcoin-cli src-tauri/binaries/bitcoin-cli
           cp crates/brisvia-randomx/target/release/mine-once src-tauri/binaries/brisvia-worker || \
             cp target/release/mine-once src-tauri/binaries/brisvia-worker
           chmod +x src-tauri/binaries/*
+          # PROVENANCE GUARD. Nothing pre-existing may survive into the package, and the node must have been
+          # produced by THIS run. A stale node is not a loud failure: it is a DIFFERENT NETWORK that only
+          # shows up on launch day. (Real case, 2026-07-15: a 9-July bitcoind carrying the pre-recalibration
+          # genesis 7f1cf9cf was found sitting in a working tree.)
+          for f in core/build/bin/bitcoind core/build/bin/bitcoin-cli; do
+            [ -f "$f" ] || { echo "FALLO: $f no existe: este job no lo compilo"; exit 1; }
+            if [ -n "$JOB_START_FILE" ] && [ "$f" -ot "$JOB_START_FILE" ]; then
+              echo "FALLO: $f es anterior al inicio del job: no lo produjo esta compilacion"; exit 1
+            fi
+          done
+          SIDECAR_SHA256=$(sha256sum src-tauri/binaries/bitcoind | cut -d' ' -f1)
+          echo "SIDECAR_SHA256=$SIDECAR_SHA256" >> "$GITHUB_ENV"
+          echo "sidecar bitcoind SHA-256: $SIDECAR_SHA256"
+
+          # Ask the node ITSELF which network it is, instead of trusting the source tree. This is the check
+          # that would have caught a stale sidecar, and it costs 15 seconds.
+          DD=$(mktemp -d)
+          {
+            echo "server=1"
+            echo "rpcuser=t"
+            echo "rpcpassword=t"
+            echo "listen=0"
+            echo "[brisvia]"
+            echo "rpcport=28461"
+          } > "$DD/bitcoin.conf"
+          src-tauri/binaries/bitcoind -datadir="$DD" -chain=brisvia &
+          sleep 15
+          CLI="src-tauri/binaries/bitcoin-cli -datadir=$DD -chain=brisvia -rpcport=28461 -rpcuser=t -rpcpassword=t"
+          GEN=$($CLI getblockhash 0 2>&1 | tr -d '[:space:]')
+          $CLI stop >/dev/null 2>&1 || true
+          sleep 3
+          echo "genesis del nodo que se va a empaquetar: $GEN"
+          if [ "$GEN" != "aa6bc268339aa9f4f2e39ae33aca7b7e48e395033d08d37c08f828890af7baf7" ]; then
+            echo "FALLO: el nodo tiene el genesis $GEN, no el de la red real de Brisvia"; exit 1
+          fi
+          echo "OK: el nodo empaquetado es la red real de Brisvia (genesis aa6bc268...)"
           python3 - <<'PY'
           import json, os
           p = "src-tauri/tauri.conf.json"
@@ -124,6 +189,16 @@ jobs:
       - name: Install frontend dependencies
         run: npm install
 
+      - name: Guard - el nodo tiene que abrir en la maquina de un usuario, no solo en esta
+        run: |
+          # El verificador lee la ESTRUCTURA del binario con lief, no la salida de texto de ldd.
+          # El candado anterior era bash con ldd + sed y dio dos falsos positivos seguidos, los dos por
+          # suponer en vez de leer. Ademas ldd no muestra lo que de verdad decide si el binario abre:
+          # la version de simbolo que exige. Ver tools/check_portable.py.
+          python3 -m pip install --quiet lief
+          python3 tools/check_portable.py --self-test
+          python3 tools/check_portable.py src-tauri/binaries/bitcoind src-tauri/binaries/bitcoin-cli
+
       - name: Build the Tauri app (.AppImage + .deb + signed updater artifact)
         run: npm run tauri build -- --features mainnet
         env:
@@ -148,7 +223,7 @@ jobs:
       - name: Attach the .AppImage, .deb and the signed updater artifact to the release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.5
+          tag_name: v1.0.6
           draft: true
           files: |
             src-tauri/target/release/bundle/appimage/*.AppImage
