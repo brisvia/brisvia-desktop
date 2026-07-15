@@ -53,10 +53,13 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          # bitcoind deps + Tauri v2 Linux deps (webkit2gtk 4.1) + AppImage tooling (patchelf)
+          # Las deps de bitcoind (boost/libevent/sqlite) NO se instalan a proposito: las construye
+          # `depends`, estaticas. Tenerlas en el sistema es exactamente lo que hacia que cmake enlazara el
+          # nodo contra las libs del runner y muriera en la maquina del usuario con
+          # "libevent_extra-2.1.so.7 => not found". Si no estan instaladas, no se pueden colar.
+          # Lo de abajo es solo para compilar, para Tauri (webkit2gtk 4.1) y para la AppImage (patchelf).
           sudo apt-get install -y \
-            cmake build-essential pkg-config \
-            libboost-dev libevent-dev libsqlite3-dev libssl-dev \
+            cmake build-essential pkg-config curl \
             libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
             libayatana-appindicator3-dev patchelf
 
