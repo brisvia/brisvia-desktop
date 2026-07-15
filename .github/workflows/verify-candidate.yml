@@ -18,6 +18,11 @@ on:
         required: true
         default: "v1.0.6"
 
+# Un release en BORRADOR no es visible para el token por defecto: justamente por eso es un borrador.
+# Verificar un candidato ANTES de publicarlo exige leer exactamente esos.
+permissions:
+  contents: write
+
 env:
   GENESIS: aa6bc268339aa9f4f2e39ae33aca7b7e48e395033d08d37c08f828890af7baf7
   # Las tres semillas, serializadas como van dentro del binario: 0x01 (IPv4), 0x04 (largo), IP, puerto BE.
