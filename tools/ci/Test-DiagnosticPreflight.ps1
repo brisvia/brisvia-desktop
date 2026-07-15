@@ -305,11 +305,47 @@ $manifest = [ordered]@{
 foreach ($f in Get-ChildItem -Path $here -Include *.ps1 -Recurse) {
     $manifest.script_hashes[$f.Name] = (Get-FileHash $f.FullName -Algorithm SHA256).Hash
 }
-$manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $ManifestPath -Encoding UTF8
+# Written WITHOUT a byte order mark, on purpose.
+#
+# Set-Content -Encoding UTF8 on Windows PowerShell 5.1 always prepends a BOM (EF BB BF), and every
+# standard reader then chokes on it: Python's json.load, jq, and GitHub Actions' fromJSON all fail on
+# the first character. This manifest is the contract the long job depends on -- a contract the other
+# side cannot parse is not a contract, and the gate would be decoration.
+#
+# Caught by trying to read the manifest this file had just produced, rather than assuming it was fine
+# because the script exited 0.
+$json = $manifest | ConvertTo-Json -Depth 6
+[IO.File]::WriteAllText(
+    [IO.Path]::GetFullPath($ManifestPath),
+    $json,
+    [Text.UTF8Encoding]::new($false)   # $false = no BOM
+)
+
+# The manifest has to be readable by whoever consumes it, and that is not this process. Reading it back
+# as raw bytes is the only way to catch a BOM: PowerShell reads its own BOM'd files happily and would
+# report success while every other tool fails.
+$bytes = [IO.File]::ReadAllBytes([IO.Path]::GetFullPath($ManifestPath))
+if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+    Write-Host "  FAIL  manifest-is-machine-readable"
+    Write-Host "        the manifest starts with a UTF-8 BOM; json.load, jq and fromJSON all reject it"
+    $script:Failed++
+}
+else {
+    try {
+        $roundTrip = [Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json
+        if ($roundTrip.status -ne $manifest.status) { throw "status changed on read-back" }
+        Write-Host "  PASS  manifest-is-machine-readable"
+    }
+    catch {
+        Write-Host "  FAIL  manifest-is-machine-readable"
+        Write-Host "        $($_.Exception.Message)"
+        $script:Failed++
+    }
+}
 
 Write-Host ""
 Write-Host "manifest: $ManifestPath"
-Write-Host "$($script:Results.Count) checks, $script:Failed failed -> $($manifest.status)"
+Write-Host "$($script:Results.Count) checks, $script:Failed failed -> $(if ($script:Failed -eq 0) { 'PASS' } else { 'FAIL' })"
 Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 
 if ($script:Failed -gt 0) {
