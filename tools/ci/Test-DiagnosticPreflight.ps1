@@ -186,13 +186,57 @@ Check 'metatest-truncation-bug-would-be-caught' {
     "the pipeline+Select pattern loses the code, as it did on 2026-07-15"
 }
 
-Check 'metatest-naive-hex-would-be-wrong' {
-    # Formatting a negative int directly is the mistake ConvertTo-Win32Hex exists to prevent.
-    $naive = '0x{0:X8}' -f -1073741511
-    $right = ConvertTo-Win32Hex -Code -1073741511
-    if ($naive -eq $right) { throw "naive formatting matches: the conversion is not doing anything" }
-    if ($right -ne '0xC0000139') { throw "conversion is wrong: $right" }
-    "naive gives $naive, correct gives $right"
+Check 'metatest-unquoted-arguments-really-do-break' {
+    # The preflight caught this on its first run, in the helper rather than in a fixture: passing
+    # -ArgumentList raw sends `-File C:\Temp\Jose Perez\...\ok.ps1`, PowerShell splits it at the space,
+    # and reports that 'C:\Temp\Jose' has no .ps1 extension. Most usernames contain a space, so this is
+    # the common case.
+    #
+    # This proves the quoting is load-bearing: without it, the same call fails.
+    $dir = Join-Path $tmp 'Meta Test\with space'
+    $f = New-Fixture 'Meta Test\with space\ok.ps1' 'Write-Output "ran"; exit 0'
+
+    # Deliberately unquoted, the way it was before.
+    $o = Join-Path $tmp 'meta-o.txt'; $e = Join-Path $tmp 'meta-e.txt'
+    $p = Start-Process -FilePath $pwshExe -ArgumentList @('-NoProfile', '-File', $f) `
+        -WorkingDirectory $dir -NoNewWindow -Wait -PassThru `
+        -RedirectStandardOutput $o -RedirectStandardError $e -ErrorAction Stop
+    if ($p.ExitCode -eq 0) {
+        throw "raw -ArgumentList handled the space correctly, so the quoting protects nothing and this metatest is toothless"
+    }
+    # And with the quoting, the same call works.
+    $r = Invoke-NativeProcess -FilePath $pwshExe -Arguments @('-NoProfile', '-File', $f) `
+        -WorkingDirectory $dir -OutputDir $tmp
+    if ($r.ExitCode -ne 0) { throw "quoting did not fix it: exit=$($r.ExitCode)" }
+    "raw fails with exit=$($p.ExitCode); quoted succeeds"
+}
+
+Check 'metatest-hex-conversion-has-teeth' {
+    # This metatest was WRONG the first time, and the preflight caught it on its first run -- which is
+    # the entire argument for metatests.
+    #
+    # It asserted that '0x{0:X8}' -f -1073741511 was broken. It is not: PowerShell formats a negative
+    # INT32 correctly, and naive and correct both give 0xC0000139. Asserting a falsehood is worse than
+    # asserting nothing: it hands out confidence in a check that never checked.
+    #
+    # Where the naive form really does break is an INT64, which is what arrives if the code is ever read
+    # from anywhere other than [int]$process.ExitCode:
+    #
+    #     '0x{0:X8}' -f [int64]-1073741511   ->   0xFFFFFFFFC0000139   (16 digits, unsearchable)
+    #
+    # ConvertTo-Win32Hex survives that because its parameter is typed [int], which forces the cast. That
+    # type is load-bearing, and this test is what stops someone widening it to [long] for convenience.
+    $int32 = '0x{0:X8}' -f -1073741511
+    if ($int32 -ne '0xC0000139') { throw "PowerShell changed: int32 now formats as $int32" }
+
+    $naiveInt64 = '0x{0:X8}' -f ([int64]-1073741511)
+    if ($naiveInt64 -eq '0xC0000139') {
+        throw "an int64 formats correctly on its own, so the [int] cast no longer protects anything and this metatest is toothless"
+    }
+
+    $right = ConvertTo-Win32Hex -Code ([int64]-1073741511)
+    if ($right -ne '0xC0000139') { throw "the conversion does not survive an int64: got $right" }
+    "int64 naively gives $naiveInt64; the conversion still gives $right"
 }
 
 Write-Host "=== static analysis ==="
@@ -212,9 +256,30 @@ Check 'powershell-parses' {
 
 Check 'script-analyzer-has-no-errors' {
     if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
-        Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -SkipPublisherCheck -ErrorAction Stop
+        # The prompt that kills this check is NOT Install-Module's. It is the NuGet provider's.
+        #
+        # Measured, not guessed: on a machine with PowerShellGet 1.0.0.1 and no NuGet provider,
+        # Install-Module stops first to ask permission to install NuGet, and that prompt dies with
+        # "ShouldContinue ... Object reference not set to an instance of an object" where nobody can
+        # answer. -Confirm:$false on Install-Module never gets a chance to matter, which is why adding
+        # more flags to it did nothing.
+        #
+        # So the provider goes in first, explicitly, and the gallery is trusted before asking for
+        # anything from it. Both are no-ops on a runner that already has them.
+        if (-not (Get-PackageProvider -ListAvailable -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -eq 'NuGet' })) {
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force `
+                -Scope CurrentUser -Confirm:$false -ErrorAction Stop | Out-Null
+        }
+        if (Get-Command Set-PSRepository -ErrorAction SilentlyContinue) {
+            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+        }
+        Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -SkipPublisherCheck `
+            -AllowClobber -Confirm:$false -ErrorAction Stop
     }
     Import-Module PSScriptAnalyzer -ErrorAction Stop
+    # Error severity only. Warnings on a diagnostic tool are noise, and a gate that cries about style
+    # is a gate someone switches off -- which is worse than not having it.
     $d = @(Invoke-ScriptAnalyzer -Path $here -Recurse -Severity Error)
     if ($d.Count -gt 0) {
         $d | ForEach-Object { Write-Host "        $($_.ScriptName):$($_.Line) $($_.RuleName)" }

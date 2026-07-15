@@ -57,6 +57,61 @@ function ConvertTo-Win32Hex {
     return '0x{0:X8}' -f $unsigned
 }
 
+function ConvertTo-QuotedArgument {
+    <#
+    .SYNOPSIS
+        Quote one argument the way the Windows command line actually needs it.
+    .DESCRIPTION
+        Start-Process -ArgumentList joins an array with spaces and does NOT quote the elements. So an
+        argument containing a space silently becomes two arguments, and the program runs on something
+        nobody asked for.
+
+        That is not hypothetical. The preflight caught it on its first run:
+
+            -File C:\Temp\Jose Perez\diagnostic tool\ok.ps1
+            -> Processing -File 'C:\Temp\Jose' failed because the file does not
+               have a '.ps1' extension
+
+        Most people's usernames have a space in them, so this is the common case, not the edge case. It
+        is the same class of bug already found in the installer's shutdown script, which is why this
+        function exists rather than a "remember to quote" comment.
+
+        The rules are Microsoft's own (CommandLineToArgvW's, in reverse): backslashes are literal unless
+        they precede a quote, in which case they must be doubled; an embedded quote is escaped with a
+        backslash; the whole thing is wrapped only when it needs to be.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Argument)
+
+    # An empty argument still has to reach the program, as an empty pair of quotes.
+    if ($Argument -eq '') { return '""' }
+    # Nothing that needs quoting: leave it alone, so simple command lines stay readable in logs.
+    if ($Argument -notmatch '[\s"]') { return $Argument }
+
+    $sb = [System.Text.StringBuilder]::new()
+    [void]$sb.Append('"')
+    $backslashes = 0
+    foreach ($c in $Argument.ToCharArray()) {
+        if ($c -eq '\') {
+            $backslashes++
+            continue
+        }
+        if ($c -eq '"') {
+            # Backslashes before a quote are doubled, then the quote itself is escaped.
+            [void]$sb.Append('\' * ($backslashes * 2 + 1))
+            [void]$sb.Append('"')
+            $backslashes = 0
+            continue
+        }
+        [void]$sb.Append('\' * $backslashes)
+        $backslashes = 0
+        [void]$sb.Append($c)
+    }
+    # Trailing backslashes are doubled so the closing quote is not escaped by them.
+    [void]$sb.Append('\' * ($backslashes * 2))
+    [void]$sb.Append('"')
+    return $sb.ToString()
+}
+
 function Invoke-NativeProcess {
     <#
     .SYNOPSIS
@@ -121,9 +176,15 @@ function Invoke-NativeProcess {
             RedirectStandardError  = $errPath
             ErrorAction            = 'Stop'
         }
+        # Each argument is quoted BEFORE it goes in. Start-Process joins the array with spaces and does
+        # not quote anything itself, so passing them raw silently splits any argument containing a
+        # space -- see ConvertTo-QuotedArgument.
+        #
         # An empty -ArgumentList is not the same as no -ArgumentList: passing @() makes some PowerShell
         # versions send an empty quoted argument. Only add it when there is something to send.
-        if ($Arguments.Count -gt 0) { $splat['ArgumentList'] = $Arguments }
+        if ($Arguments.Count -gt 0) {
+            $splat['ArgumentList'] = @($Arguments | ForEach-Object { ConvertTo-QuotedArgument -Argument $_ })
+        }
         $process = Start-Process @splat
     }
     catch {
