@@ -1,7 +1,7 @@
 name: Diagnose Windows test loader failure
 
 # Disposable diagnostic. Builds nothing that ships, publishes nothing, touches no tag, fixes nothing.
-# Read-only permissions on purpose: this workflow has no business writing anywhere.
+# Read-only permissions and a manual trigger on purpose: it has no business writing anywhere.
 #
 # THE QUESTION
 # ------------
@@ -11,35 +11,39 @@ name: Diagnose Windows test loader failure
 #   (exit code: 0xc0000139, STATUS_ENTRYPOINT_NOT_FOUND)
 #
 # rc4 and rc5 passed that same step, so bisection narrows the regression to the rc5-rc6 change set. The
-# MECHANISM is not proven, and that is the only thing this workflow is for.
+# MECHANISM is not proven, and that is the only thing this workflow exists for.
 #
 # 0xc0000139 means Windows loaded a DLL and could not find inside it a procedure the executable imports.
-# It is NOT "a DLL is missing" -- that is 0xc0000135. The honest statement is: the new test executable
-# imports a function that does not exist in the version of some DLL Windows resolves. Which DLL and
-# which function are unknown.
+# It is NOT "a DLL is missing" -- that is 0xc0000135. So the honest statement is: the new test executable
+# imports a function that does not exist in the version of some DLL Windows resolves. Which DLL and which
+# function are unknown.
 #
 # `wallet_key_tests` in the message does not incriminate that test. Cargo builds ONE executable for the
-# whole library and applies the name filter at run time. If the loader cannot start the .exe, no test
-# runs at all -- that name is just the one it was about to try.
+# whole library and applies the name filter at run time. If the loader cannot start the .exe, no test runs
+# at all -- that name is just the one it was about to try.
 #
-# WHY THE FIRST TWO ATTEMPTS WERE WORTHLESS
-# -----------------------------------------
-# They did not reproduce the real job. Five differences, every one of them mine:
+# THREE ATTEMPTS AT THIS PROVED NOTHING, AND EVERY REASON WAS MINE
+# ---------------------------------------------------------------
+#   1. windows-latest instead of windows-2022     a different image entirely
+#   2. RandomX never built                        so RANDOMX_LIB was never set
+#   3. RANDOMX_LIB_DIR absent                     -> "failed to run custom build command"
+#   4. --features mainnet omitted                 not even the same binary
+#   5. two parallel trees, different cwd          tauri.conf.json resolves frontendDist as
+#                                                 ../src/renderer -- relative
+#   6. steps 7, 8, 10 and 11 skipped              -> "resource path binaries\bitcoind.exe doesn't exist"
 #
-#   windows-latest instead of windows-2022   a different image entirely
-#   RandomX never built                      so RANDOMX_LIB was never set
-#   RANDOMX_LIB_DIR absent                   this is what made build.rs fail
-#   --features mainnet omitted               not even the same binary
-#   two parallel trees, different cwd        relative paths resolve elsewhere
+# Number 6 was dismissed once by checking externalBin, which is None, and concluding Tauri did not need
+# the binaries. That was the wrong field. The hypothesis was right and got buried by a bad check -- worse
+# than not checking, because it came with confidence.
 #
-# It was not compiling what it claimed to compare. Everything below is copied from the real job that
-# built rc5 successfully. Nothing is simplified because it "looks unnecessary": reproducibility gets
-# proven first and optimised never.
+# So: every step below is copied from the real job that built rc5 successfully. Nothing is simplified
+# because it "looks unnecessary to a library test". That judgement was made three times and was wrong
+# three times.
 #
 # THE GATE
 # --------
-# If rc5 does not build and list its tests here, this diagnostic is STILL invalid and it stops. Running
-# dumpbin over two broken things proves nothing.
+# rc5 itself is the proof that this reproduction works. If it does not build and list its tests here, the
+# run stops before dumpbin: comparing two broken things proves nothing.
 
 on:
   workflow_dispatch:
@@ -58,70 +62,124 @@ permissions:
 
 jobs:
   compare:
-    # windows-2022, same as the real job. windows-latest is a moving target and was one of the five
-    # differences that made the earlier attempts meaningless.
+    # windows-2022, exactly like the real job. windows-latest is a moving target.
     runs-on: windows-2022
     steps:
       - name: MSVC tools (dumpbin lives here)
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Rust, once, so both halves get the identical toolchain
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Record the environment both halves share
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path C:\evidence | Out-Null
-          rustc -Vv | Tee-Object C:\evidence\rustc.txt
-          cargo -V  | Tee-Object C:\evidence\cargo.txt
           $env:PATH | Out-File C:\evidence\PATH.txt
           "image=$env:ImageOS $env:ImageVersion runner=$env:RUNNER_OS $env:RUNNER_ARCH" |
             Tee-Object C:\evidence\runner.txt
 
-      # ============================== BASELINE ==============================
-      # Both halves build one after the other in the SAME physical path. Two parallel trees would put
-      # src-tauri at a different depth, and tauri.conf.json resolves frontendDist as ../src/renderer --
-      # relative. Same path, in sequence, removes that as a variable.
-      - name: BASELINE - check out the tag that passes
+      # ========================= BASELINE: the tag that passes =========================
+      # Both halves build one after the other in the SAME physical path. Two parallel trees put src-tauri
+      # at a different depth and frontendDist stops resolving.
+      - name: BASELINE - checkout desktop app
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.good_tag }}
           clean: true
 
-      - name: BASELINE - check out core (with the RandomX submodule)
+      - name: BASELINE - checkout core (with the RandomX submodule)
         uses: actions/checkout@v4
         with:
           repository: brisvia/brisvia
           submodules: recursive
           path: core
 
-      - name: BASELINE - build RandomX
+      - name: BASELINE - build RandomX (static lib, portable)
         shell: pwsh
         run: |
-          # Copied from the real job. Static MSVC runtime (MultiThreaded) to match the vs2022-static
-          # preset; otherwise the final link fails with LNK1169 (multiply defined symbols from libucrt).
           cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release -DARCH=default -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
           cmake --build core/src/randomx/build --config Release -j
           $rx = Get-ChildItem -Path core/src/randomx/build -Recurse -Filter randomx.lib | Select-Object -First 1
-          if (-not $rx) { throw "INVALID DIAGNOSTIC: RandomX did not produce randomx.lib" }
+          if (-not $rx) { throw "INVALID DIAGNOSTIC: RandomX produced no randomx.lib" }
           echo "RANDOMX_LIB=$($rx.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "RANDOMX_LIB=$($rx.FullName)"
+
+      - name: BASELINE - mark job start (the staging guard requires it)
+        shell: pwsh
+        run: |
+          $t = (Get-Date).ToUniversalTime().ToString("o")
+          "JOB_START_UTC=$t" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "job start (UTC): $t"
+
+      - name: BASELINE - configure and build bitcoind + bitcoin-cli (MSVC + vcpkg, wallet only)
+        shell: pwsh
+        working-directory: core
+        run: |
+          $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT   # GitHub Windows runners ship vcpkg here
+          cmake --preset vs2022-static -B build -DVCPKG_MANIFEST_NO_DEFAULT_FEATURES=ON -DVCPKG_MANIFEST_FEATURES=wallet -DBUILD_GUI=OFF -DBUILD_TESTS=OFF -DBUILD_BENCH=OFF -DWITH_ZMQ=OFF -DENABLE_IPC=OFF -DBRISVIA_RANDOMX_LIB="$env:RANDOMX_LIB" -DBRISVIA_RANDOMX_INCLUDE="$PWD/src/randomx/src"
+          cmake --build build --config Release --target bitcoind bitcoin-cli -j
+
+      - name: BASELINE - setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: BASELINE - build the miner (mine-once)
+        shell: pwsh
+        run: |
+          $env:RANDOMX_LIB_DIR = (Split-Path $env:RANDOMX_LIB)
+          cargo build --release --manifest-path crates/brisvia-randomx/Cargo.toml --bin mine-once
+
+      - name: BASELINE - stage binaries (.exe)
+        shell: pwsh
+        run: |
+          # Copied from the real job, provenance guard included: the binary must be UNIQUE and must have
+          # been produced by THIS run. A stale node is not a loud failure -- it is a DIFFERENT NETWORK
+          # that only shows up on launch day.
+          New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
+          Remove-Item src-tauri/binaries/* -Force -ErrorAction SilentlyContinue
+          function Take-One($path, $filter, $extra) {
+            $all = @(Get-ChildItem -Path $path -Recurse -Filter $filter -ErrorAction SilentlyContinue)
+            if ($extra) { $all = @($all | Where-Object $extra) }
+            if ($all.Count -eq 0) { throw "FAIL: no $filter was built by this job." }
+            if ($all.Count -gt 1) { throw "FAIL: $($all.Count) copies of $filter; cannot tell which is this build's: $($all.FullName -join ', ')" }
+            if ($all[0].LastWriteTimeUtc -lt [datetime]::Parse($env:JOB_START_UTC)) {
+              throw "FAIL: $filter predates the job start ($($all[0].LastWriteTimeUtc) < $env:JOB_START_UTC): this build did not produce it."
+            }
+            return $all[0]
+          }
+          $bd  = Take-One "core/build" "bitcoind.exe" $null
+          $cli = Take-One "core/build" "bitcoin-cli.exe" $null
+          $mw  = Take-One "." "mine-once.exe" { $_.FullName -match 'release' }
+          Copy-Item $bd.FullName  src-tauri/binaries/bitcoind.exe
+          Copy-Item $cli.FullName src-tauri/binaries/bitcoin-cli.exe
+          Copy-Item $mw.FullName  src-tauri/binaries/brisvia-worker.exe
+          Get-ChildItem src-tauri/binaries
+
+      - name: BASELINE - the three binaries exist, right before cargo
+        shell: pwsh
+        run: |
+          # The last run died on "resource path binaries\bitcoind.exe doesn't exist" AFTER a long build.
+          # This says so in one second instead, and records what cargo is about to be handed.
+          foreach ($f in @('bitcoind.exe', 'bitcoin-cli.exe', 'brisvia-worker.exe')) {
+            $p = "src-tauri/binaries/$f"
+            if (-not (Test-Path $p)) { throw "INVALID DIAGNOSTIC: $p is missing. Tauri's build script needs it." }
+            $i = Get-Item $p
+            $h = (Get-FileHash $p -Algorithm SHA256).Hash
+            "$f size=$($i.Length) sha256=$h" | Tee-Object -Append C:\evidence\good-env.txt
+          }
 
       - name: BASELINE - build the test executable (no run)
         shell: pwsh
         env:
           CARGO_INCREMENTAL: 0
         run: |
-          # RANDOMX_LIB_DIR is what the real job sets before touching cargo, and its absence is exactly
-          # what made the previous attempt die with "failed to run custom build command". --features
-          # mainnet and --manifest-path come from the real job too: without them this builds a different
-          # binary and compares nothing.
+          # RANDOMX_LIB_DIR, --features mainnet and --manifest-path all come from the real job. Without
+          # them this builds a different binary, or nothing at all, and compares neither.
           $env:RANDOMX_LIB_DIR = (Split-Path $env:RANDOMX_LIB)
           "tag=${{ inputs.good_tag }}"           | Tee-Object -Append C:\evidence\good-env.txt
           "sha=$(git rev-parse HEAD)"            | Tee-Object -Append C:\evidence\good-env.txt
           "cwd=$PWD"                             | Tee-Object -Append C:\evidence\good-env.txt
           "RANDOMX_LIB=$env:RANDOMX_LIB"         | Tee-Object -Append C:\evidence\good-env.txt
           "RANDOMX_LIB_DIR=$env:RANDOMX_LIB_DIR" | Tee-Object -Append C:\evidence\good-env.txt
+          rustc -Vv | Tee-Object -Append C:\evidence\good-env.txt
+          cargo -V  | Tee-Object -Append C:\evidence\good-env.txt
 
           $json = cargo test --manifest-path src-tauri/Cargo.toml --features mainnet --lib --no-run --message-format=json
           $json | Out-File C:\evidence\good-cargo-json.txt
@@ -136,21 +194,12 @@ jobs:
               $found += $m.executable
             }
           }
-          if ($found.Count -eq 0) {
-            Write-Host "artifacts cargo did report:"
-            $json | Select-String '"executable":"' | Select-Object -First 5 | ForEach-Object { Write-Host "  $_" }
-            throw "INVALID DIAGNOSTIC: the baseline built no test executable. Nothing to compare."
-          }
-          if ($found.Count -gt 1) {
-            $found | ForEach-Object { Write-Host "  $_" }
-            throw "INVALID DIAGNOSTIC: $($found.Count) test executables; cannot tell which one is under test."
-          }
+          if ($found.Count -eq 0) { throw "INVALID DIAGNOSTIC: the baseline built no test executable. Nothing to compare." }
+          if ($found.Count -gt 1) { throw "INVALID DIAGNOSTIC: $($found.Count) test executables; cannot tell which is under test." }
           $exe = $found[0]
           Copy-Item $exe C:\evidence\test-good.exe
           $h = (Get-FileHash $exe -Algorithm SHA256).Hash
-          "exe=$exe" | Tee-Object -Append C:\evidence\good-env.txt
-          "size=$((Get-Item $exe).Length)" | Tee-Object -Append C:\evidence\good-env.txt
-          "sha256=$h" | Tee-Object -Append C:\evidence\good-env.txt
+          "exe=$exe size=$((Get-Item $exe).Length) sha256=$h" | Tee-Object -Append C:\evidence\good-env.txt
           Get-ChildItem (Split-Path $exe) -Filter *.dll -ErrorAction SilentlyContinue |
             ForEach-Object { $_.Name } | Out-File C:\evidence\good-dlls-next-to-exe.txt
 
@@ -176,35 +225,93 @@ jobs:
       - name: Wipe the workspace between halves
         shell: pwsh
         run: |
-          # Everything of the baseline goes, so none of it can be mistaken for the candidate's later.
+          # Everything of the baseline goes, so none of it can be mistaken for the candidate's.
           Get-ChildItem -Path . -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
           $left = @(Get-ChildItem -Path . -Force -ErrorAction SilentlyContinue).Count
           Write-Host "files left in the workspace: $left"
           if ($left -gt 0) { throw "the workspace is not clean; the candidate would build on top of the baseline" }
 
-      # ============================== CANDIDATE ==============================
-      - name: CANDIDATE - check out the tag that fails
+      # ========================= CANDIDATE: the tag that fails =========================
+      - name: CANDIDATE - checkout desktop app
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.bad_tag }}
           clean: true
 
-      - name: CANDIDATE - check out core (with the RandomX submodule)
+      - name: CANDIDATE - checkout core (with the RandomX submodule)
         uses: actions/checkout@v4
         with:
           repository: brisvia/brisvia
           submodules: recursive
           path: core
 
-      - name: CANDIDATE - build RandomX
+      - name: CANDIDATE - build RandomX (static lib, portable)
         shell: pwsh
         run: |
           cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release -DARCH=default -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
           cmake --build core/src/randomx/build --config Release -j
           $rx = Get-ChildItem -Path core/src/randomx/build -Recurse -Filter randomx.lib | Select-Object -First 1
-          if (-not $rx) { throw "RandomX did not produce randomx.lib" }
+          if (-not $rx) { throw "RandomX produced no randomx.lib" }
           echo "RANDOMX_LIB=$($rx.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "RANDOMX_LIB=$($rx.FullName)"
+
+      - name: CANDIDATE - mark job start (the staging guard requires it)
+        shell: pwsh
+        run: |
+          $t = (Get-Date).ToUniversalTime().ToString("o")
+          "JOB_START_UTC=$t" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "job start (UTC): $t"
+
+      - name: CANDIDATE - configure and build bitcoind + bitcoin-cli (MSVC + vcpkg, wallet only)
+        shell: pwsh
+        working-directory: core
+        run: |
+          $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
+          cmake --preset vs2022-static -B build -DVCPKG_MANIFEST_NO_DEFAULT_FEATURES=ON -DVCPKG_MANIFEST_FEATURES=wallet -DBUILD_GUI=OFF -DBUILD_TESTS=OFF -DBUILD_BENCH=OFF -DWITH_ZMQ=OFF -DENABLE_IPC=OFF -DBRISVIA_RANDOMX_LIB="$env:RANDOMX_LIB" -DBRISVIA_RANDOMX_INCLUDE="$PWD/src/randomx/src"
+          cmake --build build --config Release --target bitcoind bitcoin-cli -j
+
+      - name: CANDIDATE - setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: CANDIDATE - build the miner (mine-once)
+        shell: pwsh
+        run: |
+          $env:RANDOMX_LIB_DIR = (Split-Path $env:RANDOMX_LIB)
+          cargo build --release --manifest-path crates/brisvia-randomx/Cargo.toml --bin mine-once
+
+      - name: CANDIDATE - stage binaries (.exe)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
+          Remove-Item src-tauri/binaries/* -Force -ErrorAction SilentlyContinue
+          function Take-One($path, $filter, $extra) {
+            $all = @(Get-ChildItem -Path $path -Recurse -Filter $filter -ErrorAction SilentlyContinue)
+            if ($extra) { $all = @($all | Where-Object $extra) }
+            if ($all.Count -eq 0) { throw "FAIL: no $filter was built by this job." }
+            if ($all.Count -gt 1) { throw "FAIL: $($all.Count) copies of $filter: $($all.FullName -join ', ')" }
+            if ($all[0].LastWriteTimeUtc -lt [datetime]::Parse($env:JOB_START_UTC)) {
+              throw "FAIL: $filter predates the job start: this build did not produce it."
+            }
+            return $all[0]
+          }
+          $bd  = Take-One "core/build" "bitcoind.exe" $null
+          $cli = Take-One "core/build" "bitcoin-cli.exe" $null
+          $mw  = Take-One "." "mine-once.exe" { $_.FullName -match 'release' }
+          Copy-Item $bd.FullName  src-tauri/binaries/bitcoind.exe
+          Copy-Item $cli.FullName src-tauri/binaries/bitcoin-cli.exe
+          Copy-Item $mw.FullName  src-tauri/binaries/brisvia-worker.exe
+          Get-ChildItem src-tauri/binaries
+
+      - name: CANDIDATE - the three binaries exist, right before cargo
+        shell: pwsh
+        run: |
+          foreach ($f in @('bitcoind.exe', 'bitcoin-cli.exe', 'brisvia-worker.exe')) {
+            $p = "src-tauri/binaries/$f"
+            if (-not (Test-Path $p)) { throw "$p is missing. Tauri's build script needs it." }
+            $i = Get-Item $p
+            $h = (Get-FileHash $p -Algorithm SHA256).Hash
+            "$f size=$($i.Length) sha256=$h" | Tee-Object -Append C:\evidence\bad-env.txt
+          }
 
       - name: CANDIDATE - build the test executable (no run)
         shell: pwsh
@@ -217,6 +324,8 @@ jobs:
           "cwd=$PWD"                             | Tee-Object -Append C:\evidence\bad-env.txt
           "RANDOMX_LIB=$env:RANDOMX_LIB"         | Tee-Object -Append C:\evidence\bad-env.txt
           "RANDOMX_LIB_DIR=$env:RANDOMX_LIB_DIR" | Tee-Object -Append C:\evidence\bad-env.txt
+          rustc -Vv | Tee-Object -Append C:\evidence\bad-env.txt
+          cargo -V  | Tee-Object -Append C:\evidence\bad-env.txt
 
           $json = cargo test --manifest-path src-tauri/Cargo.toml --features mainnet --lib --no-run --message-format=json
           $json | Out-File C:\evidence\bad-cargo-json.txt
@@ -232,9 +341,7 @@ jobs:
           $exe = $found[0]
           Copy-Item $exe C:\evidence\test-bad.exe
           $h = (Get-FileHash $exe -Algorithm SHA256).Hash
-          "exe=$exe" | Tee-Object -Append C:\evidence\bad-env.txt
-          "size=$((Get-Item $exe).Length)" | Tee-Object -Append C:\evidence\bad-env.txt
-          "sha256=$h" | Tee-Object -Append C:\evidence\bad-env.txt
+          "exe=$exe size=$((Get-Item $exe).Length) sha256=$h" | Tee-Object -Append C:\evidence\bad-env.txt
           Get-ChildItem (Split-Path $exe) -Filter *.dll -ErrorAction SilentlyContinue |
             ForEach-Object { $_.Name } | Out-File C:\evidence\bad-dlls-next-to-exe.txt
 
@@ -249,9 +356,9 @@ jobs:
           $hex = '0x{0:X8}' -f $c
           "exit=$c hex=$hex" | Tee-Object -Append C:\evidence\bad-list.txt
           Write-Host "candidate exit: $c ($hex)"
-          if ($hex -eq '0xC0000139')  { Write-Host "REPRODUCED: the same loader failure as the real job." }
-          elseif ($c -eq 0)           { Write-Host "IT LOADS HERE. Then the real job's failure needs another explanation." }
-          else                        { Write-Host "a different failure ($hex): not the one under investigation." }
+          if ($hex -eq '0xC0000139') { Write-Host "REPRODUCED: the same loader failure as the real job." }
+          elseif ($c -eq 0)          { Write-Host "IT LOADS HERE. Then the real job's failure needs another explanation: compare against run 29448577901." }
+          else                       { Write-Host "a different failure ($hex): not the one under investigation." }
 
       - name: CANDIDATE - what it imports
         shell: pwsh
@@ -287,8 +394,7 @@ jobs:
         continue-on-error: true
         run: |
           # The proof is a PAIR: the executable imports FunctionX from LibraryY.dll, and the LibraryY.dll
-          # Windows actually resolves does not export FunctionX. Anything short of that is a guess, and
-          # guesses have already cost six corrections today.
+          # Windows actually resolves does not export FunctionX. Anything short of that is a guess.
           if (-not (Test-Path C:\evidence\new-dlls.txt)) { Write-Host "no new DLLs"; exit 0 }
           foreach ($d in (Get-Content C:\evidence\new-dlls.txt | Where-Object { $_ })) {
             $real = (Get-Command $d -ErrorAction SilentlyContinue).Source
