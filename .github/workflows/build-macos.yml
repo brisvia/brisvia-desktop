@@ -75,16 +75,59 @@ jobs:
           export RANDOMX_LIB_DIR="$PWD/core/src/randomx/build"
           cargo build --release --manifest-path crates/brisvia-randomx/Cargo.toml --bin mine-once
 
+      - name: Mark job start (used to prove the sidecar was built by THIS run)
+        run: |
+          JOB_START_FILE=$(mktemp)
+          echo "JOB_START_FILE=$JOB_START_FILE" >> "$GITHUB_ENV"
+          echo "job start marker (UTC): $(date -u)"
+
       - name: Stage binaries (no .exe on macOS) and point the config at them
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           mkdir -p src-tauri/binaries
+          rm -f src-tauri/binaries/*   # nada preexistente sobrevive
           cp core/build/bin/bitcoind src-tauri/binaries/bitcoind
           cp core/build/bin/bitcoin-cli src-tauri/binaries/bitcoin-cli
           cp crates/brisvia-randomx/target/release/mine-once src-tauri/binaries/brisvia-worker || \
             cp target/release/mine-once src-tauri/binaries/brisvia-worker
           chmod +x src-tauri/binaries/*
+          # PROVENANCE GUARD. Nothing pre-existing may survive into the package, and the node must have been
+          # produced by THIS run. A stale node is not a loud failure: it is a DIFFERENT NETWORK that only
+          # shows up on launch day. (Real case, 2026-07-15: a 9-July bitcoind carrying the pre-recalibration
+          # genesis 7f1cf9cf was found sitting in a working tree.)
+          for f in core/build/bin/bitcoind core/build/bin/bitcoin-cli; do
+            [ -f "$f" ] || { echo "FALLO: $f no existe: este job no lo compilo"; exit 1; }
+            if [ -n "$JOB_START_FILE" ] && [ "$f" -ot "$JOB_START_FILE" ]; then
+              echo "FALLO: $f es anterior al inicio del job: no lo produjo esta compilacion"; exit 1
+            fi
+          done
+          SIDECAR_SHA256=$(sha256sum src-tauri/binaries/bitcoind | cut -d' ' -f1)
+          echo "SIDECAR_SHA256=$SIDECAR_SHA256" >> "$GITHUB_ENV"
+          echo "sidecar bitcoind SHA-256: $SIDECAR_SHA256"
+
+          # Ask the node ITSELF which network it is, instead of trusting the source tree. This is the check
+          # that would have caught a stale sidecar, and it costs 15 seconds.
+          DD=$(mktemp -d)
+          {
+            echo "server=1"
+            echo "rpcuser=t"
+            echo "rpcpassword=t"
+            echo "listen=0"
+            echo "[brisvia]"
+            echo "rpcport=28461"
+          } > "$DD/bitcoin.conf"
+          src-tauri/binaries/bitcoind -datadir="$DD" -chain=brisvia &
+          sleep 15
+          CLI="src-tauri/binaries/bitcoin-cli -datadir=$DD -chain=brisvia -rpcport=28461 -rpcuser=t -rpcpassword=t"
+          GEN=$($CLI getblockhash 0 2>&1 | tr -d '[:space:]')
+          $CLI stop >/dev/null 2>&1 || true
+          sleep 3
+          echo "genesis del nodo que se va a empaquetar: $GEN"
+          if [ "$GEN" != "aa6bc268339aa9f4f2e39ae33aca7b7e48e395033d08d37c08f828890af7baf7" ]; then
+            echo "FALLO: el nodo tiene el genesis $GEN, no el de la red real de Brisvia"; exit 1
+          fi
+          echo "OK: el nodo empaquetado es la red real de Brisvia (genesis aa6bc268...)"
           python3 - <<'PY'
           import json, os
           p = "src-tauri/tauri.conf.json"
