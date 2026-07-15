@@ -51,7 +51,13 @@ jobs:
           path: core
 
       - name: Install build dependencies
-        run: brew install cmake boost libevent sqlite
+        run: |
+          # SOLO las herramientas para compilar. NADA de libevent/boost/sqlite: las construye `depends`,
+          # y tenerlas instaladas es justo lo que hacia que cmake enlazara el nodo contra /opt/homebrew
+          # y muriera en la maquina del usuario. Si no estan en el sistema, no se pueden colar.
+          brew install cmake make
+          # macOS no trae GNU make; depends lo necesita. brew lo instala como `gmake`.
+          gmake --version | head -1
 
       - name: Build RandomX (static lib)
         run: |
