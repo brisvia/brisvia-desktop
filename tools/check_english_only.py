@@ -43,14 +43,19 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Spanish function words. Chosen because they are frequent in Spanish and rare or absent in English
-# technical prose. "de", "en", "no", "a" are deliberately absent: they collide with English or with
-# code.
+# Spanish function words: the small connectives that carry no meaning on their own, appear constantly
+# in Spanish prose, and are rare or impossible in English technical writing.
+#
+# Deliberately NOT here, and each for a reason learned by getting it wrong:
+#   - "de", "en", "no", "a": collide with English, or with code.
+#   - "version", "error", "firma", "prueba", "guardian": these are English words too. With a threshold
+#     of two, a line like `let version = tmpl["version"]` scored two hits and got flagged. A checker
+#     that rejects correct code is worse than none: it teaches people to switch it off.
 PALABRAS = r"\b(que|para|porque|cuando|desde|hasta|donde|aunque|entonces|tambien|todavia|siempre|nunca|" \
            r"puede|tiene|hace|esta|estan|este|esto|esa|ese|eso|los|las|del|una|uno|con|sin|por|" \
            r"sobre|entre|antes|despues|mismo|misma|cada|otro|otra|todo|toda|nada|algo|" \
-           r"nodo|billetera|actualizador|actualizacion|guardian|candado|verificador|maquina|archivo|" \
-           r"arbol|compuerta|borrador|firma|paquete|prueba|fallo|error|usuario|version|carpeta|" \
+           r"nodo|billetera|actualizador|actualizacion|candado|verificador|maquina|archivo|" \
+           r"arbol|compuerta|borrador|paquete|fallo|usuario|carpeta|" \
            r"cierra|cerrar|devuelve|espera|esperar|mata|matar|falla|fallar|abre|abrir|corre|correr|" \
            r"lanza|lanzar|guarda|guardar|revisa|revisar|probar|busca|buscar|arma|armar|sigue|seguir|" \
            r"queda|quedar|pide|pedir|dice|decir|sale|salir|entra|entrar|vuelve|volver|tarda|tardar)\b"
@@ -71,10 +76,15 @@ EXTENSIONES = {".rs", ".py", ".js", ".ts", ".yml", ".yaml", ".md", ".nsh", ".ps1
                ".json", ".html", ".css"}
 
 # Files whose job is to hold Spanish, or to talk to the owner rather than ship.
+# Spanish is not banned from the repository -- it is banned from the technical layer. These places hold
+# Spanish ON PURPOSE, and a checker that broke them would be breaking the product to satisfy a rule:
 EXENTOS = (
     "src/renderer/locales.js",          # the user-facing Spanish. That IS the file's purpose.
-    "tools/check_english_only.py",      # this file names the words it looks for
+    "tools/check_english_only.py",      # this file has to name the words it looks for
 )
+# Same idea, by path fragment: i18n bundles, and fixtures that assert on Spanish user-facing strings
+# (a test for "Billetera bloqueada" has to contain "Billetera bloqueada" -- that is the assertion).
+EXENTOS_PARCIALES = ("/i18n/", "/locales/", "locales.js", "/fixtures/es", ".es.json")
 
 
 def tracked():
@@ -83,7 +93,8 @@ def tracked():
 
 
 def revisar(p: Path) -> list:
-    if str(p).replace("\\", "/") in EXENTOS or p.suffix not in EXTENSIONES:
+    ruta = str(p).replace("\\", "/")
+    if ruta in EXENTOS or any(f in ruta for f in EXENTOS_PARCIALES) or p.suffix not in EXTENSIONES:
         return []
     try:
         texto = p.read_text(encoding="utf-8", errors="replace")
