@@ -67,6 +67,12 @@ jobs:
           cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release
           cmake --build core/src/randomx/build -j3
 
+      - name: Mark job start (used to prove the sidecar was built by THIS run)
+        run: |
+          JOB_START_FILE=$(mktemp)
+          echo "JOB_START_FILE=$JOB_START_FILE" >> "$GITHUB_ENV"
+          echo "job start marker (UTC): $(date -u)"
+
       - name: Build bitcoind and bitcoin-cli
         run: |
           cd core
@@ -83,12 +89,6 @@ jobs:
         run: |
           export RANDOMX_LIB_DIR="$PWD/core/src/randomx/build"
           cargo build --release --manifest-path crates/brisvia-randomx/Cargo.toml --bin mine-once
-
-      - name: Mark job start (used to prove the sidecar was built by THIS run)
-        run: |
-          JOB_START_FILE=$(mktemp)
-          echo "JOB_START_FILE=$JOB_START_FILE" >> "$GITHUB_ENV"
-          echo "job start marker (UTC): $(date -u)"
 
       - name: Stage binaries (no .exe on Linux) and point the config at them
         env:
