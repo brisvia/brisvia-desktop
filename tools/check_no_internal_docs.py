@@ -38,8 +38,9 @@ PROHIBIDOS = {
     "PLAN.md": "internal planning",
 }
 
-# Where the private copies live. Named here so anyone reading this failure knows the work was not lost.
-PRIVADO = r"C:\dev\brisvia-ops-privado"
+# The private copies live outside any git repository. The path is deliberately NOT written here: this
+# file is public, and publishing the folder layout of a real machine helps nobody outside and helps
+# anyone looking for a way in.
 
 
 def tracked() -> set:
@@ -48,7 +49,19 @@ def tracked() -> set:
 
 
 def revisar(archivos: set) -> list:
-    return sorted((f, PROHIBIDOS[f]) for f in PROHIBIDOS if f in archivos)
+    """Match by basename, anywhere in the tree, ignoring case.
+
+    An internal document does not stop being internal by sitting in docs/, and Windows would happily
+    let `Claude.md` through a check that only knew about `CLAUDE.md`. Both were holes in the first
+    version of this: it compared exact top-level paths.
+    """
+    malos = []
+    for f in archivos:
+        base = f.rsplit("/", 1)[-1].lower()
+        for prohibido, porque in PROHIBIDOS.items():
+            if base == prohibido.lower():
+                malos.append((f, porque))
+    return sorted(malos)
 
 
 def self_test() -> int:
@@ -64,6 +77,18 @@ def self_test() -> int:
     hits = revisar({"INCIDENT_PATTERNS.md", "PENDIENTES-SIN-PUBLICAR.md"})
     print(f"  {'OK ' if len(hits) == 2 else 'BAD'}  catches every named file, not just the first")
     ok &= len(hits) == 2
+    # Moving it into a subfolder does not make it public documentation.
+    hits = revisar({"docs/internal/CLAUDE.md"})
+    print(f"  {'OK ' if hits else 'BAD'}  catches it in a subfolder, not only at the top")
+    ok &= bool(hits)
+    # Windows does not care about case, so neither can this.
+    hits = revisar({"Claude.md"})
+    print(f"  {'OK ' if hits else 'BAD'}  catches it with different capitalisation")
+    ok &= bool(hits)
+    # And a file that merely mentions the name is not the file.
+    hits = revisar({"docs/why-we-removed-claude-md.md"})
+    print(f"  {'OK ' if not hits else 'BAD'}  does not fire on a doc that just names it")
+    ok &= not hits
     print("\n" + ("OK: it catches internal docs and leaves public ones alone." if ok else "BAD: fix it."))
     return 0 if ok else 1
 
@@ -76,8 +101,8 @@ if __name__ == "__main__":
         print("REJECTED: internal documents in a public repository.\n")
         for f, por in malos:
             print(f"  {f}\n      {por}")
-        print(f"\nBrisvia's repository is read by strangers. These are for us, not for them.")
-        print(f"Keep them in {PRIVADO}, outside any git repo, or in a PRIVATE one.")
+        print("\nBrisvia's repository is read by strangers. These are for us, not for them.")
+        print("Keep them outside any git repository, or in a private one.")
         print("If a rule in one of them matters to outside contributors, extract that rule -- in")
         print("English and sanitised -- into CONTRIBUTING.md or SECURITY.md instead.")
         sys.exit(1)
