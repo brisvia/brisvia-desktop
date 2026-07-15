@@ -192,15 +192,21 @@ jobs:
           echo "--- ldd ---"; ldd "$NODE" || true
           echo "--- readelf: dependencias declaradas ---"; readelf -d "$NODE" | grep NEEDED || true
 
-          # La lista se saca de readelf NEEDED, no de ldd. Dos razones:
-          #  1) NEEDED es lo que el binario DECLARA que necesita. ldd ademas resuelve y agrega cosas que
-          #     no son dependencias declaradas: el cargador (/lib64/ld-linux-x86-64.so.2) y el vdso, que
-          #     el kernel y glibc ponen solos en TODA maquina Linux.
-          #  2) ldd los imprime con la ruta completa, y ahi este guard se comio un falso positivo: al
-          #     recortar el nombre, "/lib64/ld-linux-x86-64.so.2" quedaba como "/lib64/ld-linux-x86" y no
-          #     matcheaba "ld-linux" de la lista. El binario estaba PERFECTO y el guard lo rechazo.
-          # Allowed: only what any Linux ships (glibc and company).
-          PERMITIDAS="libc libm libgcc_s libstdc++ libpthread libdl librt libatomic libresolv"
+          # La lista se saca de readelf NEEDED, no de ldd: NEEDED es lo que el binario DECLARA que
+          # necesita, mientras que ldd ademas resuelve y agrega el vdso (que pone el kernel) y encima
+          # imprime todo con la ruta completa. Ese detalle le costo a este guard un falso positivo: al
+          # recortar el nombre, "/lib64/ld-linux-x86-64.so.2" quedaba como "/lib64/ld-linux-x86" y no
+          # matcheaba "ld-linux" de la lista. El binario estaba PERFECTO y el guard lo rechazo.
+          #
+          # Allowed: only what any Linux ships (glibc and company). El cargador (ld-linux-*) va
+          # en la lista porque SI aparece en NEEDED en los binarios que salen del toolchain de depends —
+          # comprobado en la salida real, no supuesto. Suponer que no aparecia costo el segundo falso
+          # positivo seguido.
+          #
+          # Esta lista se probo contra las dos salidas reales antes de subirla:
+          #   [libstdc++.so.6 libm.so.6 libgcc_s.so.1 libc.so.6 ld-linux-x86-64.so.2]  -> ACEPTA
+          #   [libevent_core-2.1.so.7 libevent_pthreads-2.1.so.7 libc.so.6]            -> RECHAZA
+          PERMITIDAS="libc libm libgcc_s libstdc++ libpthread libdl librt libatomic libresolv ld-linux-x86-64 ld-linux-aarch64 ld-linux"
           NEEDED=$(readelf -d "$NODE" | sed -nE 's/.*\(NEEDED\).*\[(.+)\].*/\1/p')
           # Fail-closed: un binario dinamico SIEMPRE declara al menos libc. Si esto sale vacio, readelf
           # fallo o el archivo no es lo que creemos — y un guard que no puede leer no puede aprobar.
