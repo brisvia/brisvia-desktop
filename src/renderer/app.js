@@ -23,7 +23,10 @@ function transError(err) {
       NODE_REPAIR_FAILED: 'errors.node_repair_failed',
       NODE_START_FAILED: 'errors.node_start_failed',
       NODE_BINARY_MISSING: 'errors.node_binary_missing',
-      INVALID_AMOUNT: 'errors.invalid_amount',
+      INVALID_AMOUNT: 'errors.invalid_amount', SEND_IN_PROGRESS: 'errors.send_in_progress',
+      AMOUNT_TOO_SMALL: 'errors.amount_too_small',
+      OPERATION_FAILED: 'errors.operation_failed', SEND_STATUS_UNKNOWN: 'errors.send_status_unknown',
+      WALLET_LOCKED: 'errors.wallet_locked',
       POOL_ADDR_INVALID: 'errors.pool_addr_invalid',
       POOL_ADDR_FORMAT: 'errors.pool_addr_format',
       POOL_ADDR_PORT: 'errors.pool_addr_port',
@@ -569,18 +572,40 @@ function fakeQR(seedStr) {
 // Send
 // Accepts the amount with comma OR dot as decimal separator (an es user types "12,5", an en user "12.5").
 // If there is a comma, dots are treated as thousands separators and dropped.
+// Turns what the user typed into the canonical form the backend accepts: digits and at most one DOT.
+// Returns null if it is ambiguous — the caller must then refuse to send, never guess.
+//
+// Each language has exactly ONE decimal separator, and the other character is an ERROR, not a thousands
+// separator: in English "1,000" means one thousand, so reinterpreting the comma as a decimal point would
+// send 1 BRVA instead of 1000 and lose 999. Nobody can tell "1,000" (one thousand) from "1,000" (one, with
+// three decimals) without knowing the convention — so we don't try. Thousands separators are not accepted
+// in either language; the placeholder shows the expected shape.
+function toCanonicalAmount(raw, lang) {
+  const s = String(raw == null ? '' : raw).trim().replace(/\s/g, '');
+  if (s === '') return null;
+  const decimal = lang === 'es' ? ',' : '.';
+  const foreign = lang === 'es' ? '.' : ',';
+  if (s.includes(foreign)) return null;          // "1,000" in EN or "1.000" in ES: ambiguous, refuse
+  if (s.split(decimal).length > 2) return null;  // more than one separator
+  if (!/^[0-9]*[.,]?[0-9]*$/.test(s)) return null;
+  const canon = s.replace(decimal, '.');
+  return /[0-9]/.test(canon) ? canon : null;
+}
+// Numeric value, for on-screen checks only (over-balance, greater-than-zero). What TRAVELS is the
+// canonical string: money must not pass through a JS number on its way to the backend.
 function parseAmount(str) {
-  if (str == null) return NaN;
-  let s = String(str).trim().replace(/\s/g, '');
-  if (s === '') return NaN;
-  if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
-  const n = Number(s);
+  const canon = toCanonicalAmount(str, window.I18N && window.I18N.lang);
+  if (canon == null) return NaN;
+  const n = Number(canon);
   return Number.isFinite(n) ? n : NaN;
 }
 // Plain decimal (up to 8 places, trailing zeros trimmed, dot separator) that parseAmount can read back.
 function fmtAmountInput(n) {
   if (!(n > 0)) return '0';
-  return n.toFixed(8).replace(/\.?0+$/, '');
+  const plain = n.toFixed(8).replace(/\.?0+$/, '');
+  // Write it with the separator this language expects, or "use max" would fill the box with text the
+  // very same language rules then reject.
+  return (window.I18N && window.I18N.lang === 'es') ? plain.replace('.', ',') : plain;
 }
 $('#act-send').addEventListener('click', () => {
   $('#send-addr').value = ''; $('#send-amount').value = ''; $('#send-pass').value = ''; $('#send-msg').hidden = true;
@@ -607,17 +632,28 @@ $('#send-go').addEventListener('click', async () => {
   const go = $('#send-go');
   if (go.disabled) return; // already sending: block a double click
   const addr = $('#send-addr').value.trim();
-  const amount = parseAmount($('#send-amount').value);
+  // The canonical STRING is what travels: money must not pass through a JS number on its way to the
+  // backend, which parses it into integer base units. null means the text was ambiguous (a separator that
+  // does not belong to this language) — refuse to send rather than guess which amount was meant.
+  const amountCanon = toCanonicalAmount($('#send-amount').value, window.I18N && window.I18N.lang);
+  const amount = amountCanon == null ? NaN : Number(amountCanon);
   const pass = $('#send-pass').value;
   const msg = $('#send-msg'); msg.hidden = false; msg.className = 'verify-msg err';
   if (!addr || addr.length < 14 || !addr.toLowerCase().includes('brv')) { msg.textContent = T('send.invalid_addr'); return; }
-  if (!(amount > 0)) { msg.textContent = T('send.invalid_amount'); return; }
+  if (amountCanon == null || !(amount > 0)) { msg.textContent = T('send.invalid_amount'); return; }
   if (amount > availableBalance + 1e-8) { msg.textContent = T('send.over_balance'); return; }
   if (walletEncrypted && !pass) { msg.textContent = T('send.need_pass'); return; }
   go.disabled = true; go.classList.add('is-busy');
-  const r = await window.brisvia.wallet.send(addr, amount, pass);
+  const r = await window.brisvia.wallet.send(addr, amountCanon, pass);
   if (r && r.ok) { msg.className = 'verify-msg ok'; msg.textContent = T('send.done'); setTimeout(() => closeModal('modal-send'), 1200); loadWallet(); }
-  else { go.disabled = false; go.classList.remove('is-busy'); msg.textContent = r && r.error ? transError(r.error) : T('send.fail'); }
+  else if (r && r.error === 'ERR:SEND_STATUS_UNKNOWN') {
+    // The node never confirmed: the payment MAY be on the network. Do not re-enable the button and do not
+    // retry — a retry here could pay twice. Refresh the balance and history so the answer is on screen,
+    // and leave the decision to the person, who can now see whether it went out.
+    go.classList.remove('is-busy');
+    msg.textContent = transError(r.error);
+    loadWallet();
+  } else { go.disabled = false; go.classList.remove('is-busy'); msg.textContent = r && r.error ? transError(r.error) : T('send.fail'); }
 });
 
 // ===================== Settings =====================
