@@ -1,0 +1,195 @@
+name: Verify candidate artifacts
+
+# Verifica los artefactos del borrador SIN RECOMPILAR: baja cada paquete, le saca el nodo de adentro,
+# lo ejecuta en su sistema nativo y le pregunta a EL cual es su red.
+#
+# Por que existe (ChatGPT, 2026-07-15): "No alcanza con que el workflow haya ejecutado el binario antes de
+# empaquetarlo. Hay que ejecutar el que salio de adentro del paquete final." El build verifica lo que
+# stagea; esto verifica lo que la gente descarga. No es lo mismo, y la diferencia entre ambos es
+# exactamente donde se cuela un sidecar equivocado.
+#
+# Corre en runners descartables: no toca la maquina de nadie.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag del release borrador a verificar (ej: v1.0.6)"
+        required: true
+        default: "v1.0.6"
+
+env:
+  GENESIS: aa6bc268339aa9f4f2e39ae33aca7b7e48e395033d08d37c08f828890af7baf7
+  # Las tres semillas, serializadas como van dentro del binario: 0x01 (IPv4), 0x04 (largo), IP, puerto BE.
+  SEED_HOSTINGER: "0104bb4df0912475"
+  SEED_ORACLE1: "01048150fa242475"
+  SEED_ORACLE2: "0104819f6c662475"
+
+jobs:
+  windows:
+    name: Windows — extraer el nodo del instalador y ejecutarlo
+    runs-on: windows-latest
+    steps:
+      - name: Bajar el instalador del borrador
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "${{ inputs.tag }}" --repo ${{ github.repository }} `
+             --pattern "*_x64-setup.exe" --dir dl
+          Get-ChildItem dl | ForEach-Object { Write-Host "  $($_.Name)  $($_.Length) bytes" }
+
+      - name: Extraer el sidecar del instalador
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem dl -Filter *_x64-setup.exe | Select-Object -First 1
+          & 7z x "$($setup.FullName)" -o"unpack" -y | Out-Null
+          $nodes = @(Get-ChildItem unpack -Recurse -Filter bitcoind.exe)
+          if ($nodes.Count -ne 1) { throw "FALLO: el instalador trae $($nodes.Count) bitcoind.exe, se esperaba exactamente 1" }
+          $h = (Get-FileHash $nodes[0].FullName -Algorithm SHA256).Hash.ToLower()
+          Write-Host "sidecar extraido: $($nodes[0].FullName)"
+          Write-Host "SHA-256: $h"
+          "NODE=$($nodes[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $cli = @(Get-ChildItem unpack -Recurse -Filter bitcoin-cli.exe)[0]
+          "CLI=$($cli.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Las tres semillas estan en el nodo que se distribuye
+        shell: pwsh
+        run: |
+          # Sin semilla DNS, esta lista es la UNICA forma que tiene un cliente nuevo de encontrar la red.
+          # Una que falte no da error: es un nodo semilla al que nadie puede llegar, y se descubre el dia
+          # del lanzamiento. Se busca el patron serializado dentro del binario, no en el codigo fuente.
+          $bytes = [System.IO.File]::ReadAllBytes($env:NODE)
+          $hex = [System.BitConverter]::ToString($bytes).Replace("-", "").ToLower()
+          $faltan = @()
+          foreach ($s in @(@("Hostinger", $env:SEED_HOSTINGER), @("Oracle-1", $env:SEED_ORACLE1), @("Oracle-2", $env:SEED_ORACLE2))) {
+            if ($hex.Contains($s[1])) { Write-Host "  OK    semilla $($s[0])" } else { Write-Host "  FALTA semilla $($s[0])"; $faltan += $s[0] }
+          }
+          if ($faltan.Count -gt 0) { throw "FALLO: faltan semillas en el binario distribuido: $($faltan -join ', ')" }
+
+      - name: Ejecutar el nodo extraido y preguntarle su red
+        shell: pwsh
+        run: |
+          # La prueba que importa: no confiar en el arbol de fuentes ni en el binario que se stageo.
+          # Preguntarle al binario que la gente realmente instala.
+          $dd = Join-Path $env:RUNNER_TEMP "probe"
+          New-Item -ItemType Directory -Force -Path $dd | Out-Null
+          "server=1`nrpcuser=t`nrpcpassword=t`nlisten=0`n[brisvia]`nrpcport=28471" | Out-File -Encoding ascii "$dd/bitcoin.conf"
+          $p = Start-Process -FilePath $env:NODE -ArgumentList "-datadir=$dd","-chain=brisvia" -PassThru -WindowStyle Hidden
+          Start-Sleep -Seconds 18
+          $a = @("-datadir=$dd","-chain=brisvia","-rpcport=28471","-rpcuser=t","-rpcpassword=t")
+          $genesis = (& $env:CLI @a getblockhash 0) 2>&1 | Out-String
+          $info    = (& $env:CLI @a getblockchaininfo) 2>&1 | Out-String
+          & $env:CLI @a stop 2>&1 | Out-Null
+          Start-Sleep -Seconds 5
+          $genesis = $genesis.Trim()
+          Write-Host "genesis reportado : $genesis"
+          if ($genesis -ne $env:GENESIS) { throw "FALLO: el nodo distribuido tiene el genesis $genesis, no el de la red real de Brisvia" }
+          if ($info -notmatch '"chain":\s*"brisvia"') { throw "FALLO: el nodo no esta en la red brisvia" }
+          if ($info -notmatch '"blocks":\s*0') { throw "FALLO: el nodo no arranca en altura 0" }
+          # Cierre limpio: si queda un proceso vivo, el instalador de la proxima version lo va a matar.
+          if ($p -and -not $p.HasExited) { throw "FALLO: el nodo no cerro solo con stop; quedaria un proceso huerfano" }
+          Write-Host "OK: red brisvia, altura 0, genesis correcto, cierre limpio"
+
+  linux:
+    name: Linux — extraer el nodo del .deb y ejecutarlo
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bajar el .deb del borrador
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "${{ inputs.tag }}" --repo ${{ github.repository }} --pattern "*_amd64.deb" --dir dl
+          ls -la dl
+
+      - name: Extraer el sidecar
+        run: |
+          cd dl && ar x *_amd64.deb && mkdir -p x && tar -xzf data.tar.gz -C x
+          NODES=$(find x -name bitcoind | wc -l)
+          [ "$NODES" -eq 1 ] || { echo "FALLO: el paquete trae $NODES bitcoind, se esperaba 1"; exit 1; }
+          NODE=$(find x -name bitcoind)
+          CLI=$(find x -name bitcoin-cli)
+          chmod +x "$NODE" "$CLI"
+          echo "NODE=$PWD/$NODE" >> "$GITHUB_ENV"
+          echo "CLI=$PWD/$CLI" >> "$GITHUB_ENV"
+          echo "sidecar: $NODE  ($(sha256sum "$NODE" | cut -d' ' -f1))"
+
+      - name: Las tres semillas estan en el nodo que se distribuye
+        run: |
+          HEX=$(xxd -p "$NODE" | tr -d '\n')
+          FALTAN=""
+          for s in "Hostinger:$SEED_HOSTINGER" "Oracle-1:$SEED_ORACLE1" "Oracle-2:$SEED_ORACLE2"; do
+            n="${s%%:*}"; p="${s##*:}"
+            if echo "$HEX" | grep -q "$p"; then echo "  OK    semilla $n"; else echo "  FALTA semilla $n"; FALTAN="$FALTAN $n"; fi
+          done
+          [ -z "$FALTAN" ] || { echo "FALLO: faltan semillas:$FALTAN"; exit 1; }
+
+      - name: Ejecutar el nodo extraido y preguntarle su red
+        run: |
+          DD=$(mktemp -d)
+          { echo "server=1"; echo "rpcuser=t"; echo "rpcpassword=t"; echo "listen=0"; echo "[brisvia]"; echo "rpcport=28472"; } > "$DD/bitcoin.conf"
+          "$NODE" -datadir="$DD" -chain=brisvia &
+          NPID=$!
+          sleep 18
+          A="-datadir=$DD -chain=brisvia -rpcport=28472 -rpcuser=t -rpcpassword=t"
+          GEN=$("$CLI" $A getblockhash 0 2>&1 | tr -d '[:space:]')
+          INFO=$("$CLI" $A getblockchaininfo 2>&1)
+          "$CLI" $A stop >/dev/null 2>&1 || true
+          sleep 5
+          echo "genesis reportado : $GEN"
+          [ "$GEN" = "$GENESIS" ] || { echo "FALLO: genesis $GEN, no es el de la red real"; exit 1; }
+          echo "$INFO" | grep -q '"chain": *"brisvia"' || { echo "FALLO: no esta en la red brisvia"; exit 1; }
+          echo "$INFO" | grep -q '"blocks": *0' || { echo "FALLO: no arranca en altura 0"; exit 1; }
+          kill -0 $NPID 2>/dev/null && { echo "FALLO: el nodo no cerro solo; quedaria un proceso huerfano"; exit 1; } || true
+          echo "OK: red brisvia, altura 0, genesis correcto, cierre limpio"
+
+  macos:
+    name: macOS — extraer el nodo del .app y ejecutarlo
+    runs-on: macos-latest
+    steps:
+      - name: Bajar el paquete del borrador
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "${{ inputs.tag }}" --repo ${{ github.repository }} --pattern "*.app.tar.gz" --dir dl
+          ls -la dl
+
+      - name: Extraer el sidecar
+        run: |
+          cd dl && mkdir -p x && tar -xzf *.app.tar.gz -C x
+          NODES=$(find x -name bitcoind | wc -l | tr -d ' ')
+          [ "$NODES" -eq 1 ] || { echo "FALLO: el paquete trae $NODES bitcoind, se esperaba 1"; exit 1; }
+          NODE=$(find x -name bitcoind)
+          CLI=$(find x -name bitcoin-cli)
+          chmod +x "$NODE" "$CLI"
+          echo "NODE=$PWD/$NODE" >> "$GITHUB_ENV"
+          echo "CLI=$PWD/$CLI" >> "$GITHUB_ENV"
+          echo "sidecar: $NODE  ($(shasum -a 256 "$NODE" | cut -d' ' -f1))"
+
+      - name: Las tres semillas estan en el nodo que se distribuye
+        run: |
+          HEX=$(xxd -p "$NODE" | tr -d '\n')
+          FALTAN=""
+          for s in "Hostinger:$SEED_HOSTINGER" "Oracle-1:$SEED_ORACLE1" "Oracle-2:$SEED_ORACLE2"; do
+            n="${s%%:*}"; p="${s##*:}"
+            if echo "$HEX" | grep -q "$p"; then echo "  OK    semilla $n"; else echo "  FALTA semilla $n"; FALTAN="$FALTAN $n"; fi
+          done
+          [ -z "$FALTAN" ] || { echo "FALLO: faltan semillas:$FALTAN"; exit 1; }
+
+      - name: Ejecutar el nodo extraido y preguntarle su red
+        run: |
+          DD=$(mktemp -d)
+          { echo "server=1"; echo "rpcuser=t"; echo "rpcpassword=t"; echo "listen=0"; echo "[brisvia]"; echo "rpcport=28473"; } > "$DD/bitcoin.conf"
+          "$NODE" -datadir="$DD" -chain=brisvia &
+          NPID=$!
+          sleep 18
+          A="-datadir=$DD -chain=brisvia -rpcport=28473 -rpcuser=t -rpcpassword=t"
+          GEN=$("$CLI" $A getblockhash 0 2>&1 | tr -d '[:space:]')
+          INFO=$("$CLI" $A getblockchaininfo 2>&1)
+          "$CLI" $A stop >/dev/null 2>&1 || true
+          sleep 5
+          echo "genesis reportado : $GEN"
+          [ "$GEN" = "$GENESIS" ] || { echo "FALLO: genesis $GEN, no es el de la red real"; exit 1; }
+          echo "$INFO" | grep -q '"chain": *"brisvia"' || { echo "FALLO: no esta en la red brisvia"; exit 1; }
+          kill -0 $NPID 2>/dev/null && { echo "FALLO: el nodo no cerro solo; quedaria un proceso huerfano"; exit 1; } || true
+          echo "OK: red brisvia, altura 0, genesis correcto, cierre limpio"
