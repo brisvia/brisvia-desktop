@@ -88,16 +88,27 @@ jobs:
           foreach ($v in @('good', 'bad')) {
             Write-Host "=== building $v ==="
             Push-Location "$v/src-tauri"
-            $json = cargo test --lib --no-run --message-format=json 2>$null
+            $json = cargo test --lib --no-run --message-format=json
             Pop-Location
+            # The marker is profile.test, not target.test. target.test says the target CAN be tested;
+            # profile.test says THIS artifact was built as a test binary. Asking for the wrong one found
+            # nothing and this step threw after a clean 3.5-minute build -- a bug in the diagnostic, not
+            # in what it was diagnosing.
             $exe = $null
+            $vistos = 0
             foreach ($line in $json) {
+              if ($line -notmatch '^\s*\{') { continue }
               try { $m = $line | ConvertFrom-Json } catch { continue }
-              if ($m.reason -eq 'compiler-artifact' -and $m.target.test -eq $true -and $m.executable) {
-                $exe = $m.executable
+              if ($m.reason -eq 'compiler-artifact' -and $m.executable) {
+                $vistos++
+                if ($m.profile.test -eq $true) { $exe = $m.executable }
               }
             }
-            if (-not $exe) { throw "FAIL: cargo did not report a test executable for $v" }
+            if (-not $exe) {
+              Write-Host "artifacts with an executable: $vistos"
+              $json | Select-String '"executable"' | Select-Object -First 5 | ForEach-Object { Write-Host "  $_" }
+              throw "FAIL: cargo reported no test executable for $v"
+            }
             Write-Host "  $v -> $exe"
             "$v=$exe" | Out-File -Append evidence/exe-paths.txt
             if ($v -eq 'good') { "EXE_GOOD=$exe" | Out-File -Append $env:GITHUB_ENV }
