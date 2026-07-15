@@ -1,0 +1,193 @@
+name: Diagnose Windows test loader failure
+
+# Disposable diagnostic. Builds nothing that ships, publishes nothing, touches no tag.
+#
+# WHAT IT IS FOR
+# --------------
+# rc6's Windows job died at the Rust test step:
+#
+#   brisvia_miner_lib-2916f99034f113b9.exe wallet_key_tests --nocapture
+#   (exit code: 0xc0000139, STATUS_ENTRYPOINT_NOT_FOUND)
+#
+# rc4 and rc5 passed that same step; rc6 failed. Bisection therefore bounds the regression to the change
+# between rc5 and rc6. The MECHANISM is not proven, and that is what this workflow is for.
+#
+# What 0xc0000139 actually means, precisely: Windows loaded a DLL and could NOT find inside it a
+# procedure the executable imports. It is NOT "a DLL is missing" -- that would be 0xc0000135. So the
+# honest statement is: the new test executable imports a function that does not exist in the version of
+# some DLL that Windows resolves. Which DLL, and which function, is unknown so far.
+#
+# `wallet_key_tests` in the message does not incriminate that test. Cargo builds ONE executable for the
+# whole library and applies the name filter at run time. If the loader cannot start the .exe, no test
+# runs at all -- the first name on the list is simply the one it was about to try.
+#
+# HOW IT PROVES IT
+# ----------------
+# Both tags are built on the SAME runner, same Rust, same environment, caches off. Anything that differs
+# between the two binaries is then attributable to the source change and to nothing else -- which is the
+# whole point, and why this cannot be done by comparing a local build against a CI one.
+#
+# Nothing is fixed here. It reports; someone reads it and then decides.
+
+on:
+  workflow_dispatch:
+    inputs:
+      good_tag:
+        description: "Tag whose tests PASS (baseline)"
+        required: true
+        default: "v1.0.6-rc5"
+      bad_tag:
+        description: "Tag whose tests FAIL"
+        required: true
+        default: "v1.0.6-rc6"
+
+jobs:
+  compare:
+    runs-on: windows-latest
+    steps:
+      - name: Toolchain, pinned so the two builds differ only in source
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: MSVC tools (dumpbin lives here)
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Record the environment once, since both builds share it
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path evidence | Out-Null
+          $env:PATH | Out-File evidence/PATH.txt
+          rustc -Vv    | Tee-Object evidence/rustc.txt
+          cargo -V     | Tee-Object evidence/cargo.txt
+          Write-Host "runner: $env:RUNNER_OS $env:RUNNER_ARCH  image: $env:ImageOS $env:ImageVersion"
+          "runner=$env:RUNNER_OS $env:RUNNER_ARCH image=$env:ImageOS $env:ImageVersion" |
+            Out-File evidence/runner.txt
+
+      # Each tag gets its own checkout and its own target dir. No shared cache: a cache would let one
+      # build reuse artifacts from the other, and then a difference could come from the cache rather
+      # than from the source, which is exactly what must not happen here.
+      - name: Check out the baseline
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.good_tag }}
+          path: good
+
+      - name: Check out the failing one
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.bad_tag }}
+          path: bad
+
+      - name: Build both test executables (no run)
+        shell: pwsh
+        env:
+          CARGO_INCREMENTAL: 0
+        run: |
+          # --no-run stops before executing: what is wanted is the binary, not a verdict.
+          # --message-format=json is how cargo says WHERE it put it. Guessing the path from the target
+          # dir would work until the hash in the filename changes, which is precisely when it matters.
+          foreach ($v in @('good', 'bad')) {
+            Write-Host "=== building $v ==="
+            Push-Location "$v/src-tauri"
+            $json = cargo test --lib --no-run --message-format=json 2>$null
+            Pop-Location
+            $exe = $null
+            foreach ($line in $json) {
+              try { $m = $line | ConvertFrom-Json } catch { continue }
+              if ($m.reason -eq 'compiler-artifact' -and $m.target.test -eq $true -and $m.executable) {
+                $exe = $m.executable
+              }
+            }
+            if (-not $exe) { throw "FAIL: cargo did not report a test executable for $v" }
+            Write-Host "  $v -> $exe"
+            "$v=$exe" | Out-File -Append evidence/exe-paths.txt
+            if ($v -eq 'good') { "EXE_GOOD=$exe" | Out-File -Append $env:GITHUB_ENV }
+            else               { "EXE_BAD=$exe"  | Out-File -Append $env:GITHUB_ENV }
+          }
+
+      - name: Identity of each executable
+        shell: pwsh
+        run: |
+          foreach ($p in @(@{n='good'; e=$env:EXE_GOOD}, @{n='bad'; e=$env:EXE_BAD})) {
+            $f = Get-Item $p.e
+            $h = (Get-FileHash $p.e -Algorithm SHA256).Hash
+            Write-Host "$($p.n): $($f.Length) bytes  SHA256=$h"
+            "$($p.n)  $($f.Length)  $h  $($p.e)" | Out-File -Append evidence/identity.txt
+            # DLLs sitting next to the binary: the loader looks there first, so this is part of the
+            # environment the executable actually starts in.
+            Get-ChildItem $f.DirectoryName -Filter *.dll -ErrorAction SilentlyContinue |
+              ForEach-Object { "$($p.n)  $($_.Name)  $($_.Length)" } |
+              Out-File -Append evidence/dlls-next-to-exe.txt
+          }
+
+      # THE decisive step. If the baseline lists its tests and the other one dies with 0xc0000139
+      # before running a single one, the failure belongs to loading the executable -- not to the logic
+      # of any test, and not to wallet_key_tests in particular.
+      - name: Can each executable even start? (--list)
+        shell: pwsh
+        run: |
+          foreach ($p in @(@{n='good'; e=$env:EXE_GOOD}, @{n='bad'; e=$env:EXE_BAD})) {
+            Write-Host "=== $($p.n) --list ==="
+            & $p.e --list 2>&1 | Select-Object -First 12 | Tee-Object -Append evidence/list-$($p.n).txt
+            $code = $LASTEXITCODE
+            $hex = '0x{0:X8}' -f $code
+            Write-Host "  exit code: $code  ($hex)"
+            "$($p.n) exit=$code hex=$hex" | Out-File -Append evidence/list-exit-codes.txt
+          }
+          Write-Host "`n--- what this shows ---"
+          Write-Host "baseline starting + the other dying here = a load failure, before any test runs."
+
+      - name: What each executable imports
+        shell: pwsh
+        run: |
+          foreach ($p in @(@{n='good'; e=$env:EXE_GOOD}, @{n='bad'; e=$env:EXE_BAD})) {
+            dumpbin /DEPENDENTS $p.e > "evidence/dependents-$($p.n).txt" 2>&1
+            dumpbin /IMPORTS    $p.e > "evidence/imports-$($p.n).txt"    2>&1
+          }
+          Write-Host "=== DLLs the failing one needs and the baseline does not ==="
+          $g = (Select-String -Path evidence/dependents-good.txt -Pattern '^\s+(\S+\.dll)$' -AllMatches).Matches.Groups[1].Value
+          $b = (Select-String -Path evidence/dependents-bad.txt  -Pattern '^\s+(\S+\.dll)$' -AllMatches).Matches.Groups[1].Value
+          $nuevas = Compare-Object $g $b | Where-Object SideIndicator -eq '=>' | ForEach-Object InputObject
+          if ($nuevas) { $nuevas | ForEach-Object { Write-Host "  NEW: $_" } } else { Write-Host "  (none)" }
+          $nuevas | Out-File evidence/new-dlls.txt
+
+          Write-Host "`n=== imported functions the failing one has and the baseline does not ==="
+          # /IMPORTS lists each function under its DLL. A diff of those lines is the evidence that
+          # matters for 0xc0000139: the error is about a FUNCTION, not about a file.
+          $fg = Get-Content evidence/imports-good.txt | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[0-9A-F]+\s+\w' }
+          $fb = Get-Content evidence/imports-bad.txt  | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[0-9A-F]+\s+\w' }
+          $df = Compare-Object $fg $fb | Where-Object SideIndicator -eq '=>' | ForEach-Object InputObject
+          Write-Host "  $($df.Count) new imported symbols"
+          $df | Select-Object -First 40 | ForEach-Object { Write-Host "    $_" }
+          $df | Out-File evidence/new-imports.txt
+
+      - name: For every new DLL, does it export what is being asked of it?
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          # The proof is a pair: the executable imports FunctionX from LibraryY.dll, and the LibraryY.dll
+          # that Windows actually resolves does not export FunctionX. Anything less is still a guess.
+          if (-not (Test-Path evidence/new-dlls.txt)) { Write-Host "no new DLLs"; exit 0 }
+          foreach ($d in (Get-Content evidence/new-dlls.txt | Where-Object { $_ })) {
+            $real = (Get-Command $d -ErrorAction SilentlyContinue).Source
+            if (-not $real) {
+              $near = Join-Path (Split-Path $env:EXE_BAD) $d
+              if (Test-Path $near) { $real = $near }
+            }
+            if ($real) {
+              $h = (Get-FileHash $real -Algorithm SHA256).Hash
+              $v = (Get-Item $real).VersionInfo.FileVersion
+              Write-Host "$d -> $real  (version $v, SHA256 $h)"
+              "$d  $real  $v  $h" | Out-File -Append evidence/resolved-dlls.txt
+              dumpbin /EXPORTS $real > "evidence/exports-$($d -replace '\.dll$','').txt" 2>&1
+            } else {
+              Write-Host "$d -> NOT FOUND on PATH or next to the executable"
+              "$d  NOT-FOUND" | Out-File -Append evidence/resolved-dlls.txt
+            }
+          }
+
+      - name: Keep everything, whatever the verdict
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-loader-evidence
+          path: evidence/
