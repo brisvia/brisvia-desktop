@@ -127,9 +127,25 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path C:\tools | Out-Null
           Copy-Item approved-tools\tools\ci\*.ps1 C:\tools\ -Force
-          Get-ChildItem C:\tools | ForEach-Object {
+
+          # Collect the hashes BEFORE writing anything, and write the list somewhere else.
+          #
+          # The first version piped Get-ChildItem C:\tools into Tee-Object C:\tools\hashes.txt: the file
+          # appeared inside the directory mid-enumeration, and Get-FileHash then tried to read it while
+          # Tee-Object still held it open. Writing into the folder you are walking is a classic. It cost
+          # thirty seconds here instead of eighty minutes further in, which is the entire argument for
+          # the gate this job depends on.
+          $hashes = @(Get-ChildItem C:\tools -Filter *.ps1 | ForEach-Object {
             "$($_.Name)  $((Get-FileHash $_.FullName -Algorithm SHA256).Hash)"
-          } | Tee-Object C:\tools\hashes.txt
+          })
+          $hashes | ForEach-Object { Write-Host "  $_" }
+          $hashes | Out-File C:\tools-hashes.txt
+
+          # Fail closed. Without this, every later step dies one at a time with a confusing
+          # "command not found" instead of saying what is actually wrong.
+          if (-not (Test-Path C:\tools\Invoke-NativeProcess.ps1)) {
+            throw "the approved helper is not in C:\tools: the diagnostic cannot measure anything"
+          }
           Remove-Item approved-tools -Recurse -Force
 
       - name: MSVC tools (dumpbin lives here)
