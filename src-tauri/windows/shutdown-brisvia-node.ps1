@@ -40,6 +40,52 @@ param(
 $ErrorActionPreference = 'Stop'
 function Log($m) { Write-Host "[brisvia-shutdown] $m" }
 
+# Windows' own command-line parser. Not a regex, and not a split on spaces.
+#
+# A first attempt matched `-datadir=(?:"([^"]+)"|([^\s"]+))`, which looks reasonable and is wrong.
+# Rust's Command::arg quotes the WHOLE argument when it contains a space:
+#
+#     "-datadir=C:\Users\Juan Perez\AppData\BrisviaSim"
+#
+# The quote sits before `-datadir`, not after the `=`. That pattern therefore stops at the first space
+# and returns `C:\Users\Juan` -- a folder that does not exist. The script would then fail to find the
+# cookie and abort the install of a user whose only sin is having a space in their name. Which is most
+# people.
+#
+# CommandLineToArgvW is the function Windows itself uses to turn a command line back into arguments.
+# It knows the real rules -- quotes, backslash escaping, the lot -- because it is the other half of the
+# code that wrote them.
+Add-Type -Namespace Brisvia -Name Win32 -MemberDefinition @'
+[DllImport("shell32.dll", SetLastError = true)]
+public static extern IntPtr CommandLineToArgvW([MarshalAs(UnmanagedType.LPWStr)] string lpCmdLine, out int pNumArgs);
+'@ -ErrorAction Stop
+
+function Get-Args([string]$cmdline) {
+    if ([string]::IsNullOrWhiteSpace($cmdline)) { return @() }
+    $n = 0
+    $p = [Brisvia.Win32]::CommandLineToArgvW($cmdline, [ref]$n)
+    if ($p -eq [IntPtr]::Zero) { throw "cannot parse the command line" }
+    try {
+        $out = @()
+        for ($i = 0; $i -lt $n; $i++) {
+            $ptr = [Runtime.InteropServices.Marshal]::ReadIntPtr($p, $i * [IntPtr]::Size)
+            $out += [Runtime.InteropServices.Marshal]::PtrToStringUni($ptr)
+        }
+        return $out
+    } finally {
+        [void][Runtime.InteropServices.Marshal]::FreeHGlobal($p)
+    }
+}
+
+# Read `-name=value` out of already-parsed arguments. The value is whatever follows the first `=`:
+# no further splitting, so a path with spaces, accents or `=` in it survives intact.
+function Get-Flag([string[]]$args_, [string]$name) {
+    foreach ($a in $args_) {
+        if ($a -like "-$name=*") { return $a.Substring($name.Length + 2) }
+    }
+    return $null
+}
+
 try {
     # ---------------------------------------------------------------- find OUR node, and only ours
     # By full path, never by name. A user's own bitcoind.exe is not ours to touch.
@@ -69,10 +115,8 @@ try {
 
         # ------------------------------------------------------------ its REAL datadir, from its own
         # command line. Not guessed, not a hardcoded default: whatever this process was actually told.
-        $datadir = $null
-        if ($p.CommandLine -match '-datadir=(?:"([^"]+)"|([^\s"]+))') {
-            $datadir = if ($Matches[1]) { $Matches[1] } else { $Matches[2] }
-        }
+        $argv = Get-Args $p.CommandLine
+        $datadir = Get-Flag $argv 'datadir' 
         if (-not $datadir) {
             Log "FAIL: cannot read -datadir from its command line. Not guessing where its data lives."
             exit 1
@@ -80,7 +124,7 @@ try {
         Log "  datadir: $datadir"
 
         # The chain subfolder holds the cookie. Read it from the command line too.
-        $chain = if ($p.CommandLine -match '-chain=([^\s"]+)') { $Matches[1] } else { $null }
+        $chain = Get-Flag $argv 'chain' 
         if (-not $chain) {
             Log "FAIL: cannot read -chain from its command line."
             exit 1
@@ -90,7 +134,8 @@ try {
 
         # ------------------------------------------------------------ its RPC port, from its own config
         $port = $null
-        if ($p.CommandLine -match '-rpcport=(\d+)') { $port = [int]$Matches[1] }
+        $pf = Get-Flag $argv 'rpcport'
+        if ($pf -and $pf -match '^\d+$') { $port = [int]$pf }
         if (-not $port) {
             $conf = Join-Path $datadir 'bitcoin.conf'
             if (Test-Path $conf) {
