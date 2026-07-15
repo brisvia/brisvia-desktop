@@ -190,15 +190,28 @@ jobs:
           [ -f "$NODE" ] || { echo "FALLO: no existe $NODE. El guard no puede verificar nada."; exit 1; }
           [ -s "$NODE" ] || { echo "FALLO: $NODE esta vacio"; exit 1; }
           echo "--- ldd ---"; ldd "$NODE" || true
-          PERMITIDAS="linux-vdso libc libm libgcc_s libstdc++ libpthread libdl librt ld-linux libatomic libresolv"
+          echo "--- readelf: dependencias declaradas ---"; readelf -d "$NODE" | grep NEEDED || true
+
+          # La lista se saca de readelf NEEDED, no de ldd. Dos razones:
+          #  1) NEEDED es lo que el binario DECLARA que necesita. ldd ademas resuelve y agrega cosas que
+          #     no son dependencias declaradas: el cargador (/lib64/ld-linux-x86-64.so.2) y el vdso, que
+          #     el kernel y glibc ponen solos en TODA maquina Linux.
+          #  2) ldd los imprime con la ruta completa, y ahi este guard se comio un falso positivo: al
+          #     recortar el nombre, "/lib64/ld-linux-x86-64.so.2" quedaba como "/lib64/ld-linux-x86" y no
+          #     matcheaba "ld-linux" de la lista. El binario estaba PERFECTO y el guard lo rechazo.
+          # Allowed: only what any Linux ships (glibc and company).
+          PERMITIDAS="libc libm libgcc_s libstdc++ libpthread libdl librt libatomic libresolv"
+          NEEDED=$(readelf -d "$NODE" | sed -nE 's/.*\(NEEDED\).*\[(.+)\].*/\1/p')
+          # Fail-closed: un binario dinamico SIEMPRE declara al menos libc. Si esto sale vacio, readelf
+          # fallo o el archivo no es lo que creemos — y un guard que no puede leer no puede aprobar.
+          [ -n "$NEEDED" ] || { echo "FALLO: readelf no devolvio ninguna NEEDED. El guard no puede verificar nada."; exit 1; }
           MALAS=""
-          while read -r lib resto; do
-            case "$lib" in ""|"statically"|"linux-vdso.so.1") continue ;; esac
-            base=$(echo "$lib" | sed -E 's/-[0-9].*//; s/\.so.*//')
+          for lib in $NEEDED; do
+            base=$(echo "$lib" | sed -E 's/\.so.*//')
             ok=0
             for p in $PERMITIDAS; do [ "$base" = "$p" ] && ok=1 && break; done
             [ "$ok" -eq 0 ] && MALAS="$MALAS $lib"
-          done < <(ldd "$NODE" | awk '{print $1}')
+          done
           if [ -n "$MALAS" ]; then
             echo "FALLO: el nodo depende de librerias que el usuario puede no tener:$MALAS"
             echo "       Todo lo de terceros debe ir dentro del binario (toolchain de depends)."
@@ -206,7 +219,6 @@ jobs:
           fi
           ldd "$NODE" | grep -qi "not found" && { echo "FALLO: faltan librerias"; exit 1; } || true
           ldd "$NODE" | grep -qiE "/home/runner|/opt/hostedtoolcache" && { echo "FALLO: apunta a una ruta del runner"; exit 1; } || true
-          echo "--- readelf: dependencias declaradas ---"; readelf -d "$NODE" | grep NEEDED || true
           echo "OK: solo librerias del sistema; nada de terceros, nada del runner"
 
       - name: Build the Tauri app (.AppImage + .deb + signed updater artifact)
