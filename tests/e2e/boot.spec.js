@@ -1,28 +1,28 @@
-// Test E2E: la app arranca sin errores.
-// Verifica que, con una billetera existente en la red real, la app abre directo en la Billetera
-// y no tira errores de consola ni excepciones durante el arranque y el primer refresco.
+// E2E test: the app boots with no errors.
+// Verifies that, with an existing wallet on the real network, the app opens straight into the Wallet
+// and throws no console errors or exceptions during boot and the first refresh.
 'use strict';
 
 const { test, expect } = require('@playwright/test');
 const { installMock, captureErrors } = require('./fixtures');
 
-test('la app levanta en la Billetera sin errores de consola', async ({ page }) => {
+test('the app boots into the Wallet with no console errors', async ({ page }) => {
   const errors = captureErrors(page);
 
-  // Escenario: red real (mainnet) + billetera ya creada -> arranca en la vista Billetera.
+  // Scenario: real network (mainnet) + wallet already created -> boots into the Wallet view.
   await installMock(page, { network: 'brisvia', walletReady: true, walletOnDisk: true });
 
   await page.goto('/');
 
-  // La vista Billetera queda visible (el onboarding permanece oculto).
+  // The Wallet view is visible (onboarding stays hidden).
   await expect(page.locator('.view[data-view="wallet"]')).toBeVisible();
   await expect(page.locator('#setup')).toBeHidden();
 
-  // The version chip fills from app_version (bridge to the backend started OK).
+  // The version chip is filled from app_version (the bridge to the backend booted OK).
   await expect(page.locator('#ver-chip')).toHaveText('v1.0.0');
 
-  // We give the periodic polls (node, miner, achievements) a few seconds so no late errors appear.
+  // Give the periodic polls (node, miner, achievements) a few seconds so no late errors show up.
   await page.waitForTimeout(2500);
 
-  expect(errors, 'there should be no console errors on startup:\n' + errors.join('\n')).toEqual([]);
+  expect(errors, 'there should be no console errors on boot:\n' + errors.join('\n')).toEqual([]);
 });

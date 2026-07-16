@@ -26,22 +26,22 @@ const AFTER_LAUNCH = MAINNET_START + 3600;  // Aug 1 16:00 UTC -> already enable
 
 // Journey plan. app: which binary; regtest: isolated regtest node; nowUnix: frozen clock (wait mode).
 const PLAN = [
-  { file: '01-apertura.spec.js', app: harness.APP_E2E, regtest: true },
-  { file: '02-crear-billetera.spec.js', app: harness.APP_E2E, regtest: true },
-  { file: '03a-modo-espera-antes.spec.js', app: harness.APP_MAINNET_E2E, regtest: true, nowUnix: BEFORE_LAUNCH },
-  { file: '03b-modo-espera-despues.spec.js', app: harness.APP_MAINNET_E2E, regtest: true, nowUnix: AFTER_LAUNCH },
-  { file: '04-nodo-regtest.spec.js', app: harness.APP_E2E, regtest: true },
-  { file: '05-minado.spec.js', app: harness.APP_E2E, regtest: true },
-  { file: '06-cierre-recuperacion.spec.js', app: harness.APP_E2E, regtest: true },
+  { file: '01-first-launch.spec.js', app: harness.APP_E2E, regtest: true },
+  { file: '02-create-wallet.spec.js', app: harness.APP_E2E, regtest: true },
+  { file: '03a-wait-mode-before.spec.js', app: harness.APP_MAINNET_E2E, regtest: true, nowUnix: BEFORE_LAUNCH },
+  { file: '03b-wait-mode-after.spec.js', app: harness.APP_MAINNET_E2E, regtest: true, nowUnix: AFTER_LAUNCH },
+  { file: '04-regtest-node.spec.js', app: harness.APP_E2E, regtest: true },
+  { file: '05-mining.spec.js', app: harness.APP_E2E, regtest: true },
+  { file: '06-close-recovery.spec.js', app: harness.APP_E2E, regtest: true },
   // Wallet journeys (real backend without a node): restore, backup/receive, security, send,
   // language, settings and re-entry.
-  { file: '07-restaurar.spec.js', app: harness.APP_E2E, regtest: true },
-  { file: '08-backup-recibir.spec.js', app: harness.APP_E2E, regtest: true },
-  { file: '09-contrasena-incorrecta.spec.js', app: harness.APP_E2E, regtest: true },
-  { file: '10-enviar.spec.js', app: harness.APP_E2E, regtest: true },
-  { file: '11-idioma.spec.js', app: harness.APP_E2E, regtest: true },
-  { file: '12-configuracion.spec.js', app: harness.APP_E2E, regtest: true },
-  { file: '13-reingreso.spec.js', app: harness.APP_E2E, regtest: true },
+  { file: '07-restore-wallet.spec.js', app: harness.APP_E2E, regtest: true },
+  { file: '08-backup-receive.spec.js', app: harness.APP_E2E, regtest: true },
+  { file: '09-wrong-password.spec.js', app: harness.APP_E2E, regtest: true },
+  { file: '10-send.spec.js', app: harness.APP_E2E, regtest: true },
+  { file: '11-language.spec.js', app: harness.APP_E2E, regtest: true },
+  { file: '12-settings.spec.js', app: harness.APP_E2E, regtest: true },
+  { file: '13-reentry.spec.js', app: harness.APP_E2E, regtest: true },
 ];
 
 // Optional filter --only <substr,substr>

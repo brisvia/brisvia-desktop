@@ -1,22 +1,22 @@
-// Test E2E: crear billetera nueva (el flujo del bug del wpkh que se acaba de arreglar).
+// E2E test: create a new wallet (the wpkh bug flow that was just fixed).
 //
-// Cubre dos cosas:
+// Covers two things:
 //  1) Happy path: from "Choose a password", with a valid password, the app ADVANCES and shows the
-//     12 palabras, sin el error "wpkh(): key '...' is not valid".
-//  2) Regression guard: if the backend fails again with that error, the UI shows it and does NOT advance.
-//     (Con backend mockeado no se regenera la llave real; el generador real de descriptores se valida
-//      aparte con el test de Rust `wallet_key_tests`. Este test cuida el contrato de la UI.)
+//     12 words, without the "wpkh(): key '...' is not valid" error.
+//  2) Regression guard: if the backend were to fail again with that error, the UI shows it and does NOT
+//     advance. (With a mocked backend the real key is not regenerated; the real descriptor generator is
+//      validated separately by the Rust `wallet_key_tests` test. This test guards the UI contract.)
 'use strict';
 
 const { test, expect } = require('@playwright/test');
 const { installMock, captureErrors, DEMO_WORDS } = require('./fixtures');
 
-// Advances onboarding to the "Choose a password" screen (step 'pass') to create a wallet.
+// Advances onboarding up to the "Choose a password" screen (step 'pass') to create a wallet.
 async function irAContrasena(page) {
   await page.goto('/');
-  // Sin billetera en disco -> aparece el alta (onboarding) en el paso de bienvenida.
+  // No wallet on disk -> onboarding appears on the welcome step.
   await expect(page.locator('.step[data-step="welcome"]')).toBeVisible();
-  // 3 diapositivas de bienvenida -> pasar a "crear o importar".
+  // 3 welcome slides -> move on to "create or import".
   await page.click('#onb-next');
   await page.click('#onb-next');
   await page.click('#onb-next');
@@ -44,7 +44,7 @@ test('create wallet: a valid password advances to the 12 words without the wpkh 
   await page.fill('#pass-2', 'Brisvia-Test-123');
   await page.click('#pass-next');
 
-  // AVANZA: se muestra el paso de las 12 palabras.
+  // ADVANCES: the 12-words step is shown.
   await expect(page.locator('.step[data-step="seed"]')).toBeVisible();
   await expect(page.locator('#seed-grid li')).toHaveCount(12);
   await expect(page.locator('#seed-grid li').first()).toHaveText(DEMO_WORDS[0]);
@@ -53,7 +53,7 @@ test('create wallet: a valid password advances to the 12 words without the wpkh 
   await expect(page.locator('#pass-msg')).toBeHidden();
   await expect(page.locator('body')).not.toContainText('wpkh');
 
-  // Y no hubo errores de consola en todo el flujo.
+  // And there were no console errors throughout the whole flow.
   expect(errors, 'there should be no console errors when creating the wallet:\n' + errors.join('\n')).toEqual([]);
 });
 
@@ -73,7 +73,7 @@ test('regression guard: if the backend returns the wpkh error, the UI shows it a
   await page.fill('#pass-2', 'Brisvia-Test-123');
   await page.click('#pass-next');
 
-  // The UI shows the error and STAYS on the password screen (does not reach the 12 words).
+  // The UI shows the error and STAYS on the password screen (it never reaches the 12 words).
   await expect(page.locator('#pass-msg')).toBeVisible();
   await expect(page.locator('#pass-msg')).toContainText('wpkh');
   await expect(page.locator('.step[data-step="pass"]')).toBeVisible();
