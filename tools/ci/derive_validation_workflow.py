@@ -190,6 +190,32 @@ def pasos_de_build(texto):
     # The ref comes from the input: this validates one commit, named explicitly and never abbreviated.
     bloque = re.sub(r"(uses: actions/checkout@v4\n)(?!(\s+with:))",
                     r"\1        with:\n          ref: ${{ inputs.ref }}\n", bloque, count=1)
+
+    # DELIBERATE, DECLARED difference from the release workflow -- not drift. The approval conditions
+    # require validation to be incapable of signing, so the production key is not passed. With the key
+    # gone, createUpdaterArtifacts must also be forced off: left on, tauri would try to sign an artifact
+    # it cannot and fail. A precondition refuses to run if a key reaches this job anyway; a postcondition
+    # fails if any .sig is produced. The NSIS installer -- the thing under test -- is still built.
+    paso_firmado = re.compile(
+        r"      - name: Build the Tauri app[^\n]*\n"
+        r"        run: npm run tauri build[^\n]*\n"
+        r"        env:\n"
+        r"          TAURI_SIGNING_PRIVATE_KEY:[^\n]*\n"
+        r"          TAURI_SIGNING_PRIVATE_KEY_PASSWORD:[^\n]*\n")
+    paso_validacion = (
+        "      - name: Build the Tauri app (NSIS installer, no signing, no updater artifacts)\n"
+        "        shell: pwsh\n"
+        "        run: |\n"
+        "          if ($env:TAURI_SIGNING_PRIVATE_KEY) { throw \"the validation job must not receive the production signing key\" }\n"
+        "          npm run tauri build -- --features mainnet --config src-tauri/tauri.validation.conf.json\n"
+        "          $sigs = Get-ChildItem -Recurse -Filter *.sig -ErrorAction SilentlyContinue\n"
+        "          if ($sigs) { throw \"a .sig artifact was produced: validation must not sign -- $($sigs.FullName -join ', ')\" }\n")
+    bloque, n = paso_firmado.subn(paso_validacion, bloque)
+    if n != 1:
+        raise SystemExit(
+            f"expected exactly 1 signed tauri-build step to strip, found {n}. build-windows.yml changed "
+            f"shape around signing; update the transform before deriving.")
+
     return bloque.rstrip("\n")
 
 
@@ -218,6 +244,20 @@ def main():
                 print(f"  FAIL  the copied block contains {prohibido}: it could publish")
                 fallos += 1
         print("  PASS  copies-nothing-that-publishes")
+
+        # The signing key must be stripped, and the validation config must be passed. This is the
+        # declared difference, so it must actually hold in the output.
+        if "TAURI_SIGNING_PRIVATE_KEY:" in b:
+            print("  FAIL  the signing key survived into the validation build step")
+            fallos += 1
+        else:
+            print("  PASS  strips-the-signing-key")
+        if "tauri.validation.conf.json" not in b:
+            print("  FAIL  createUpdaterArtifacts is not forced off; a keyless build would fail trying to sign")
+            fallos += 1
+        else:
+            print("  PASS  forces-createUpdaterArtifacts-off")
+
         if "\t" in generar():
             print("  FAIL  the generated file has a tab -- a path that escaped twice")
             fallos += 1

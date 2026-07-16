@@ -168,11 +168,13 @@ jobs:
       - name: Install frontend dependencies
         run: npm install
 
-      - name: Build the Tauri app (NSIS installer + signed updater artifact)
-        run: npm run tauri build -- --features mainnet
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+      - name: Build the Tauri app (NSIS installer, no signing, no updater artifacts)
+        shell: pwsh
+        run: |
+          if ($env:TAURI_SIGNING_PRIVATE_KEY) { throw "the validation job must not receive the production signing key" }
+          npm run tauri build -- --features mainnet --config src-tauri/tauri.validation.conf.json
+          $sigs = Get-ChildItem -Recurse -Filter *.sig -ErrorAction SilentlyContinue
+          if ($sigs) { throw "a .sig artifact was produced: validation must not sign -- $($sigs.FullName -join ', ')" }
 
       # ---------------------------------------------------------------------------------------------
       # From here down: validation. Nothing above this line was written by hand.
