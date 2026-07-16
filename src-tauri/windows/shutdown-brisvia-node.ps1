@@ -123,10 +123,24 @@ try {
         }
         Log "  datadir: $datadir"
 
-        # The chain subfolder holds the cookie. Read it from the command line too.
-        $chain = Get-Flag $argv 'chain' 
+        # The chain subfolder holds the cookie. Try the command line, then bitcoin.conf.
+        #
+        # This fallback is not optional: spawn_node in the app passes ONLY -datadir on the command line
+        # and writes `chain=` into bitcoin.conf. Reading -chain from the command line alone therefore
+        # returns nothing for the real node and aborts EVERY update -- the exact class of bug the seven
+        # scenarios exist to catch, found here by reading how the app actually launches the node rather
+        # than how a test might conveniently launch it. rpcport already has this same conf fallback below.
+        $chain = Get-Flag $argv 'chain'
         if (-not $chain) {
-            Log "FAIL: cannot read -chain from its command line."
+            $conf = Join-Path $datadir 'bitcoin.conf'
+            if (Test-Path $conf) {
+                foreach ($l in Get-Content $conf) {
+                    if ($l -match '^\s*chain\s*=\s*(\S+)') { $chain = $Matches[1] }
+                }
+            }
+        }
+        if (-not $chain) {
+            Log "FAIL: cannot determine its chain from the command line or bitcoin.conf."
             exit 1
         }
         $sub = if ($chain -eq 'main') { '' } else { $chain }
