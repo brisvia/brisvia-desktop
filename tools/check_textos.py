@@ -58,30 +58,30 @@ def claves(bloque):
 
 
 kes, ken = claves(blk_es), claves(blk_en)
-print(f"claves ES: {len(kes)} | claves EN: {len(ken)}")
+print(f"ES keys: {len(kes)} | EN keys: {len(ken)}")
 
 # ---------- 1) missing keys ----------
 for k in sorted(set(kes) - set(ken)):
-    fallos.append(f"la clave '{k}' existe en ESPANOL pero falta en INGLES.")
+    fallos.append(f"key '{k}' exists in SPANISH but is missing in ENGLISH.")
 for k in sorted(set(ken) - set(kes)):
-    fallos.append(f"la clave '{k}' existe en INGLES pero falta en ESPANOL.")
+    fallos.append(f"key '{k}' exists in ENGLISH but is missing in SPANISH.")
 
 # ---------- 2) mixed languages ----------
 for k, v in sorted(ken.items()):
     if re.search(r"[áéíóúñ¿¡]", v, re.I) or re.search(
         r"\b(puedes|billetera|contraseña|puerto|ejemplo|computadora|minado|guardar)\b", v, re.I
     ):
-        fallos.append(f"texto en ESPANOL dentro del diccionario INGLES: {k} = \"{v[:70]}\"")
+        fallos.append(f"Spanish text inside the ENGLISH dictionary: {k} = \"{v[:70]}\"")
 for k, v in sorted(kes.items()):
     if re.search(r"\b(you can|your wallet|the pool|password|mining|please|not ready)\b", v, re.I):
-        fallos.append(f"texto en INGLES dentro del diccionario ESPANOL: {k} = \"{v[:70]}\"")
+        fallos.append(f"English text inside the SPANISH dictionary: {k} = \"{v[:70]}\"")
 
 # ---------- 3) hard-coded text in the HTML ----------
 for m in re.finditer(r'<(input|textarea)[^>]*placeholder="([^"]+)"[^>]*>', html):
     if "data-i18n" not in m.group(0) and m.group(2) not in PERMITIDO:
         fallos.append(
-            f'texto fijo en el HTML que nunca se traduce: placeholder "{m.group(2)}" '
-            f"-- usá data-i18n-attr=\"placeholder:seccion.clave\"."
+            f'hard-coded HTML text that never gets translated: placeholder "{m.group(2)}" '
+            f"-- use data-i18n-attr=\"placeholder:section.key\"."
         )
 for m in re.finditer(
     r'<(span|div|p|h[1-4]|button|label)(?![^>]*data-i18n)[^>]*>([^<>{]{2,60})</\1>', html
@@ -89,11 +89,11 @@ for m in re.finditer(
     txt = m.group(2).strip()
     if not txt or re.fullmatch(r"[\W\d\s·—…]+", txt) or txt.startswith("&") or txt in PERMITIDO:
         continue
-    fallos.append(f'texto fijo en el HTML que nunca se traduce: <{m.group(1)}>"{txt[:50]}"')
+    fallos.append(f'hard-coded HTML text that never gets translated: <{m.group(1)}>"{txt[:50]}"')
 
 if fallos:
-    print("\nFALLA EL CONTRATO DE TEXTOS:\n")
+    print("\nTEXT CONTRACT FAILED:\n")
     for f in fallos:
         print("  - " + f)
     sys.exit(1)
-print("OK: los dos idiomas estan completos, sin mezclas, y el HTML no tiene texto fijo sin traducir.")
+print("OK: both languages are complete, no mixing, and the HTML has no hard-coded untranslated text.")

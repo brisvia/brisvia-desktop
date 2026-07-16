@@ -35,44 +35,44 @@ def head(url):
         return str(e)
 
 
-print(f"consultando el manifest como lo hace la app:\n  {MANIFEST}")
+print(f"querying the manifest the way the app does:\n  {MANIFEST}")
 try:
     with urllib.request.urlopen(MANIFEST, timeout=45) as r:
         cuerpo = r.read().decode()
     print("  HTTP 200")
 except Exception as e:
-    print(f"\nFALLA: la app NO puede leer el manifest -> {e}")
-    print("Nadie se entera de la actualizacion. Falta subir latest.json al release marcado como 'latest'")
-    print("(generarlo con tools/make_latest_json.py <tag>).")
+    print(f"\nFAIL: the app CANNOT read the manifest -> {e}")
+    print("Nobody hears about the update. latest.json still needs to be uploaded to the release marked 'latest'")
+    print("(generate it with tools/make_latest_json.py <tag>).")
     sys.exit(1)
 
 try:
     d = json.loads(cuerpo)
 except json.JSONDecodeError as e:
-    sys.exit(f"FALLA: el manifest no es JSON valido -> {e}")
+    sys.exit(f"FAIL: the manifest is not valid JSON -> {e}")
 
 version = d.get("version", "")
-print(f"  version que ofrece: {version}")
+print(f"  version it offers: {version}")
 
 if len(sys.argv) > 1 and version != sys.argv[1].lstrip("v"):
-    fallos.append(f"el manifest ofrece {version} pero se esperaba {sys.argv[1].lstrip('v')}")
+    fallos.append(f"the manifest offers {version} but {sys.argv[1].lstrip('v')} was expected")
 
 plats = d.get("platforms", {})
 for falta in ESPERADAS - set(plats):
-    fallos.append(f"falta la plataforma {falta}: esa gente se queda sin actualizacion y sin enterarse")
+    fallos.append(f"platform {falta} is missing: those users are stranded with no update and no notice")
 
 for plat, v in plats.items():
     if not v.get("signature", "").strip():
-        fallos.append(f"{plat}: firma vacia (la app rechaza la actualizacion sin firma valida)")
+        fallos.append(f"{plat}: empty signature (the app rejects the update without a valid signature)")
     url = v.get("url", "")
     code = head(url)
     print(f"  {plat:<16} HTTP {code}  {url.split('/')[-1]}")
     if code != 200:
-        fallos.append(f"{plat}: el instalador no baja ({url} -> {code})")
+        fallos.append(f"{plat}: the installer does not download ({url} -> {code})")
 
 if fallos:
-    print("\nFALLA EL ACTUALIZADOR:\n")
+    print("\nUPDATER FAILED:\n")
     for f in fallos:
         print("  - " + f)
     sys.exit(1)
-print(f"\nOK: la app ve la {version} y las {len(plats)} plataformas bajan con firma.")
+print(f"\nOK: the app sees {version} and all {len(plats)} platforms download with a signature.")

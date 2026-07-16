@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Barrido de errores: ningun ERR: del backend puede llegar al usuario sin texto en su idioma.
+"""Error sweep: no backend ERR: may reach the user without text in their language.
 
-Por que existe: el frontend (app.js transError) muestra TAL CUAL cualquier string que no reconoce. Si el
-backend inventa un ERR:NUEVO y nadie lo mapea, el usuario ve "ERR:NUEVO" en pantalla. Y si friendly_error
-deja pasar el texto crudo del nodo, el usuario lee ingles interno y su propia carpeta personal en una
-pantalla que mueve plata. Este script falla si eso puede pasar.
+Why it exists: the frontend (app.js transError) shows ANY string it does not recognize AS-IS. If the
+backend invents an ERR:NEW and nobody maps it, the user sees "ERR:NEW" on screen. And if friendly_error
+lets the node's raw text through, the user reads internal English and their own personal folder on a
+screen that moves money. This script fails if that can happen.
 
-Uso:  python tools/check_error_sweep.py
+Usage:  python tools/check_error_sweep.py
 """
 import pathlib
 import re
@@ -22,38 +22,38 @@ def main() -> int:
 
     fallos = []
 
-    # 1) Todo ERR: que el backend produce tiene que estar en el mapa del frontend.
-    #    "ERR:CODE" aparece en el comentario que explica el formato: no es un codigo real.
+    # 1) Every ERR: the backend produces must be in the frontend map.
+    #    "ERR:CODE" appears in the comment that explains the format: it is not a real code.
     codigos = {c[4:] for c in re.findall(r'"(ERR:[A-Z_]+)"', rust)} - {"CODE"}
-    # El mapa pone varios por linea; sin ancla de inicio de linea (un ^ aca solo veria el primero).
+    # The map packs several per line; without a line-start anchor (a ^ here would see only the first).
     mapeados = set(re.findall(r"([A-Z_]{3,}):\s*'errors\.", app))
     for falta in sorted(codigos - mapeados):
-        fallos.append(f"ERR:{falta} lo produce el backend y NO esta en el mapa: el usuario veria el codigo crudo")
+        fallos.append(f"ERR:{falta} is produced by the backend and is NOT in the map: the user would see the raw code")
 
-    # 2) Toda clave del mapa tiene que tener texto, y en los dos idiomas.
+    # 2) Every key in the map must have text, and in both languages.
     claves = set(re.findall(r"'errors\.([a-z_]+)'", app))
     for k in sorted(claves):
         n = len(re.findall(rf"\b{k}:\s*'", loc))
         if n == 0:
-            fallos.append(f"errors.{k} esta mapeado pero NO tiene texto en locales.js")
+            fallos.append(f"errors.{k} is mapped but has NO text in locales.js")
         elif n < 2:
-            fallos.append(f"errors.{k} tiene texto en {n} idioma(s): faltan traducciones")
+            fallos.append(f"errors.{k} has text in {n} language(s): translations missing")
 
-    # 3) friendly_error no puede devolver el mensaje crudo del nodo.
+    # 3) friendly_error must not return the node's raw message.
     cuerpo = re.search(r"fn friendly_error\(.*?\n\}", rust, re.S)
     if cuerpo and re.search(r"^\s*msg\.to_string\(\)\s*$", cuerpo.group(0), re.M):
         fallos.append(
-            "friendly_error devuelve msg.to_string() como fallback: el texto crudo del nodo (con rutas "
-            "personales y la palabra 'Bitcoin') llegaria al usuario. Debe devolver un codigo saneado."
+            "friendly_error returns msg.to_string() as a fallback: the node's raw text (with personal "
+            "paths and the word 'Bitcoin') would reach the user. It must return a sanitized code."
         )
 
-    print(f"codigos del backend: {len(codigos)} | mapeados: {len(mapeados)} | claves con texto: {len(claves)}")
+    print(f"backend codes: {len(codigos)} | mapped: {len(mapeados)} | keys with text: {len(claves)}")
     if fallos:
-        print("\nFALLA EL BARRIDO DE ERRORES:\n")
+        print("\nERROR SWEEP FAILED:\n")
         for f in fallos:
             print(f"  - {f}")
         return 1
-    print("OK: todos los errores del backend llegan traducidos, en los dos idiomas, y ninguno crudo.")
+    print("OK: every backend error arrives translated, in both languages, and none raw.")
     return 0
 
 

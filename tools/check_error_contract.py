@@ -27,7 +27,7 @@ fallos = []
 
 def leer(p):
     if not p.exists():
-        fallos.append(f"no existe el archivo {p}")
+        fallos.append(f"file does not exist: {p}")
         return ""
     return p.read_text(encoding="utf-8")
 
@@ -46,7 +46,7 @@ rust_errs = set(re.findall(r'"ERR:([A-Z_0-9]+)"', codigo_rust))
 # The map packs several pairs per line, so scan the whole block instead of line by line.
 m = re.search(r"const map = \{(.*?)\n    \};", app, re.S)
 if not m:
-    fallos.append("no encontre el mapa de errores (transError) en app.js")
+    fallos.append("could not find the error map (transError) in app.js")
     mapa = {}
 else:
     mapa = dict(re.findall(r"([A-Z_0-9]+):\s*'([a-z_0-9.]+)'", m.group(1)))
@@ -77,32 +77,32 @@ def tiene_clave(bloque_txt, dotted):
 es = bloque(loc, "es")
 en = bloque(loc, "en")
 if not es:
-    fallos.append("no encontre el bloque de textos en ESPANOL en locales.js")
+    fallos.append("could not find the SPANISH text block in locales.js")
 if not en:
-    fallos.append("no encontre el bloque de textos en INGLES en locales.js")
+    fallos.append("could not find the ENGLISH text block in locales.js")
 
 # --- check 1: every Rust error is translated ---
 for e in sorted(rust_errs):
     if e not in mapa:
         fallos.append(
-            f"Rust puede devolver ERR:{e} pero el programa no sabe mostrarlo: "
-            f"falta '{e}' en transError (app.js). Al usuario le saldria texto crudo."
+            f"Rust can return ERR:{e} but the program cannot show it: "
+            f"'{e}' is missing in transError (app.js). The user would get raw text."
         )
 
 # --- check 2: no dead entries in the map ---
 for e in sorted(mapa):
     if e not in rust_errs:
         fallos.append(
-            f"transError traduce ERR:{e} pero Rust nunca lo devuelve. "
-            f"Sobra, o alguien renombro el error y quedo texto muerto."
+            f"transError translates ERR:{e} but Rust never returns it. "
+            f"It is spare, or someone renamed the error and left dead text."
         )
 
 # --- check 3: the referenced key exists in BOTH languages ---
 for e, clave in sorted(mapa.items()):
     if es and not tiene_clave(es, clave):
-        fallos.append(f"ERR:{e} apunta a '{clave}' y esa clave NO existe en ESPANOL.")
+        fallos.append(f"ERR:{e} points to '{clave}' and that key does NOT exist in SPANISH.")
     if en and not tiene_clave(en, clave):
-        fallos.append(f"ERR:{e} apunta a '{clave}' y esa clave NO existe en INGLES.")
+        fallos.append(f"ERR:{e} points to '{clave}' and that key does NOT exist in ENGLISH.")
 
 # --- check 4: raw messages that reach the user ---
 # ok_or / ok_or_else / map_err returning a plain English sentence instead of an ERR: code.
@@ -113,13 +113,13 @@ for m in re.finditer(r'\.ok_or(?:_else)?\(\s*\|?\|?\s*"([^"]{12,})"', rust):
         crudos.append(txt)
 for txt in sorted(set(crudos)):
     fallos.append(
-        f'mensaje crudo que puede llegar al usuario: "{txt}" -- deberia ser un codigo ERR:X traducido.'
+        f'raw message that can reach the user: "{txt}" -- it should be a translated ERR:X code.'
     )
 
-print(f"errores que emite Rust: {len(rust_errs)} | traducidos en el programa: {len(mapa)}")
+print(f"errors Rust emits: {len(rust_errs)} | translated in the program: {len(mapa)}")
 if fallos:
-    print("\nFALLA EL CONTRATO DE ERRORES:\n")
+    print("\nERROR CONTRACT FAILED:\n")
     for f in fallos:
         print("  - " + f)
     sys.exit(1)
-print("OK: todos los errores del programa llegan al usuario traducidos en ES y EN.")
+print("OK: every error in the program reaches the user translated in ES and EN.")
