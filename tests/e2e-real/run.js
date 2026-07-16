@@ -1,12 +1,12 @@
-// Runner del testing E2E REAL (capas 3 y 4) de Brisvia.
+// Runner for Brisvia's REAL E2E testing (layers 3 and 4).
 //
 // Why it exists: the app binary is launched by tauri-driver, which WebdriverIO starts in its MAIN PROCESS
-// (hook onPrepare). Ese proceso hereda el entorno de quien lo invoca. Entonces, para darle a cada recorrido
-// su propia carpeta de datos, puerto RPC, cadena (regtest) y reloj de prueba, corremos wdio UNA VEZ POR SPEC
-// from here, setting the environment BEFORE invoking wdio. Between specs we clean everything (node + orphans + temporaries).
+// (onPrepare hook). That process inherits the environment of whoever invoked it. So, to give each journey
+// its own data folder, RPC port, chain (regtest) and test clock, we run wdio ONCE PER SPEC from here,
+// setting the environment BEFORE invoking wdio. Between specs we clean everything (node + orphans + temp).
 //
-// Uso:
-//   node tests/e2e-real/run.js                 -> corre los 6 recorridos P0 en orden
+// Usage:
+//   node tests/e2e-real/run.js                 -> runs the 6 P0 journeys in order
 //   node tests/e2e-real/run.js --only 01,05    -> runs only the specs whose name contains 01 or 05
 'use strict';
 
@@ -19,10 +19,10 @@ const ROOT = harness.ROOT;
 const CONFIG = path.join(ROOT, 'wdio.conf.js');
 const SPEC_DIR = path.join(ROOT, 'tests', 'e2e-real', 'specs');
 
-// Instantes unix (segundos) alrededor del lanzamiento real (1-ago-2026 15:00 UTC = 1785596400).
+// Unix instants (seconds) around the real launch (2026-08-01 15:00 UTC = 1785596400).
 const MAINNET_START = 1785596400;
-const BEFORE_LAUNCH = MAINNET_START - 3600; // 14:00 UTC on Aug 1 -> still waiting
-const AFTER_LAUNCH = MAINNET_START + 3600;  // 16:00 UTC del 1-ago -> ya habilitado
+const BEFORE_LAUNCH = MAINNET_START - 3600; // Aug 1 14:00 UTC -> still waiting
+const AFTER_LAUNCH = MAINNET_START + 3600;  // Aug 1 16:00 UTC -> already enabled
 
 // Journey plan. app: which binary; regtest: isolated regtest node; nowUnix: frozen clock (wait mode).
 const PLAN = [
@@ -33,7 +33,7 @@ const PLAN = [
   { file: '04-nodo-regtest.spec.js', app: harness.APP_E2E, regtest: true },
   { file: '05-minado.spec.js', app: harness.APP_E2E, regtest: true },
   { file: '06-cierre-recuperacion.spec.js', app: harness.APP_E2E, regtest: true },
-  // Recorridos de billetera (backend real sin nodo): restaurar, backup/recibir, seguridad, enviar,
+  // Wallet journeys (real backend without a node): restore, backup/receive, security, send,
   // language, settings and re-entry.
   { file: '07-restaurar.spec.js', app: harness.APP_E2E, regtest: true },
   { file: '08-backup-recibir.spec.js', app: harness.APP_E2E, regtest: true },
@@ -44,7 +44,7 @@ const PLAN = [
   { file: '13-reingreso.spec.js', app: harness.APP_E2E, regtest: true },
 ];
 
-// Filtro opcional --only <substr,substr>
+// Optional filter --only <substr,substr>
 function selected() {
   const idx = process.argv.indexOf('--only');
   if (idx === -1) return PLAN;
@@ -52,7 +52,7 @@ function selected() {
   return PLAN.filter((p) => subs.some((s) => p.file.includes(s)));
 }
 
-// Runs a journey: sets up the environment, invokes wdio once, cleans up. Returns true if it passed.
+// Runs a journey: prepares the environment, invokes wdio once, cleans up. Returns true if it passed.
 async function runOne(item, attempt) {
   const tag = item.file.replace('.spec.js', '').replace(/[^\w-]+/g, '_');
   const port = await harness.freePort();
@@ -62,14 +62,14 @@ async function runOne(item, attempt) {
   const env = {
     ...process.env,
     ...harness.envFor({ datadir, port, regtest: item.regtest, nowUnix: item.nowUnix, app: item.app }),
-    // Aseguramos cargo en el PATH (el service puede necesitarlo para tauri-driver).
+    // Make sure cargo is on PATH (the service may need it for tauri-driver).
     PATH: `${path.join(os.homedir(), '.cargo', 'bin')}${path.delimiter}${process.env.PATH}`,
   };
 
-  const label = attempt > 1 ? `${item.file} (reintento ${attempt - 1})` : item.file;
+  const label = attempt > 1 ? `${item.file} (retry ${attempt - 1})` : item.file;
   console.log(`\n=======================================================`);
-  console.log(`▶ Recorrido: ${label}`);
-  console.log(`  binario: ${path.basename(item.app)} | regtest: ${item.regtest} | reloj: ${item.nowUnix ?? 'real'}`);
+  console.log(`▶ Journey: ${label}`);
+  console.log(`  binary: ${path.basename(item.app)} | regtest: ${item.regtest} | clock: ${item.nowUnix ?? 'real'}`);
   console.log(`  datadir: ${datadir} | rpc: ${port}`);
   console.log(`=======================================================`);
 
@@ -83,9 +83,9 @@ async function runOne(item, attempt) {
 
   const cleanup = await harness.teardown(run);
   if (cleanup && !cleanup.cleanExit) {
-    console.log(`  ⚠ NOT a clean shutdown: there were ${cleanup.orphans} orphan process(es) that had to be forced (node/miner).`);
+    console.log(`  ⚠ NOT a clean exit: ${cleanup.orphans} orphan process(es) had to be forced (node/miner).`);
   } else {
-    console.log('  clean shutdown: 0 orphan processes.');
+    console.log('  clean exit: 0 orphan processes.');
   }
   return r.status === 0;
 }
@@ -93,12 +93,12 @@ async function runOne(item, attempt) {
 (async () => {
   const plan = selected();
   if (!plan.length) {
-    console.error('No hay recorridos seleccionados.');
+    console.error('No journeys selected.');
     process.exit(2);
   }
   const results = [];
   for (const item of plan) {
-    // At most 1 retry: if it only passes on retry, it is still marked as unstable in the summary.
+    // At most 1 retry: if it only passes on retry, it is still flagged as flaky in the summary.
     let passed = await runOne(item, 1);
     let retried = false;
     if (!passed) {
@@ -108,13 +108,13 @@ async function runOne(item, attempt) {
     results.push({ file: item.file, passed, retried });
   }
 
-  console.log(`\n\n================  RESUMEN E2E REAL  ================`);
+  console.log(`\n\n================  REAL E2E SUMMARY  ================`);
   for (const r of results) {
-    const mark = r.passed ? (r.retried ? 'PASSED (with retry = unstable)' : 'PASSED') : 'FAILED';
+    const mark = r.passed ? (r.retried ? 'PASSED (on retry = flaky)' : 'PASSED') : 'FAILED';
     console.log(`  ${r.passed ? '✔' : '✖'} ${r.file.padEnd(34)} ${mark}`);
   }
   const failed = results.filter((r) => !r.passed).length;
   console.log(`===================================================`);
-  console.log(`  ${results.length - failed}/${results.length} recorridos en verde\n`);
+  console.log(`  ${results.length - failed}/${results.length} journeys green\n`);
   process.exit(failed ? 1 : 0);
 })();
