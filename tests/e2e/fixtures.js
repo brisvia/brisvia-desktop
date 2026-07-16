@@ -1,13 +1,13 @@
-// Backend simulado (mock) para los tests E2E del frontend.
+// Simulated (mock) backend for the frontend E2E tests.
 //
-// What it does: injects window.__TAURI__.core.invoke BEFORE the page scripts run.
-// This way tauri-bridge.js detects that "Tauri is present" and builds the REAL window.brisvia (isReal: true),
-// exactamente el mismo puente que usa la app instalada. app.js corre sin cambios contra respuestas
-// realistic simulated ones. This tests the UI and the frontend logic (including the password screen
-// y el modo espera) sin depender del backend Rust ni de bitcoind.
+// What it does: injects window.__TAURI__.core.invoke BEFORE the page scripts run. That way
+// tauri-bridge.js detects that "Tauri is there" and builds the REAL window.brisvia (isReal: true),
+// exactly the same bridge the installed app uses. app.js runs unchanged against realistic simulated
+// responses. This tests the UI and the frontend logic (including the password screen and wait mode)
+// without depending on the Rust backend or bitcoind.
 //
-// Honest limitation: mocking invoke does NOT exercise the real wpkh descriptor generator of the
-// backend. Esa parte (el bug de la llave) se cubre aparte con el test de Rust
+// Honest limitation: mocking invoke does NOT exercise the backend's real wpkh descriptor generator.
+// That part (the key bug) is covered separately by the Rust test
 // `wallet_key_tests::ext_key_prefix_matches_build_network` (npm run test:rust).
 'use strict';
 
@@ -19,11 +19,11 @@ const DEMO_WORDS = [
 
 // Installs the mock on the page with a scenario configuration.
 // config:
-//   network       'brisvia' (red real/mainnet) | 'brisvia-test' (red de prueba)
-//   walletReady   true  -> arranca en la Billetera (billetera existente)
-//                 false -> arranca en el alta (onboarding) para crear billetera
-//   walletOnDisk  refleja si hay billetera en disco (decide onboarding)
-//   createWords   words that "create wallet" returns (success)
+//   network       'brisvia' (real network/mainnet) | 'brisvia-test' (test network)
+//   walletReady   true  -> starts on the Wallet (existing wallet)
+//                 false -> starts on onboarding to create a wallet
+//   walletOnDisk  reflects whether a wallet is on disk (decides onboarding)
+//   createWords   words returned by "create wallet" (success)
 //   createError   if set, "create wallet" FAILS with this text (simulates a wpkh regression)
 async function installMock(page, config) {
   const cfg = Object.assign(
@@ -38,16 +38,16 @@ async function installMock(page, config) {
   );
 
   await page.addInitScript((c) => {
-    // Respuestas por comando. Cada una imita la forma real que devuelve el backend Rust.
+    // Responses per command. Each mimics the real shape the Rust backend returns.
     const responders = {
-      // --- Arranque / sistema ---
+      // --- Startup / system ---
       system_locale: () => 'es',
       set_language: () => ({ ok: true }),
       app_version: () => '1.0.0',
       check_update: () => ({ available: false, currentVersion: '1.0.0' }),
       open_url: () => ({ ok: true }),
 
-      // --- Estado del nodo ---
+      // --- Node state ---
       node_status: () => ({
         connected: true,
         walletReady: c.walletReady,
@@ -55,7 +55,7 @@ async function installMock(page, config) {
       }),
       node_info: () => ({
         connected: true,
-        network: c.network, // 'brisvia' => build mainnet (dispara modo espera antes del 1-ago-2026)
+        network: c.network, // 'brisvia' => mainnet build (triggers wait mode before 2026-08-01)
         chain: c.network === 'brisvia' ? 'main' : 'test',
         blocks: 0,
         headers: 0,
@@ -67,7 +67,7 @@ async function installMock(page, config) {
         networkhashps: 0,
       }),
 
-      // --- Minero ---
+      // --- Miner ---
       miner_status: () => ({
         mining: false,
         hashrate: 0,
@@ -82,10 +82,10 @@ async function installMock(page, config) {
       miner_stop: () => ({ mining: false }),
       miner_set_intensity: (a) => ({ intensity: (a && a.intensity) || '50' }),
 
-      // --- Billetera ---
+      // --- Wallet ---
       wallet_exists: () => c.walletReady,
       wallet_create_bip39: () => {
-        // Simula el fallo del backend (p. ej. el bug "wpkh(): key '...' is not valid").
+        // Simulates the backend failure (e.g. the "wpkh(): key '...' is not valid" bug).
         if (c.createError) return Promise.reject(c.createError);
         return { words: c.createWords, fingerprint: '1a2b3c4d' };
       },
@@ -112,7 +112,7 @@ async function installMock(page, config) {
       tx_detail: () => ({ txid: 'demo', amount: 0, confirmations: 0, blockheight: 0, time: 0 }),
       wallet_backup: () => ({ ok: true, path: 'C:/demo/brisvia-wallet.dat' }),
 
-      // --- Logros / ajustes ---
+      // --- Achievements / settings ---
       achievements: () => ({ list: [], justUnlocked: [] }),
       settings_get: () => ({ autostart: false, tray: true, defaultIntensity: '50', miningMode: 'solo' }),
       settings_set: (a) => ({ ok: true, key: a && a.key, value: a && a.value }),
@@ -120,7 +120,7 @@ async function installMock(page, config) {
 
     const invoke = (cmd, args) => {
       const fn = responders[cmd];
-      if (!fn) return Promise.resolve(null); // comando desconocido: como el backend real, no rompe
+      if (!fn) return Promise.resolve(null); // unknown command: like the real backend, does not break
       try {
         return Promise.resolve(fn(args));
       } catch (e) {
@@ -128,20 +128,20 @@ async function installMock(page, config) {
       }
     };
 
-    // withGlobalTauri: true -> la app real espera window.__TAURI__.core.invoke. Lo replicamos.
+    // withGlobalTauri: true -> the real app expects window.__TAURI__.core.invoke. We replicate it.
     window.__TAURI__ = { core: { invoke } };
   }, cfg);
 }
 
 // Hooks the capture of console errors and page exceptions.
-// Devuelve un array que se va llenando; los tests lo revisan al final para exigir "sin errores".
-// Se ignoran los 404 de favicon/recursos opcionales que no afectan el funcionamiento.
+// Returns an array that fills up; the tests check it at the end to require "no errors".
+// The favicon/optional-resource 404s that do not affect operation are ignored.
 function captureErrors(page) {
   const errors = [];
   page.on('console', (msg) => {
     if (msg.type() === 'error') {
       const text = msg.text();
-      if (/favicon/i.test(text)) return; // ruido irrelevante
+      if (/favicon/i.test(text)) return; // irrelevant noise
       errors.push('console.error: ' + text);
     }
   });
