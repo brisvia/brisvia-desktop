@@ -42,6 +42,8 @@ const PLAN = [
   { file: '11-language.spec.js', app: harness.APP_E2E, regtest: true },
   { file: '12-settings.spec.js', app: harness.APP_E2E, regtest: true },
   { file: '13-reentry.spec.js', app: harness.APP_E2E, regtest: true },
+  // Real money path on regtest: fund the wallet by mining, send to an external address, confirm.
+  { file: '14-transaction.spec.js', app: harness.APP_E2E, regtest: true },
 ];
 
 // Optional filter --only <substr,substr>

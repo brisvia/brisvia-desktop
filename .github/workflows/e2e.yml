@@ -159,7 +159,7 @@ jobs:
       # turn red proves nothing; it is worse than not having one, because it gives confidence that does not exist.
       - name: Run real E2E — walkthroughs 03-13 (node, mining, shutdown and wallet)
         shell: pwsh
-        run: npm run test:e2e:real -- --only 03,04,05,06,07,08,09,10,11,12,13
+        run: npm run test:e2e:real -- --only 03,04,05,06,07,08,09,10,11,12,13,14
 
       # We always upload the evidence: since walkthroughs 07-13 run with continue-on-error, the job
       # can stay green even if one fails; without always() we would not have their screenshots to debug.
