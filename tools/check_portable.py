@@ -1,63 +1,63 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Decide si un binario arranca en la maquina de un usuario, o solo en la que lo compilo.
+"""Decide whether a binary starts on a user's machine, or only on the one that compiled it.
 
-POR QUE EXISTE
---------------
-La 1.0.5 publica sale rota en macOS y en Linux: el nodo quedo enlazado contra librerias que existen en
-la maquina de compilacion (Homebrew, libevent-dev) y no en la del usuario. La app abre, el nodo muere, y
-sin nodo no hay billetera, ni red, ni minado. Tres builds en verde no lo detectaron.
+WHY IT EXISTS
+-------------
+The published 1.0.5 ships broken on macOS and Linux: the node was linked against libraries that exist on
+the build machine (Homebrew, libevent-dev) and not on the user's. The app opens, the node dies, and with
+no node there is no wallet, no network, no mining. Three green builds did not catch it.
 
-El primer candado que escribi era un bloque de bash con `ldd` y recortes de nombres con `sed`. Dio DOS
-falsos positivos seguidos, los dos por suponer en vez de leer:
-  1) recorto mal el nombre del cargador y rechazo un binario perfecto;
-  2) despues asumi que el cargador no figuraba entre las dependencias declaradas. Figura.
-Cada uno costo un ciclo de compilacion de 40 minutos.
+The first guard I wrote was a bash block with `ldd` and name trimming via `sed`. It gave TWO false
+positives in a row, both from assuming instead of reading:
+  1) it trimmed the loader name wrong and rejected a perfect binary;
+  2) then it assumed the loader was not among the declared dependencies. It is.
+Each cost a 40-minute build cycle.
 
-Esto no se resuelve con mas cuidado al escribir bash: se resuelve leyendo la estructura del binario en
-vez de parsear texto. Eso es lo que hace `lief`, y es lo que usa el propio Bitcoin Core en
-contrib/guix/symbol-check.py, que corre en cada uno de sus releases.
+This is not solved by writing bash more carefully: it is solved by reading the binary's structure instead
+of parsing text. That is what `lief` does, and it is what Bitcoin Core itself uses in
+contrib/guix/symbol-check.py, which runs on every one of its releases.
 
-QUE VERIFICA, Y POR QUE CADA COSA
----------------------------------
-  LIBRERIAS: allowlist, nunca denylist. Buscar "libevent" es apuntarle al ultimo bug conocido; el
-    proximo va a ser con otra libreria. Se declara lo permitido y se rechaza todo lo demas.
+WHAT IT CHECKS, AND WHY EACH THING
+----------------------------------
+  LIBRARIES: allowlist, never denylist. Searching for "libevent" aims at the last known bug; the next one
+    will be a different library. Declare what is allowed and reject everything else.
 
-  VERSIONES DE SIMBOLOS: lo que de verdad decide en que maquinas arranca, y lo que ningun `ldd` muestra.
-    Un binario puede pedir libc.so.6 (que estan todas) pero exigir GLIBC_2.34 adentro, y entonces no
-    abre en un Debian 11. Medido sobre el .deb de la rc4: exigia GLIBCXX_3.4.30, o sea la libstdc++ de
-    GCC 12. Eso se arreglo metiendo la libreria adentro del binario (-static-libstdc++), como hace Core.
+  SYMBOL VERSIONS: what really decides which machines it starts on, and what no `ldd` shows. A binary can
+    ask for libc.so.6 (present everywhere) but require GLIBC_2.34 inside, and then it does not open on a
+    Debian 11. Measured on the rc4 .deb: it required GLIBCXX_3.4.30, i.e. libstdc++ from GCC 12. That was
+    fixed by pulling the library inside the binary (-static-libstdc++), as Core does.
 
-  ARQUITECTURA y MINIMO DE macOS: un Mach-O arm64 no corre en una Mac Intel. Si se anuncia "macOS" a
-    secas hay que entregar las dos; si se anuncia Apple Silicon, hay que verificar que sea eso.
+  ARCHITECTURE and macOS MINIMUM: an arm64 Mach-O does not run on an Intel Mac. If "macOS" is advertised
+    plainly, both must be shipped; if Apple Silicon is advertised, verify it is that.
 
-  RUTAS DEL COMPILADOR: cualquier /home/runner, /opt/homebrew o /usr/local adentro del binario es una
-    ruta que en la maquina del usuario no existe.
+  COMPILER PATHS: any /home/runner, /opt/homebrew or /usr/local inside the binary is a path that does not
+    exist on the user's machine.
 
-FAIL-CLOSED, SIEMPRE
---------------------
-Si el archivo no esta, esta vacio, o no se puede leer: FALLA. Un candado que no puede verificar no
-puede aprobar. Ya paso de verdad: este guard estaba mal ubicado, miraba un archivo inexistente, la
-herramienta fallaba, el grep no encontraba nada, el `if` no se cumplia y el guard decia OK. Verde sin
-haber verificado nada.
+FAIL-CLOSED, ALWAYS
+-------------------
+If the file is missing, empty, or unreadable: it FAILS. A guard that cannot verify cannot approve. It
+already happened for real: this guard was misplaced, looked at a nonexistent file, the tool failed, the
+grep found nothing, the `if` was not satisfied and the guard said OK. Green without having verified
+anything.
 
-Uso:
-    python tools/check_portable.py <binario> [<binario>...]
-    python tools/check_portable.py --self-test          prueba el verificador contra si mismo
+Usage:
+    python tools/check_portable.py <binary> [<binary>...]
+    python tools/check_portable.py --self-test          test the checker against itself
 """
 import sys
 
 try:
     import lief
 except ImportError:
-    print("FALLO: falta lief.  pip install lief")
+    print("FAIL: lief is missing.  pip install lief")
     sys.exit(1)
 
 lief.logging.disable()
 
-# ---------------------------------------------------------------- lo permitido
-# Solo lo que trae CUALQUIER maquina del sistema operativo. Todo lo demas (libevent, boost, sqlite,
-# libstdc++) va adentro del binario.
+# ---------------------------------------------------------------- what is allowed
+# Only what EVERY machine of the operating system ships. Everything else (libevent, boost, sqlite,
+# libstdc++) goes inside the binary.
 ELF_OK = {
     "libc.so.6", "libm.so.6", "libgcc_s.so.1", "libpthread.so.0", "libdl.so.2",
     "librt.so.1", "libatomic.so.1", "libresolv.so.2",
@@ -65,24 +65,24 @@ ELF_OK = {
 }
 MACHO_OK = {"libc++.1.dylib", "libSystem.B.dylib", "libresolv.9.dylib"}
 
-# El piso declarado. Brisvia soporta Ubuntu 22.04+ / Debian 12+ porque la app (Tauri) necesita
-# webkit2gtk-4.1, que abajo de eso no existe: el nodo no puede ser mas exigente que la app que lo lleva,
-# pero tampoco tiene sentido pedirle menos. GLIBC 2.34 es lo que produce compilar en ubuntu-22.04.
-# Core apunta a 2.31 porque distribuye el nodo suelto; nosotros distribuimos la app entera.
-MAX_SIMBOLOS = {
+# The declared floor. Brisvia supports Ubuntu 22.04+ / Debian 12+ because the app (Tauri) needs
+# webkit2gtk-4.1, which does not exist below that: the node cannot be more demanding than the app that
+# carries it, but it makes no sense to ask less either. GLIBC 2.34 is what compiling on ubuntu-22.04
+# produces. Core targets 2.31 because it distributes the node on its own; we distribute the whole app.
+MAX_SYMBOLS = {
     "GLIBC": (2, 34),
-    "GLIBCXX": (3, 4, 30),   # solo si quedara libstdc++ dinamica; con -static-libstdc++ no aparece
+    "GLIBCXX": (3, 4, 30),   # only if libstdc++ stayed dynamic; with -static-libstdc++ it does not appear
     "CXXABI": (1, 3, 13),
     "GCC": (7, 0, 0),
     "LIBATOMIC": (1, 0),
 }
-MACOS_MINIMO = (13, 0)     # macOS 13, igual que Bitcoin Core v30
-RUTAS_PROHIBIDAS = ("/home/runner", "/opt/homebrew", "/usr/local/opt", "/opt/hostedtoolcache",
-                    "/Users/runner")
+MACOS_MINIMUM = (13, 0)     # macOS 13, same as Bitcoin Core v30
+FORBIDDEN_PATHS = ("/home/runner", "/opt/homebrew", "/usr/local/opt", "/opt/hostedtoolcache",
+                   "/Users/runner")
 
 
 def _ver(txt):
-    """'GLIBC_2.34' -> ('GLIBC', (2,34)). Devuelve None si no tiene forma de version."""
+    """'GLIBC_2.34' -> ('GLIBC', (2,34)). Returns None if it has no version shape."""
     if "_" not in txt:
         return None
     fam, _, v = txt.rpartition("_")
@@ -92,111 +92,111 @@ def _ver(txt):
         return None
 
 
-def revisar_elf(b, fallos):
+def check_elf(b, problems):
     for lib in b.libraries:
         if lib not in ELF_OK:
-            fallos.append(f"pide una libreria que el usuario puede no tener: {lib}")
+            problems.append(f"asks for a library the user may not have: {lib}")
 
-    # Lo que ningun ldd muestra: la version de simbolo mas alta que exige.
-    pedidas = {}
+    # What no ldd shows: the highest symbol version it requires.
+    required = {}
     for s in b.symbols:
         sv = getattr(s, "symbol_version", None)
         aux = getattr(sv, "symbol_version_auxiliary", None) if sv else None
         if aux and (p := _ver(aux.name)):
             fam, v = p
-            pedidas[fam] = max(pedidas.get(fam, v), v)
-    for fam, v in sorted(pedidas.items()):
-        tope = MAX_SIMBOLOS.get(fam)
-        punto = ".".join(map(str, v))
-        if tope is None:
-            fallos.append(f"exige {fam}_{punto} y {fam} no esta declarado como soportado")
-        elif v > tope:
-            fallos.append(f"exige {fam}_{punto}, por encima del piso declarado "
-                          f"{fam}_{'.'.join(map(str, tope))}: no abre en esas maquinas")
+            required[fam] = max(required.get(fam, v), v)
+    for fam, v in sorted(required.items()):
+        ceiling = MAX_SYMBOLS.get(fam)
+        dotted = ".".join(map(str, v))
+        if ceiling is None:
+            problems.append(f"requires {fam}_{dotted} and {fam} is not declared as supported")
+        elif v > ceiling:
+            problems.append(f"requires {fam}_{dotted}, above the declared floor "
+                            f"{fam}_{'.'.join(map(str, ceiling))}: it does not open on those machines")
         else:
-            print(f"      {fam:9} exige {punto:9} (tope {'.'.join(map(str, tope))})  ok")
+            print(f"      {fam:9} requires {dotted:9} (ceiling {'.'.join(map(str, ceiling))})  ok")
 
     if (i := b.interpreter) and not i.startswith(("/lib64/", "/lib/")):
-        fallos.append(f"cargador en una ruta rara: {i}")
+        problems.append(f"loader on an odd path: {i}")
     for e in b.dynamic_entries:
         if getattr(e, "tag", None) in (lief.ELF.DynamicEntry.TAG.RUNPATH, lief.ELF.DynamicEntry.TAG.RPATH):
-            fallos.append(f"tiene RUNPATH/RPATH grabado ({e}): busca librerias en rutas del compilador")
+            problems.append(f"has a RUNPATH/RPATH baked in ({e}): it looks for libraries on compiler paths")
 
 
-def revisar_macho(b, fallos):
+def check_macho(b, problems):
     for lib in b.libraries:
-        nom = lib.name.split("/")[-1]
-        if nom not in MACHO_OK:
-            fallos.append(f"pide una libreria que el usuario puede no tener: {lib.name}")
-        if any(p in lib.name for p in RUTAS_PROHIBIDAS) or lib.name.startswith("/opt/"):
-            fallos.append(f"apunta a una ruta de la maquina de compilacion: {lib.name}")
+        name = lib.name.split("/")[-1]
+        if name not in MACHO_OK:
+            problems.append(f"asks for a library the user may not have: {lib.name}")
+        if any(p in lib.name for p in FORBIDDEN_PATHS) or lib.name.startswith("/opt/"):
+            problems.append(f"points at a build-machine path: {lib.name}")
     bv = getattr(b, "build_version", None)
     if bv:
         m = tuple(bv.minos[:2])
-        if m > MACOS_MINIMO:
-            fallos.append(f"exige macOS {m[0]}.{m[1]} y el piso declarado es "
-                          f"{MACOS_MINIMO[0]}.{MACOS_MINIMO[1]}")
+        if m > MACOS_MINIMUM:
+            problems.append(f"requires macOS {m[0]}.{m[1]} and the declared floor is "
+                            f"{MACOS_MINIMUM[0]}.{MACOS_MINIMUM[1]}")
         else:
-            print(f"      minimo de macOS: {m[0]}.{m[1]}  ok")
-    print(f"      arquitectura: {b.header.cpu_type}")
+            print(f"      macOS minimum: {m[0]}.{m[1]}  ok")
+    print(f"      architecture: {b.header.cpu_type}")
 
 
-def revisar_pe(b, fallos):
+def check_pe(b, problems):
     for lib in b.libraries:
-        print(f"      pide: {lib}")
+        print(f"      asks for: {lib}")
     if any(l.lower().startswith("vcruntime") or l.lower().startswith("msvcp") for l in b.libraries):
-        fallos.append("pide los runtimes de Visual C++ por fuera: en una Windows limpia pueden no estar")
+        problems.append("asks for the Visual C++ runtimes externally: on a clean Windows they may be missing")
 
 
-def revisar(ruta) -> list:
+def check(path) -> list:
     import os
-    fallos = []
-    print(f"\n  {ruta}")
-    # Fail-closed antes que nada.
-    if not os.path.isfile(ruta):
-        return [f"no existe: {ruta}. El verificador no puede aprobar lo que no puede leer."]
-    if os.path.getsize(ruta) == 0:
-        return [f"esta vacio: {ruta}"]
-    b = lief.parse(ruta)
+    problems = []
+    print(f"\n  {path}")
+    # Fail-closed before anything else.
+    if not os.path.isfile(path):
+        return [f"does not exist: {path}. The checker cannot approve what it cannot read."]
+    if os.path.getsize(path) == 0:
+        return [f"is empty: {path}"]
+    b = lief.parse(path)
     if b is None:
-        return [f"no se puede leer como binario: {ruta}"]
+        return [f"cannot be read as a binary: {path}"]
 
-    print(f"      formato: {b.format}")
+    print(f"      format: {b.format}")
     if b.format == lief.Binary.FORMATS.ELF:
-        revisar_elf(b, fallos)
+        check_elf(b, problems)
     elif b.format == lief.Binary.FORMATS.MACHO:
-        revisar_macho(b, fallos)
+        check_macho(b, problems)
     elif b.format == lief.Binary.FORMATS.PE:
-        revisar_pe(b, fallos)
+        check_pe(b, problems)
     else:
-        fallos.append(f"formato inesperado: {b.format}")
+        problems.append(f"unexpected format: {b.format}")
 
     for lib in getattr(b, "libraries", []):
-        nom = lib if isinstance(lib, str) else getattr(lib, "name", str(lib))
-        for p in RUTAS_PROHIBIDAS:
-            if p in nom:
-                fallos.append(f"apunta a una ruta de la maquina de compilacion: {nom}")
-    return fallos
+        name = lib if isinstance(lib, str) else getattr(lib, "name", str(lib))
+        for p in FORBIDDEN_PATHS:
+            if p in name:
+                problems.append(f"points at a build-machine path: {name}")
+    return problems
 
 
 def self_test() -> int:
-    """El verificador tiene que rechazar lo que hay que rechazar. Si no, no sirve de nada.
+    """The checker has to reject what must be rejected. Otherwise it is worth nothing.
 
-    Se prueba contra el propio interprete de Python que lo esta corriendo: es un binario real del
-    sistema, siempre esta, y no hace falta fabricar uno.
+    It is tested against the very Python interpreter running it: a real system binary, always present,
+    and no need to fabricate one.
     """
-    print("=== prueba del verificador contra si mismo ===")
+    print("=== checker tested against itself ===")
     ok = True
-    r = revisar("/no/existe/este/archivo")
-    print(f"  archivo inexistente -> {'RECHAZA (bien)' if r else 'ACEPTA (MAL: fail-open!)'}")
+    r = check("/does/not/exist/this/file")
+    print(f"  missing file -> {'REJECTS (good)' if r else 'ACCEPTS (BAD: fail-open!)'}")
     ok &= bool(r)
     b = lief.parse(sys.executable)
     if b is not None:
-        print(f"  binario real leible ({sys.executable}): formato {b.format}  ok")
+        print(f"  real readable binary ({sys.executable}): format {b.format}  ok")
     else:
-        print("  MAL: no puede leer ni el propio python")
+        print("  BAD: cannot read even python itself")
         ok = False
-    print(f"\n{'OK: el verificador falla cuando tiene que fallar' if ok else 'MAL'}")
+    print(f"\n{'OK: the checker fails when it must fail' if ok else 'BAD'}")
     return 0 if ok else 1
 
 
@@ -208,13 +208,13 @@ if __name__ == "__main__":
     if args[0] == "--self-test":
         sys.exit(self_test())
 
-    todos = []
-    for ruta in args:
-        todos += [(ruta, f) for f in revisar(ruta)]
+    all_problems = []
+    for path in args:
+        all_problems += [(path, f) for f in check(path)]
     print()
-    if todos:
-        print("RECHAZADO. Esto no abre en la maquina de un usuario:")
-        for ruta, f in todos:
-            print(f"  - {ruta}: {f}")
+    if all_problems:
+        print("REJECTED. This does not open on a user's machine:")
+        for path, f in all_problems:
+            print(f"  - {path}: {f}")
         sys.exit(1)
-    print("OK: todo lo que pide existe en cualquier maquina del sistema operativo soportado.")
+    print("OK: everything it asks for exists on any machine of the supported operating system.")
