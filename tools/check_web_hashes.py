@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""Candado: los SHA-256 que publica brisvia.com deben ser los del archivo que la gente REALMENTE baja.
+"""Lock: the SHA-256 hashes brisvia.com publishes must be the ones of the file people ACTUALLY download.
 
-Por que existe: la web pone un SHA-256 al lado de cada boton de descarga y le pide a la gente que verifique
-el archivo antes de ejecutarlo. Los botones apuntan a /releases/latest/ (siempre la ultima version), pero los
-hashes se escriben a mano. Al publicar la 1.0.5 quedaron los de una version vieja, LOS SEIS:
+Why it exists: the site shows a SHA-256 next to each download button and asks people to verify the file
+before running it. The buttons point to /releases/latest/ (always the latest version), but the hashes are
+written by hand. When 1.0.5 was published, the ones from an old version were left in place, ALL SIX:
 
-    la web decia:  e99ff6b0...      el archivo que baja la gente:  6025b4af...
+    the site said:  e99ff6b0...      the file people download:  6025b4af...
 
-Alguien baja Brisvia, hace la verificacion que la propia web le pide, no coincide, y concluye que le dieron
-un archivo adulterado. El mecanismo que existe para dar CONFIANZA hacia lo contrario -- y se rompia solo en
-cada version, sin que nada avisara.
+Someone downloads Brisvia, does the verification the site itself asks for, it does not match, and concludes
+they were handed a tampered file. The mechanism that exists to give TRUST does the opposite -- and it broke
+on its own on every version, with nothing warning about it.
 
-Lee la web PUBLICA y baja los instaladores desde la URL PUBLICA: lo que importa es lo que recibe la gente,
-no lo que quedo en un disco de desarrollo.
+It reads the PUBLIC site and downloads the installers from the PUBLIC URL: what matters is what people
+receive, not what was left on a development disk.
 
-Uso:  python tools/check_web_hashes.py
+Usage:  python tools/check_web_hashes.py
 """
 import hashlib
 import re
@@ -23,7 +23,7 @@ import urllib.request
 
 WEB = "https://brisvia.com"
 BASE = "https://github.com/brisvia/brisvia-desktop/releases/latest/download"
-PAGES = ["descargas.html", "downloads.html"]  # Spanish + English publish the same hashes
+PAGINAS = ["descargas.html", "downloads.html"]  # Spanish + English publish the same hashes
 UA = {"User-Agent": "Mozilla/5.0"}
 
 ARCHIVOS = {
@@ -45,14 +45,14 @@ def sha256_url(url):
 
 
 def main():
-    print("Comparando los hashes que publica " + WEB + " con los instaladores reales.\n")
+    print("Comparing the hashes " + WEB + " publishes against the real installers.\n")
     reales = {}
     for hid, nombre in ARCHIVOS.items():
         try:
             reales[hid] = sha256_url(BASE + "/" + nombre)
             print("  %-32s %s..." % (nombre, reales[hid][:24]))
         except Exception as e:
-            print("  FALLA bajando %s: %s" % (nombre, e))
+            print("  FAIL downloading %s: %s" % (nombre, e))
             return 1
 
     fallos = []
@@ -61,33 +61,33 @@ def main():
             req = urllib.request.Request(WEB + "/" + pag, headers=UA)
             s = urllib.request.urlopen(req, timeout=60).read().decode("utf-8", "ignore")
         except Exception as e:
-            fallos.append("%s no responde: %s" % (pag, e))
-            print("\n  %s: NO RESPONDE" % pag)
+            fallos.append("%s does not respond: %s" % (pag, e))
+            print("\n  %s: NO RESPONSE" % pag)
             continue
         print("\n%s:" % pag)
         for hid, real in reales.items():
             m = re.search(r'id="' + hid + r'">([a-f0-9]{64})<', s)
             if not m:
-                fallos.append("%s: no publica el hash %s" % (pag, hid))
-                print("  %s: NO ESTA PUBLICADO" % hid)
+                fallos.append("%s: does not publish the hash %s" % (pag, hid))
+                print("  %s: NOT PUBLISHED" % hid)
                 continue
             if m.group(1) == real:
                 print("  %s: OK" % hid)
             else:
-                fallos.append("%s/%s: publica %s... y el archivo es %s..."
+                fallos.append("%s/%s: publishes %s... and the file is %s..."
                               % (pag, hid, m.group(1)[:16], real[:16]))
-                print("  %s: MAL  (publica %s... / el archivo es %s...)" % (hid, m.group(1)[:16], real[:16]))
+                print("  %s: BAD  (publishes %s... / the file is %s...)" % (hid, m.group(1)[:16], real[:16]))
 
     print()
     if fallos:
-        print("FALLA: la web publica hashes que NO son los del archivo que baja la gente.\n")
+        print("FAIL: the site publishes hashes that are NOT those of the file people download.\n")
         for f in fallos:
             print("  - " + f)
-        print("\nQuien verifique la descarga -- como la web le pide -- va a creer que le dieron un archivo")
-        print("adulterado. Arreglar con: python tools/actualizar_hashes_web.py --aplicar (en cripto-pow)")
-        print("y subir la web al servidor.")
+        print("\nAnyone who verifies the download -- as the site asks them to -- will believe they were handed a")
+        print("tampered file. Fix with: python tools/actualizar_hashes_web.py --aplicar (in cripto-pow)")
+        print("and upload the site to the server.")
         return 1
-    print("OK: los hashes publicados coinciden con lo que baja la gente.")
+    print("OK: the published hashes match what people download.")
     return 0
 
 

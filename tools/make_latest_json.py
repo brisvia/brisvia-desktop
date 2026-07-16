@@ -31,13 +31,13 @@ PLATAFORMAS = {
 def gh(*args):
     r = subprocess.run(["gh", *args], capture_output=True, text=True)
     if r.returncode != 0:
-        sys.exit(f"fallo `gh {' '.join(args)}`:\n{r.stderr}")
+        sys.exit(f"`gh {' '.join(args)}` failed:\n{r.stderr}")
     return r.stdout.strip()
 
 
 def main():
     if len(sys.argv) < 2:
-        sys.exit("uso: make_latest_json.py <tag>   (ej: v1.0.3)")
+        sys.exit("usage: make_latest_json.py <tag>   (e.g. v1.0.3)")
     tag = sys.argv[1]
     version = tag.lstrip("v")
 
@@ -53,11 +53,11 @@ def main():
         sig_name = sig_tpl.format(v=version)
         path = os.path.join(tmp, sig_name)
         if not os.path.exists(path):
-            faltan.append(f"{plat}: falta {sig_name}")
+            faltan.append(f"{plat}: {sig_name} missing")
             continue
         firma = open(path).read().strip()
         if not firma:
-            faltan.append(f"{plat}: {sig_name} esta vacio")
+            faltan.append(f"{plat}: {sig_name} is empty")
             continue
         manifest["platforms"][plat] = {
             "signature": firma,
@@ -67,18 +67,18 @@ def main():
     # Better no manifest than a half one: a platform missing here means those users are silently stranded on
     # an old version, with nothing looking broken.
     if faltan:
-        print("NO escribo el manifest: falta firma de alguna plataforma.", file=sys.stderr)
+        print("NOT writing the manifest: a platform's signature is missing.", file=sys.stderr)
         for f in faltan:
             print("  - " + f, file=sys.stderr)
-        print("\nCorre los 3 builds (Windows/Linux/macOS) y volve a intentar.", file=sys.stderr)
+        print("\nRun the 3 builds (Windows/Linux/macOS) and try again.", file=sys.stderr)
         sys.exit(1)
 
     out = os.path.join(tmp, "latest.json")
     with open(out, "w") as f:
         f.write(json.dumps(manifest, indent=2) + "\n")
-    print(f"manifest de {version} con las {len(manifest['platforms'])} plataformas:")
+    print(f"manifest for {version} with all {len(manifest['platforms'])} platforms:")
     for plat, v in manifest["platforms"].items():
-        print(f"  {plat:<16} firma {len(v['signature'])} chars -> {v['url'].split('/')[-1]}")
+        print(f"  {plat:<16} signature {len(v['signature'])} chars -> {v['url'].split('/')[-1]}")
     print(out)
     return out
 

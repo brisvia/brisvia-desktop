@@ -73,7 +73,7 @@ function Start-Node($exePath, $dataDir, $port, $chain = 'regtest') {
     # its isolated runs. Only -datadir goes on the command line, like the app.
     #
     # The whole -datadir=<path> is wrapped in quotes: Start-Process -ArgumentList does NOT quote array
-    # elements, so a spaced/unicode path ("datos de Juan ñ") would reach bitcoind split into several
+    # elements, so a spaced/unicode path ("John data ü") would reach bitcoind split into several
     # arguments -- it would use the wrong datadir and never come up on RPC. That was the unicode-datadir
     # failure. Same trap as Start-Process in the diagnostic; it does not quote spaces.
     $p = Start-Process -FilePath $exePath `
@@ -125,7 +125,7 @@ function Invoke-Shutdown($installDir) {
     $ps = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
     $out = Join-Path $WorkRoot 'shutdown.out.txt'
     # Both paths quoted: Start-Process -ArgumentList does not quote array elements, so a spaced InstallDir
-    # ("Juan Perez ñ\Brisvia Sim") arrived split and "Perez" landed on -TimeoutSeconds ("cannot convert
+    # ("John Smith ü\Brisvia Sim") arrived split and "Smith" landed on -TimeoutSeconds ("cannot convert
     # to Int32"). The real NSIS hook already quotes -InstallDir "$INSTDIR"; the harness must match it.
     $p = Start-Process -FilePath $ps `
         -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$ShutdownScript`"", '-InstallDir', "`"$installDir`"" `
@@ -195,11 +195,11 @@ try {
 
         'unicode-datadir' {
             # Spaces, accents and non-latin, in both the exe path and the datadir. This is the case the
-            # CommandLineToArgvW rewrite exists for: a regex split on spaces returned C:\Users\Juan and
+            # CommandLineToArgvW rewrite exists for: a regex split on spaces returned C:\Users\John and
             # aborted the install of anyone with a space in their path.
-            $uInstall = Join-Path $WorkRoot 'Juan Perez ñ\Brisvia Sim'
+            $uInstall = Join-Path $WorkRoot 'John Smith ü\Brisvia Sim'
             $uExe = Join-Path $uInstall 'binaries\bitcoind.exe'
-            $uDd  = Join-Path $WorkRoot 'datos de Juan ñ\cadena brisvia'
+            $uDd  = Join-Path $WorkRoot 'John data ü\brisvia chain'
             $node = Track (Start-Node $uExe $uDd $Port1)
             Check 'node_up' (Wait-Rpc $uDd $Port1) 'node with a spaced/unicode datadir answers'
             $before = $node.Id

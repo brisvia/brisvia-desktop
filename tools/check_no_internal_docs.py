@@ -48,7 +48,7 @@ def tracked() -> set:
     return {l.replace("\\", "/") for l in r.stdout.splitlines() if l}
 
 
-def revisar(archivos: set) -> list:
+def scan(archivos: set) -> list:
     """Match by basename, anywhere in the tree, ignoring case.
 
     An internal document does not stop being internal by sitting in docs/, and Windows would happily
@@ -68,25 +68,25 @@ def self_test() -> int:
     """A guard that cannot catch what it exists for is decoration."""
     print("=== self-test ===")
     ok = True
-    hits = revisar({"CLAUDE.md", "README.md", "src/main.rs"})
+    hits = scan({"CLAUDE.md", "README.md", "src/main.rs"})
     print(f"  {'OK ' if hits else 'BAD'}  catches CLAUDE.md when present")
     ok &= bool(hits)
-    hits = revisar({"README.md", "CONTRIBUTING.md", "SECURITY.md", "docs/design.md"})
+    hits = scan({"README.md", "CONTRIBUTING.md", "SECURITY.md", "docs/design.md"})
     print(f"  {'OK ' if not hits else 'BAD'}  lets legitimate public docs through")
     ok &= not hits
-    hits = revisar({"INCIDENT_PATTERNS.md", "PENDIENTES-SIN-PUBLICAR.md"})
+    hits = scan({"INCIDENT_PATTERNS.md", "PENDIENTES-SIN-PUBLICAR.md"})
     print(f"  {'OK ' if len(hits) == 2 else 'BAD'}  catches every named file, not just the first")
     ok &= len(hits) == 2
     # Moving it into a subfolder does not make it public documentation.
-    hits = revisar({"docs/internal/CLAUDE.md"})
+    hits = scan({"docs/internal/CLAUDE.md"})
     print(f"  {'OK ' if hits else 'BAD'}  catches it in a subfolder, not only at the top")
     ok &= bool(hits)
     # Windows does not care about case, so neither can this.
-    hits = revisar({"Claude.md"})
+    hits = scan({"Claude.md"})
     print(f"  {'OK ' if hits else 'BAD'}  catches it with different capitalisation")
     ok &= bool(hits)
     # And a file that merely mentions the name is not the file.
-    hits = revisar({"docs/why-we-removed-claude-md.md"})
+    hits = scan({"docs/why-we-removed-claude-md.md"})
     print(f"  {'OK ' if not hits else 'BAD'}  does not fire on a doc that just names it")
     ok &= not hits
     print("\n" + ("OK: it catches internal docs and leaves public ones alone." if ok else "BAD: fix it."))
@@ -96,7 +96,7 @@ def self_test() -> int:
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--self-test"]:
         sys.exit(self_test())
-    malos = revisar(tracked())
+    malos = scan(tracked())
     if malos:
         print("REJECTED: internal documents in a public repository.\n")
         for f, por in malos:
