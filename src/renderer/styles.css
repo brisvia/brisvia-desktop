@@ -390,7 +390,7 @@ h1 { font-size: 26px; line-height: 1.14; letter-spacing: -.02em; max-width: 15ch
   .hsocial { width: 28px; height: 28px; }
 }
 
-/* Modo de minado no disponible en esta version (la pool llega en la 1.1). El boton se ve apagado y no
-   reacciona: un control que parece andar y no anda es peor que uno claramente deshabilitado. */
+/* Mining mode not available in this version (the pool ships in 1.1). The button looks dimmed and does
+   not react: a control that looks live but is not is worse than one that is clearly disabled. */
 .seg-btn.seg-off { opacity: .38; cursor: not-allowed; }
 .pool-soon { margin: -2px 0 10px; line-height: 1.45; }
