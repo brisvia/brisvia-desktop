@@ -15,31 +15,31 @@ jobs:
       - name: Checkout desktop app
         uses: actions/checkout@v4
 
-      # Candado de version (bug real: tauri.conf decia 1.0.2 y Cargo.toml 1.0.0 -> la app mostraba la vieja).
-      # Si no coinciden, el build FALLA aca y no se publica nada desincronizado.
-      - name: Guard - version de tauri.conf.json y Cargo.toml deben coincidir
+      # Version guard (real bug: tauri.conf said 1.0.2 and Cargo.toml 1.0.0 -> the app showed the old one).
+      # If they do not match, the build FAILS here and nothing out of sync gets published.
+      - name: Guard - tauri.conf.json and Cargo.toml versions must match
         shell: bash
         env:
           GITHUB_WORKFLOW_FILE: .github/workflows/build-linux.yml
         run: |
           TC=$(grep -oE '"version": "[0-9]+\.[0-9]+\.[0-9]+"' src-tauri/tauri.conf.json | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
           CG=$(grep -oE '^version = "[0-9]+\.[0-9]+\.[0-9]+"' src-tauri/Cargo.toml | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-          # El tag al que se adjunta el release tiene que ser el MISMO numero: si no, el actualizador
-          # le ofrece a la gente una version que no coincide con la que trae el instalador.
+          # The tag the release attaches to has to be the SAME number: otherwise the updater
+          # offers people a version that does not match the one the installer carries.
           TAG=$(grep -oE 'tag_name: v[0-9]+\.[0-9]+\.[0-9]+' "$GITHUB_WORKFLOW_FILE" | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-          echo "tauri.conf.json = $TC | Cargo.toml = $CG | tag del release = $TAG"
-          if [ "$TC" != "$CG" ]; then echo "FALLO: versiones desincronizadas ($TC vs $CG)"; exit 1; fi
-          if [ "$TAG" != "$TC" ]; then echo "FALLO: el tag del release (v$TAG) no coincide con la version ($TC)"; exit 1; fi
-          echo "OK: version y tag sincronizados ($TC)"
+          echo "tauri.conf.json = $TC | Cargo.toml = $CG | release tag = $TAG"
+          if [ "$TC" != "$CG" ]; then echo "FAIL: versions out of sync ($TC vs $CG)"; exit 1; fi
+          if [ "$TAG" != "$TC" ]; then echo "FAIL: the release tag (v$TAG) does not match the version ($TC)"; exit 1; fi
+          echo "OK: version and tag in sync ($TC)"
 
-      # PRODUCT guards (not logic). They exist because of real bugs found in a two-minute manual pass and
-      # an automated audit did not catch: a Spanish text with the language in English, and a raw error
-      # del nodo en pantalla. Miran el producto tal como lo ve la gente, no el codigo por separado.
-      - name: Candado - textos (idiomas completos, sin mezclas, sin texto fijo en el HTML)
+      # PRODUCT guards (not logic). They exist because of real bugs the owner found in 2 minutes and
+      # a 20-agent audit missed: a Spanish text with the language set to English, and a raw node error
+      # on screen. They look at the product as people see it, not at the code in isolation.
+      - name: Guard - texts (complete languages, no mixes, no hardcoded text in the HTML)
         shell: bash
         run: python tools/check_textos.py
 
-      - name: Candado - errores (todo error del programa llega traducido en ES y EN)
+      - name: Guard - errors (every program error arrives translated in ES and EN)
         shell: bash
         run: python tools/check_error_contract.py
 
@@ -53,11 +53,11 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          # Las deps de bitcoind (boost/libevent/sqlite) NO se instalan a proposito: las construye
-          # `depends`, estaticas. Tenerlas en el sistema es exactamente lo que hacia que cmake enlazara el
-          # nodo contra las libs del runner y muriera en la maquina del usuario con
-          # "libevent_extra-2.1.so.7 => not found". Si no estan instaladas, no se pueden colar.
-          # Lo de abajo es solo para compilar, para Tauri (webkit2gtk 4.1) y para la AppImage (patchelf).
+          # bitcoind's deps (boost/libevent/sqlite) are NOT installed on purpose: `depends` builds them,
+          # static. Having them on the system is exactly what made cmake link the node against the
+          # runner's libs and die on the user's machine with
+          # "libevent_extra-2.1.so.7 => not found". If they are not installed, they cannot sneak in.
+          # What follows is only for compiling, for Tauri (webkit2gtk 4.1) and for the AppImage (patchelf).
           sudo apt-get install -y \
             cmake build-essential pkg-config curl \
             libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
@@ -79,24 +79,24 @@ jobs:
       - name: Build bitcoind and bitcoin-cli
         run: |
           cd core
-          # Las dependencias se construyen con el sistema `depends` de Core, que existe justamente para esto:
-          # su receta de libevent fuerza EVENT__LIBRARY_TYPE=STATIC. Antes se compilaba contra las libs del
-          # runner, asi que el nodo salia atado a paquetes que la maquina del usuario no tiene y moria con
-          # "libevent_extra-2.1.so.7 => not found". Un nodo que no arranca es una app que no puede minar.
-          # Encontrado ejecutando el nodo extraido del .deb ya instalado, no leyendo el codigo.
+          # The dependencies are built with Core's `depends` system, which exists precisely for this:
+          # its libevent recipe forces EVENT__LIBRARY_TYPE=STATIC. Before, they were compiled against the
+          # runner's libs, so the node came out tied to packages the user's machine does not have and died with
+          # "libevent_extra-2.1.so.7 => not found". A node that does not start is an app that cannot mine.
+          # Found by running the node extracted from the already-installed .deb, not by reading the code.
           make -C depends -j"$(nproc)" HOST=x86_64-pc-linux-gnu NO_QT=1 NO_ZMQ=1 NO_IPC=1
-          # -static-libstdc++ -static-libgcc: la libreria de C++ va ADENTRO del binario.
+          # -static-libstdc++ -static-libgcc: the C++ library goes INSIDE the binary.
           #
-          # `depends` arregla las dependencias de terceros (libevent, boost, sqlite) pero NO estas dos, que
-          # las pone el compilador. El nodo salia pidiendo libstdc++.so.6 con GLIBCXX_3.4.30 — o sea la
-          # version de GCC 12. La lista de librerias permitidas del propio Core (contrib/guix/symbol-check.py)
-          # NO incluye libstdc++.so.6, justamente por esto: Core la mete adentro en todos sus releases.
+          # `depends` fixes the third-party dependencies (libevent, boost, sqlite) but NOT these two, which
+          # the compiler adds. The node came out asking for libstdc++.so.6 with GLIBCXX_3.4.30 -- that is the
+          # GCC 12 version. Core's own allowed-libraries list (contrib/guix/symbol-check.py)
+          # does NOT include libstdc++.so.6, precisely for this: Core puts it inside in all its releases.
           #
-          # Medido sobre el bitcoind sacado del .deb de la rc4, no supuesto:
+          # Measured on the bitcoind taken from the rc4 .deb, not assumed:
           #     libstdc++.so.6, libm.so.6, libgcc_s.so.1, libc.so.6, ld-linux-x86-64.so.2
           #     GLIBCXX -> 3.4.30 | CXXABI -> 1.3.13 | GCC -> 7.0.0 | GLIBC -> 2.34
-          # Con esto quedan solo libm, libc y el cargador, y desaparecen las exigencias de GLIBCXX/CXXABI.
-          # Lo que quede de piso es GLIBC 2.34, que se declara y se prueba en maquinas limpias.
+          # This leaves only libm, libc and the loader, and the GLIBCXX/CXXABI demands disappear.
+          # What remains as the floor is GLIBC 2.34, which is declared and tested on clean machines.
           cmake -B build --toolchain depends/x86_64-pc-linux-gnu/toolchain.cmake -DBUILD_SHARED_LIBS=OFF \
             -DENABLE_IPC=OFF -DBUILD_TESTS=OFF -DBUILD_GUI=OFF -DWITH_ZMQ=OFF -DBUILD_BENCH=OFF \
             -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc" \
@@ -117,7 +117,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           mkdir -p src-tauri/binaries
-          rm -f src-tauri/binaries/*   # nada preexistente sobrevive
+          rm -f src-tauri/binaries/*   # nothing pre-existing survives
           cp core/build/bin/bitcoind src-tauri/binaries/bitcoind
           cp core/build/bin/bitcoin-cli src-tauri/binaries/bitcoin-cli
           cp crates/brisvia-randomx/target/release/mine-once src-tauri/binaries/brisvia-worker || \
@@ -128,9 +128,9 @@ jobs:
           # shows up on launch day. (Real case, 2026-07-15: a 9-July bitcoind carrying the pre-recalibration
           # genesis 7f1cf9cf was found sitting in a working tree.)
           for f in core/build/bin/bitcoind core/build/bin/bitcoin-cli; do
-            [ -f "$f" ] || { echo "FALLO: $f no existe: este job no lo compilo"; exit 1; }
+            [ -f "$f" ] || { echo "FAIL: $f does not exist: this job did not compile it"; exit 1; }
             if [ -n "$JOB_START_FILE" ] && [ "$f" -ot "$JOB_START_FILE" ]; then
-              echo "FALLO: $f es anterior al inicio del job: no lo produjo esta compilacion"; exit 1
+              echo "FAIL: $f is older than the job start: this build did not produce it"; exit 1
             fi
           done
           SIDECAR_SHA256=$(sha256sum src-tauri/binaries/bitcoind | cut -d' ' -f1)
@@ -154,11 +154,11 @@ jobs:
           GEN=$($CLI getblockhash 0 2>&1 | tr -d '[:space:]')
           $CLI stop >/dev/null 2>&1 || true
           sleep 3
-          echo "genesis del nodo que se va a empaquetar: $GEN"
+          echo "genesis of the node about to be packaged: $GEN"
           if [ "$GEN" != "aa6bc268339aa9f4f2e39ae33aca7b7e48e395033d08d37c08f828890af7baf7" ]; then
-            echo "FALLO: el nodo tiene el genesis $GEN, no el de la red real de Brisvia"; exit 1
+            echo "FAIL: the node has genesis $GEN, not the real Brisvia network's"; exit 1
           fi
-          echo "OK: el nodo empaquetado es la red real de Brisvia (genesis aa6bc268...)"
+          echo "OK: the packaged node is the real Brisvia network (genesis aa6bc268...)"
           python3 - <<'PY'
           import json, os
           p = "src-tauri/tauri.conf.json"
@@ -189,12 +189,12 @@ jobs:
       - name: Install frontend dependencies
         run: npm install
 
-      - name: Guard - el nodo tiene que abrir en la maquina de un usuario, no solo en esta
+      - name: Guard - the node must open on a user's machine, not just on this one
         run: |
-          # El verificador lee la ESTRUCTURA del binario con lief, no la salida de texto de ldd.
-          # El candado anterior era bash con ldd + sed y dio dos falsos positivos seguidos, los dos por
-          # suponer en vez de leer. Ademas ldd no muestra lo que de verdad decide si el binario abre:
-          # la version de simbolo que exige. Ver tools/check_portable.py.
+          # The verifier reads the binary's STRUCTURE with lief, not ldd's text output.
+          # The previous guard was bash with ldd + sed and gave two false positives in a row, both from
+          # guessing instead of reading. Besides, ldd does not show what really decides whether the binary
+          # opens: the symbol version it demands. See tools/check_portable.py.
           python3 -m pip install --quiet lief
           python3 tools/check_portable.py --self-test
           python3 tools/check_portable.py src-tauri/binaries/bitcoind src-tauri/binaries/bitcoin-cli
@@ -217,8 +217,8 @@ jobs:
       - name: Guard - the app binary must target MAINNET (coin 9339)
         run: |
           BIN=$(find src-tauri/target/release -maxdepth 1 -name brisvia-miner -type f | head -1)
-          grep -a -q '9339h' "$BIN" || { echo 'FALLO: binario NO es mainnet (falta 9339h). Compilar con --features mainnet.'; exit 1; }
-          echo 'OK: binario mainnet (9339h)'
+          grep -a -q '9339h' "$BIN" || { echo 'FAIL: binary is NOT mainnet (missing 9339h). Compile with --features mainnet.'; exit 1; }
+          echo 'OK: mainnet binary (9339h)'
 
       - name: Attach the .AppImage, .deb and the signed updater artifact to the release
         uses: softprops/action-gh-release@v2

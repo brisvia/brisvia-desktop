@@ -1,22 +1,22 @@
 name: Verify update 1.0.5 to candidate
 
-# La prueba de mas riesgo del release, y la que ChatGPT marco como #1:
-# que el instalador NO corrompa el nodo al actualizar.
+# The highest-risk test of the release, and the one ChatGPT flagged as #1:
+# that the installer does NOT corrupt the node when updating.
 #
-# El patron es real y esta documentado en Tauri: NSIS no siempre termina bien un sidecar que la aplicacion
-# habia lanzado. Brisvia encaja: la app arranca bitcoind con Command::new como proceso hijo, y solo lo
-# cierra limpio si recibe RunEvent::ExitRequested. Si el instalador la mata de golpe, ese codigo no corre y
-# el nodo muere sucio -> base de bloques corrupta -> la proxima apertura necesita reparacion.
+# The pattern is real and documented in Tauri: NSIS does not always cleanly finish a sidecar the application
+# had launched. Brisvia fits: the app starts bitcoind with Command::new as a child process, and only closes
+# it cleanly if it receives RunEvent::ExitRequested. If the installer kills it abruptly, that code does not
+# run and the node dies dirty -> corrupt block database -> the next open needs repair.
 #
-# La autorreparacion es CONTINGENCIA, no puede volverse el comportamiento normal de cada actualizacion.
+# The self-repair is a CONTINGENCY, it cannot become the normal behavior of every update.
 #
-# Corre en un runner descartable: la maquina de Fernando no se toca.
+# Runs on a disposable runner: Fernando's machine is not touched.
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag del borrador candidato (ej: v1.0.6)"
+        description: "Candidate draft tag (e.g. v1.0.6)"
         required: true
         default: "v1.0.6"
 
@@ -25,46 +25,46 @@ permissions:
 
 jobs:
   windows:
-    name: Windows — 1.0.5 con nodo activo -> candidato
+    name: Windows — 1.0.5 with node active -> candidate
     runs-on: windows-latest
     steps:
-      - name: Instalar la 1.0.5 PUBLICA (no una recompilacion)
+      - name: Install the PUBLIC 1.0.5 (not a recompilation)
         shell: pwsh
         run: |
-          # La version publica exacta, la que la gente tiene. Una recompilacion no prueba lo mismo.
+          # The exact public version, the one people have. A recompilation does not prove the same thing.
           $url = "https://github.com/${{ github.repository }}/releases/download/v1.0.5/Brisvia.Miner_1.0.5_x64-setup.exe"
           Invoke-WebRequest -Uri $url -OutFile setup105.exe
-          Write-Host "1.0.5 bajada: $((Get-Item setup105.exe).Length) bytes"
-          # /S = instalacion silenciosa de NSIS
+          Write-Host "1.0.5 downloaded: $((Get-Item setup105.exe).Length) bytes"
+          # /S = NSIS silent install
           Start-Process -FilePath .\setup105.exe -ArgumentList "/S" -Wait
           $exe = Get-ChildItem "$env:LOCALAPPDATA","$env:ProgramFiles" -Recurse -Filter "brisvia-miner.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $exe) { throw "FALLO: la 1.0.5 no quedo instalada" }
-          Write-Host "instalada en: $($exe.FullName)"
+          if (-not $exe) { throw "FAIL: 1.0.5 did not get installed" }
+          Write-Host "installed at: $($exe.FullName)"
           "APP=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Abrir la app y esperar a que el nodo este vivo
+      - name: Open the app and wait for the node to be alive
         shell: pwsh
         run: |
           $p = Start-Process -FilePath $env:APP -PassThru
           Start-Sleep -Seconds 45
           $node = Get-Process bitcoind -ErrorAction SilentlyContinue
-          if (-not $node) { throw "FALLO: la app no levanto el nodo; no hay nada que probar" }
+          if (-not $node) { throw "FAIL: the app did not bring up the node; there is nothing to test" }
           Write-Host "app PID: $($p.Id)  |  bitcoind PID: $($node.Id)"
           "APP_PID=$($p.Id)"   | Out-File -FilePath $env:GITHUB_ENV -Append
           "NODE_PID=$($node.Id)" | Out-File -FilePath $env:GITHUB_ENV -Append
-          # El datadir y el punto de partida del log: lo que se compara despues es SOLO lo nuevo.
+          # The datadir and the log's starting point: what is compared afterwards is ONLY what is new.
           $dd = Join-Path $env:APPDATA "Brisvia\brisvia-mainnet"
           if (-not (Test-Path $dd)) { $dd = (Get-ChildItem $env:APPDATA -Recurse -Filter "debug.log" -ErrorAction SilentlyContinue | Select-Object -First 1).DirectoryName }
           "DATADIR=$dd" | Out-File -FilePath $env:GITHUB_ENV -Append
           $log = Join-Path $dd "debug.log"
           $off = if (Test-Path $log) { (Get-Item $log).Length } else { 0 }
           "LOG_OFFSET=$off" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "datadir: $dd  |  log en byte $off"
+          Write-Host "datadir: $dd  |  log at byte $off"
 
-      - name: Registrar la billetera ANTES de actualizar
+      - name: Record the wallet BEFORE updating
         shell: pwsh
         run: |
-          # Lo que tiene que sobrevivir: la frase cifrada, byte por byte.
+          # What has to survive: the encrypted phrase, byte by byte.
           $seed = Get-ChildItem $env:DATADIR -Recurse -Filter "*.enc" -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($seed) {
             $h = (Get-FileHash $seed.FullName -Algorithm SHA256).Hash
@@ -72,65 +72,65 @@ jobs:
             "SEED_HASH=$h" | Out-File -FilePath $env:GITHUB_ENV -Append
             "SEED_PATH=$($seed.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
           } else {
-            Write-Host "(sin billetera creada: el runner no puede pasar por el onboarding)"
+            Write-Host "(no wallet created: the runner cannot go through onboarding)"
           }
 
-      - name: ACTUALIZAR a la candidata con el nodo corriendo
+      - name: UPDATE to the candidate with the node running
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # El momento de la verdad: instalar encima, con la app abierta y el nodo activo.
+          # The moment of truth: install on top, with the app open and the node active.
           gh release download "${{ inputs.tag }}" --repo ${{ github.repository }} --pattern "*_x64-setup.exe" --dir new
           $setup = Get-ChildItem new -Filter *_x64-setup.exe | Select-Object -First 1
-          Write-Host "instalando $($setup.Name) sobre la 1.0.5 en caliente..."
+          Write-Host "installing $($setup.Name) over 1.0.5 hot..."
           Start-Process -FilePath $setup.FullName -ArgumentList "/S" -Wait
           Start-Sleep -Seconds 20
 
-      - name: El nodo cerro LIMPIO?
+      - name: Did the node close CLEANLY?
         shell: pwsh
         run: |
-          # La evidencia exacta: Bitcoin Core escribe "Shutdown in progress..." y "Shutdown done" cuando
-          # cierra completo. Si el instalador lo mato, esas marcas no estan.
+          # The exact evidence: Bitcoin Core writes "Shutdown in progress..." and "Shutdown done" when it
+          # closes fully. If the installer killed it, those marks are not there.
           $log = Join-Path $env:DATADIR "debug.log"
-          if (-not (Test-Path $log)) { throw "FALLO: no encuentro debug.log en $env:DATADIR" }
+          if (-not (Test-Path $log)) { throw "FAIL: cannot find debug.log in $env:DATADIR" }
           $fs = [System.IO.File]::Open($log, 'Open', 'Read', 'ReadWrite')
           $fs.Seek([int64]$env:LOG_OFFSET, 'Begin') | Out-Null
           $nuevo = (New-Object System.IO.StreamReader($fs)).ReadToEnd()
           $fs.Close()
-          Write-Host "--- lo que el nodo escribio durante la actualizacion ---"
+          Write-Host "--- what the node wrote during the update ---"
           Write-Host $nuevo
-          Write-Host "--- veredicto ---"
+          Write-Host "--- verdict ---"
           $malo = $false
-          if ($nuevo -notmatch "Shutdown in progress") { Write-Host "FALLO: el nodo nunca empezo un cierre ordenado: lo mataron"; $malo = $true }
-          if ($nuevo -notmatch "Shutdown done")        { Write-Host "FALLO: el cierre no termino: la base de bloques puede quedar a medias"; $malo = $true }
+          if ($nuevo -notmatch "Shutdown in progress") { Write-Host "FAIL: the node never began an orderly shutdown: it was killed"; $malo = $true }
+          if ($nuevo -notmatch "Shutdown done")        { Write-Host "FAIL: the shutdown did not finish: the block database may be left half-written"; $malo = $true }
           foreach ($m in @("Corrupted block database detected", "Please restart with -reindex", "Error opening block database")) {
-            if ($nuevo -match [regex]::Escape($m)) { Write-Host "FALLO: corrupcion tras el update: $m"; $malo = $true }
+            if ($nuevo -match [regex]::Escape($m)) { Write-Host "FAIL: corruption after the update: $m"; $malo = $true }
           }
           $viejo = Get-Process -Id $env:NODE_PID -ErrorAction SilentlyContinue
-          if ($viejo) { Write-Host "FALLO: el bitcoind viejo (PID $env:NODE_PID) sigue vivo tras el update"; $malo = $true }
-          if ($malo) { throw "RECHAZADO: el actualizador no cierra el nodo de forma limpia" }
-          Write-Host "OK: Shutdown in progress -> Shutdown done, sin corrupcion, sin proceso viejo"
+          if ($viejo) { Write-Host "FAIL: the old bitcoind (PID $env:NODE_PID) is still alive after the update"; $malo = $true }
+          if ($malo) { throw "REJECTED: the updater does not close the node cleanly" }
+          Write-Host "OK: Shutdown in progress -> Shutdown done, no corruption, no old process"
 
-      - name: La version cambio y la billetera sigue?
+      - name: Did the version change and the wallet survive?
         shell: pwsh
         run: |
           $exe = Get-ChildItem "$env:LOCALAPPDATA","$env:ProgramFiles" -Recurse -Filter "brisvia-miner.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
           $v = (Get-Item $exe.FullName).VersionInfo.ProductVersion
-          Write-Host "version instalada ahora: $v"
-          if ($v -notmatch "^1\.0\.6") { throw "FALLO: sigue instalada la $v, la actualizacion no se aplico" }
+          Write-Host "version installed now: $v"
+          if ($v -notmatch "^1\.0\.6") { throw "FAIL: $v is still installed, the update was not applied" }
           if ($env:SEED_HASH) {
-            if (-not (Test-Path $env:SEED_PATH)) { throw "FALLO: la frase cifrada DESAPARECIO con el update" }
+            if (-not (Test-Path $env:SEED_PATH)) { throw "FAIL: the encrypted phrase DISAPPEARED with the update" }
             $h = (Get-FileHash $env:SEED_PATH -Algorithm SHA256).Hash
-            if ($h -ne $env:SEED_HASH) { throw "FALLO: la frase cifrada CAMBIO: $($env:SEED_HASH) -> $h" }
-            Write-Host "OK: la frase cifrada esta intacta, byte por byte"
+            if ($h -ne $env:SEED_HASH) { throw "FAIL: the encrypted phrase CHANGED: $($env:SEED_HASH) -> $h" }
+            Write-Host "OK: the encrypted phrase is intact, byte by byte"
           }
-          Write-Host "OK: 1.0.5 -> $v con la billetera conservada"
+          Write-Host "OK: 1.0.5 -> $v with the wallet preserved"
 
-      - name: La primera apertura necesita reparacion?
+      - name: Does the first open need repair?
         shell: pwsh
         run: |
-          # Que la app se auto-repare es CONTINGENCIA. Si hace falta en cada update, el update esta roto.
+          # The app self-repairing is a CONTINGENCY. If it is needed on every update, the update is broken.
           $log = Join-Path $env:DATADIR "debug.log"
           $off = (Get-Item $log).Length
           $exe = Get-ChildItem "$env:LOCALAPPDATA","$env:ProgramFiles" -Recurse -Filter "brisvia-miner.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -141,6 +141,6 @@ jobs:
           $nuevo = (New-Object System.IO.StreamReader($fs)).ReadToEnd()
           $fs.Close()
           foreach ($m in @("Corrupted block database", "-reindex", "Reindexing", "Error opening block database")) {
-            if ($nuevo -match [regex]::Escape($m)) { Write-Host $nuevo; throw "RECHAZADO: la primera apertura tras el update necesita reparacion ($m)" }
+            if ($nuevo -match [regex]::Escape($m)) { Write-Host $nuevo; throw "REJECTED: the first open after the update needs repair ($m)" }
           }
-          Write-Host "OK: la app abre normal tras el update, sin reparacion"
+          Write-Host "OK: the app opens normally after the update, no repair"

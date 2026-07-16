@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag del release (ej: v1.0.3)"
+        description: "Release tag (e.g. v1.0.3)"
         required: true
 
 jobs:
@@ -28,12 +28,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Tag a publicar
+      - name: Tag to publish
         id: tag
         run: echo "tag=${{ github.event.inputs.tag || github.event.release.tag_name }}" >> $GITHUB_OUTPUT
 
       # Fails if any platform's signature is missing: a partial manifest silently strands whoever runs it.
-      - name: Generar latest.json desde las firmas publicadas
+      - name: Generate latest.json from the published signatures
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -41,18 +41,18 @@ jobs:
           echo "manifest=$OUT" >> $GITHUB_ENV
           cat "$OUT"
 
-      - name: Adjuntar latest.json al release
+      - name: Attach latest.json to the release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${{ steps.tag.outputs.tag }}" "$manifest" --repo "$GITHUB_REPOSITORY" --clobber
 
       # GitHub's CDN takes a few seconds to serve a freshly uploaded asset.
-      - name: Esperar a que el archivo este servido
+      - name: Wait for the file to be served
         run: sleep 30
 
       # The real proof: fetch what the app fetches. Reading GitHub's metadata is not enough -- on 1.0.3 the
       # API reported the manifest as "uploaded" while the download URL was still a 404.
-      - name: Candado - la app puede ver la actualizacion
+      - name: Guard - the app can see the update
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python tools/check_updater.py "${{ steps.tag.outputs.tag }}"
@@ -65,6 +65,6 @@ jobs:
       #
       # This does NOT block the release (the site is deployed separately): it fails loudly so the hashes get
       # fixed right after publishing, instead of being discovered by a user.
-      - name: Aviso - la web publica los hashes de ESTA version
+      - name: Notice - the website publishes the hashes of THIS version
         continue-on-error: true
         run: python tools/check_web_hashes.py

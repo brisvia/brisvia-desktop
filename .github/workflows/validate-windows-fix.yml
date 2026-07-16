@@ -38,31 +38,31 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
-      # Candado de version (bug real: tauri.conf decia 1.0.2 y Cargo.toml 1.0.0 -> la app mostraba la vieja).
-      # Si no coinciden, el build FALLA aca y no se publica nada desincronizado.
-      - name: Guard - version de tauri.conf.json y Cargo.toml deben coincidir
+      # Version guard (real bug: tauri.conf said 1.0.2 and Cargo.toml 1.0.0 -> the app showed the old one).
+      # If they do not match, the build FAILS here and nothing out of sync gets published.
+      - name: Guard - tauri.conf.json and Cargo.toml versions must match
         shell: bash
         env:
           GITHUB_WORKFLOW_FILE: .github/workflows/build-windows.yml
         run: |
           TC=$(grep -oE '"version": "[0-9]+\.[0-9]+\.[0-9]+"' src-tauri/tauri.conf.json | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
           CG=$(grep -oE '^version = "[0-9]+\.[0-9]+\.[0-9]+"' src-tauri/Cargo.toml | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-          # El tag al que se adjunta el release tiene que ser el MISMO numero: si no, el actualizador
-          # le ofrece a la gente una version que no coincide con la que trae el instalador.
+          # The tag the release attaches to has to be the SAME number: otherwise the updater
+          # offers people a version that does not match the one the installer carries.
           TAG=$(grep -oE 'tag_name: v[0-9]+\.[0-9]+\.[0-9]+' "$GITHUB_WORKFLOW_FILE" | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-          echo "tauri.conf.json = $TC | Cargo.toml = $CG | tag del release = $TAG"
-          if [ "$TC" != "$CG" ]; then echo "FALLO: versiones desincronizadas ($TC vs $CG)"; exit 1; fi
-          if [ "$TAG" != "$TC" ]; then echo "FALLO: el tag del release (v$TAG) no coincide con la version ($TC)"; exit 1; fi
-          echo "OK: version y tag sincronizados ($TC)"
+          echo "tauri.conf.json = $TC | Cargo.toml = $CG | release tag = $TAG"
+          if [ "$TC" != "$CG" ]; then echo "FAIL: versions out of sync ($TC vs $CG)"; exit 1; fi
+          if [ "$TAG" != "$TC" ]; then echo "FAIL: the release tag (v$TAG) does not match the version ($TC)"; exit 1; fi
+          echo "OK: version and tag in sync ($TC)"
 
-      # PRODUCT guards (not logic). They exist because of real bugs found in a two-minute manual pass and
-      # an automated audit did not catch: a Spanish text with the language in English, and a raw error
-      # del nodo en pantalla. Miran el producto tal como lo ve la gente, no el codigo por separado.
-      - name: Candado - textos (idiomas completos, sin mezclas, sin texto fijo en el HTML)
+      # PRODUCT guards (not logic). They exist because of real bugs the owner found in 2 minutes and
+      # a 20-agent audit missed: a Spanish text with the language set to English, and a raw node error
+      # on screen. They look at the product as people see it, not at the code in isolation.
+      - name: Guard - texts (complete languages, no mixes, no hardcoded text in the HTML)
         shell: bash
         run: python tools/check_textos.py
 
-      - name: Candado - errores (todo error del programa llega traducido en ES y EN)
+      - name: Guard - errors (every program error arrives translated in ES and EN)
         shell: bash
         run: python tools/check_error_contract.py
 
@@ -129,10 +129,10 @@ jobs:
           function Take-One($path, $filter, $extra) {
             $all = @(Get-ChildItem -Path $path -Recurse -Filter $filter -ErrorAction SilentlyContinue)
             if ($extra) { $all = @($all | Where-Object $extra) }
-            if ($all.Count -eq 0) { throw "FALLO: no se compilo ningun $filter en este job. NO se empaqueta un binario preexistente." }
-            if ($all.Count -gt 1) { throw "FALLO: hay $($all.Count) copias de $filter y no se cual es la de este build: $($all.FullName -join ', ')" }
+            if ($all.Count -eq 0) { throw "FAIL: no $filter was compiled in this job. A pre-existing binary is NOT packaged." }
+            if ($all.Count -gt 1) { throw "FAIL: there are $($all.Count) copies of $filter and I cannot tell which is this build's: $($all.FullName -join ', ')" }
             if ($all[0].LastWriteTimeUtc -lt [datetime]::Parse($env:JOB_START_UTC)) {
-              throw "FALLO: $filter es anterior al inicio del job ($($all[0].LastWriteTimeUtc) < $env:JOB_START_UTC): no lo produjo esta compilacion."
+              throw "FAIL: $filter is older than the job start ($($all[0].LastWriteTimeUtc) < $env:JOB_START_UTC): this build did not produce it."
             }
             return $all[0]
           }
