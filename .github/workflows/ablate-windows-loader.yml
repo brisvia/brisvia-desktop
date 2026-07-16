@@ -145,7 +145,11 @@ jobs:
         with:
           repository: brisvia/brisvia
           submodules: recursive
-          path: core
+          # work/core, not core: the app checks out to work/ and every build step runs with
+          # working-directory: work, so it looks for work/core/src/randomx. Checked out at the root it
+          # is there and invisible, which is worse than absent -- CMake said the directory does not
+          # exist while the files sat one level up.
+          path: work/core
 
       - name: MSVC tools (dumpbin lives here)
         uses: ilammy/msvc-dev-cmd@v1
