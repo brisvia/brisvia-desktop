@@ -100,7 +100,9 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path C:\node | Out-Null
-          $bd = Get-ChildItem build -Recurse -Filter bitcoind.exe | Select-Object -First 1
+          # core/build, not build: the copied bitcoind step runs with working-directory: core, so -B build
+          # creates core/build. Looking in ./build found nothing -> "no bitcoind.exe was built".
+          $bd = Get-ChildItem core/build -Recurse -Filter bitcoind.exe | Select-Object -First 1
           if (-not $bd) { throw "no bitcoind.exe was built" }
           Copy-Item $bd.FullName C:\node\bitcoind.exe
           "bitcoind sha256 $((Get-FileHash C:\node\bitcoind.exe -Algorithm SHA256).Hash)" | Write-Host
