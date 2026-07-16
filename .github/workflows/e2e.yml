@@ -5,8 +5,8 @@ name: E2E (real, Windows)
 # Rust miner), builds the app with the "e2e" feature (isolated regtest + test clock, compiled out
 # of the public binary), then drives the compiled app with WebdriverIO + @wdio/tauri-service.
 #
-# Priority: keep recorridos 01 (first open) and 02 (create wallet) green. The remaining P0
-# recorridos (wait mode / regtest / mining / recovery) are added once their specs are written.
+# Priority: keep walkthroughs 01 (first open) and 02 (create wallet) green. The remaining P0
+# walkthroughs (wait mode / regtest / mining / recovery) are added once their specs are written.
 #
 # Trigger manually from the Actions tab (or: gh workflow run e2e.yml).
 on:
@@ -126,7 +126,7 @@ jobs:
         shell: pwsh
         run: |
           # Debug build of the app crate with the e2e hooks. build.rs embeds the static frontend
-          # (src/renderer). This is the test-network binary that recorridos 01/02/04-13 drive.
+          # (src/renderer). This is the test-network binary that walkthroughs 01/02/04-13 drive.
           cargo build --manifest-path src-tauri/Cargo.toml --features e2e
           Copy-Item src-tauri/target/debug/brisvia-miner.exe src-tauri/target/debug/brisvia-miner-e2e.exe -Force
           Get-ChildItem src-tauri/target/debug/brisvia-miner*.exe
@@ -134,35 +134,35 @@ jobs:
       - name: Build the app with the mainnet+e2e features (real-network binary for wait mode)
         shell: pwsh
         run: |
-          # Real-network build WITH the e2e hooks (regtest redirect + test clock). Recorrido 03 (modo espera)
+          # Real-network build WITH the e2e hooks (regtest redirect + test clock). Walkthrough 03 (wait mode)
           # needs it to exercise the pre/post launch date logic. Build AFTER the e2e one and copy to its own
           # name (the cargo build overwrites brisvia-miner.exe in place).
           cargo build --manifest-path src-tauri/Cargo.toml --features mainnet,e2e
           Copy-Item src-tauri/target/debug/brisvia-miner.exe src-tauri/target/debug/brisvia-miner-mainnet-e2e.exe -Force
           Get-ChildItem src-tauri/target/debug/brisvia-miner*.exe
 
-      - name: Run real E2E — recorridos 01 (apertura) + 02 (crear billetera)
+      - name: Run real E2E — walkthroughs 01 (open) + 02 (create wallet)
         shell: pwsh
         run: npm run test:e2e:real -- --only 01,02
 
-      # WITHOUT continue-on-error. It was "stabilizing" and stayed: 11 of the 14 journeys could fail
-      # con el job en VERDE. Y estaban fallando: el recorrido de MINADO llevaba tiempo roto y el probador
-      # said everything passed. A tester that cannot go red proves nothing; it is worse than not having it,
-      # porque da una confianza que no existe.
+      # NO continue-on-error. It was "under stabilization" and it stayed that way: 11 of the 14 walkthroughs
+      # could fail with the job GREEN. And they were failing: the MINING walkthrough had been broken for a
+      # while and the tester said everything passed. A tester that cannot turn red proves nothing; it is
+      # worse than not having one, because it gives a confidence that does not exist.
       #
-      # 05-minado va aparte SOLO porque su fallo es del entorno, no del producto: en regtest el bloque cero
-      # tiene fecha vieja, el nodo se declara "sincronizando" y la app se niega a minar (correctamente). Se
-      # arregla con un reloj controlado en el recorrido, no aflojando el candado. Hasta entonces queda
-      # explicit and in plain sight, not hidden behind a green.
-      # The 14 journeys, ALL blocking. No continue-on-error remains: the one there was ("while
-      # stabilizes") left the MINING journey failing silently with the job green. A tester that
-      # no puede ponerse rojo no prueba nada; es peor que no tenerlo, porque da confianza que no existe.
-      - name: Run real E2E — recorridos 03-13 (nodo, minado, cierre y billetera)
+      # 05-mining is separate ONLY because its failure is from the environment, not the product: in regtest
+      # the zero block has an old date, the node declares itself "syncing" and the app refuses to mine
+      # (correctly). It is fixed with a controlled clock in the walkthrough, not by loosening the guard. Until
+      # then it stays explicit and visible, not hidden behind a green.
+      # All 14 walkthroughs, ALL blocking. There is no continue-on-error left: the one that was there ("while
+      # it stabilizes") left the MINING walkthrough failing silently with the job green. A tester that cannot
+      # turn red proves nothing; it is worse than not having one, because it gives confidence that does not exist.
+      - name: Run real E2E — walkthroughs 03-13 (node, mining, shutdown and wallet)
         shell: pwsh
         run: npm run test:e2e:real -- --only 03,04,05,06,07,08,09,10,11,12,13
 
-      # Siempre subimos la evidencia: como los recorridos 07-13 corren con continue-on-error, el job
-      # can stay green even if one fails; without always() we would not have its captures to debug.
+      # We always upload the evidence: since walkthroughs 07-13 run with continue-on-error, the job
+      # can stay green even if one fails; without always() we would not have their screenshots to debug.
       - name: Upload failure evidence (screenshots, node/miner logs, RPC state)
         if: always()
         uses: actions/upload-artifact@v4

@@ -60,7 +60,7 @@ jobs:
         run: |
           export RANDOMX_LIB_DIR="$PWD/core/src/randomx/build"
           # skip vector_fast: it allocates the ~2GB RandomX dataset (light mode covers the same hash)
-          python tools/run_tests_verified.py --name "crate del minero" --min 28 -- cargo test --manifest-path crates/brisvia-randomx/Cargo.toml -- --skip vector_fast
+          python tools/run_tests_verified.py --name "miner crate" --min 28 -- cargo test --manifest-path crates/brisvia-randomx/Cargo.toml -- --skip vector_fast
 
       # Tauri's build script refuses to build unless every bundled resource exists, and tauri.conf.json lists
       # the Windows names. Without these placeholders the step below fails with "resource path
@@ -77,18 +77,18 @@ jobs:
           BRISVIA_WALLET_CASES: "10000"
         run: |
           export RANDOMX_LIB_DIR="$PWD/core/src/randomx/build"
-          python tools/run_tests_verified.py --name "bateria de billeteras" --min 2 --min-seconds 20 -- cargo test --manifest-path src-tauri/Cargo.toml --features mainnet --lib wallet_key_tests -- --nocapture
+          python tools/run_tests_verified.py --name "wallet battery" --min 2 --min-seconds 20 -- cargo test --manifest-path src-tauri/Cargo.toml --features mainnet --lib wallet_key_tests -- --nocapture
 
       # The repair logic decides whether to rebuild the node's database on a user's machine. Its tests belong
       # in the same battery that guards the wallet.
       - name: Node self-repair tests (a full disk is never "repaired", an old crash is not today's)
         run: |
           export RANDOMX_LIB_DIR="$PWD/core/src/randomx/build"
-          python tools/run_tests_verified.py --name "auto-reparacion del nodo" --min 13 -- cargo test --manifest-path src-tauri/Cargo.toml --features mainnet --lib repair -- --nocapture
+          python tools/run_tests_verified.py --name "node self-repair" --min 13 -- cargo test --manifest-path src-tauri/Cargo.toml --features mainnet --lib repair -- --nocapture
 
       # The product guards: they are cheap and they catch what the audits did not.
-      - name: Candado - textos (idiomas completos, sin mezclas, sin texto fijo en el HTML)
+      - name: Guard - texts (complete languages, no mixes, no hardcoded text in the HTML)
         run: python tools/check_textos.py
 
-      - name: Candado - errores (todo error del programa llega traducido en ES y EN)
+      - name: Guard - errors (every program error arrives translated in ES and EN)
         run: python tools/check_error_contract.py
