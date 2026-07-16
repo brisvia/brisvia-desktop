@@ -147,7 +147,7 @@ impl PoolJob {
         let mut seed_key = [0u8; 32];
         seed_key.copy_from_slice(&seed);
         // seed_hash comes in display order (like getblocktemplate); RandomX uses the INTERNAL key
-        // (invertida). Igual que el modo solo (mine_once) y el verificador de la pool (rx_verifier).
+        // (reversed). Same as solo mode (mine_once) and the pool's verifier (rx_verifier).
         seed_key.reverse();
         let mut target_be = [0u8; 32];
         target_be.copy_from_slice(&tgt);

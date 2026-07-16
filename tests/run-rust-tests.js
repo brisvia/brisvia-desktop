@@ -1,10 +1,10 @@
-// Runner de los tests del backend (Rust). Corre la suite en las DOS builds de red:
-//   - testnet (por defecto): el guard del wpkh exige llaves tprv.
-//   - mainnet (--features mainnet): el guard del wpkh exige llaves xprv.
-// This way the test `wallet_key_tests::ext_key_prefix_matches_build_network` guards the key bug
-// ("wpkh(): key '...' is not valid") en las dos redes, con el generador de descriptores REAL.
+// Runner for the backend (Rust) tests. Runs the suite on BOTH network builds:
+//   - testnet (default): the wpkh guard requires tprv keys.
+//   - mainnet (--features mainnet): the wpkh guard requires xprv keys.
+// This way, the test `wallet_key_tests::ext_key_prefix_matches_build_network` guards the key bug
+// ("wpkh(): key '...' is not valid") on both networks, with the REAL descriptor generator.
 //
-// Locates cargo even if it is not on the PATH (typical on this machine: rustup in ~/.cargo/bin).
+// Finds cargo even when it is not on the PATH (typical on this machine: rustup in ~/.cargo/bin).
 'use strict';
 
 const { spawnSync } = require('child_process');
@@ -13,7 +13,7 @@ const os = require('os');
 const fs = require('fs');
 
 function findCargo() {
-  // 1) cargo en el PATH.
+  // 1) cargo on the PATH.
   const probe = spawnSync('cargo', ['--version'], { encoding: 'utf8', shell: false });
   if (probe.status === 0) return 'cargo';
   // 2) Fallback: rustup installation in the user's home.
@@ -31,8 +31,8 @@ if (!cargo) {
 
 const manifest = path.resolve(__dirname, '..', 'src-tauri', 'Cargo.toml');
 const runs = [
-  { label: 'backend (red de prueba / testnet)', args: ['test', '--manifest-path', manifest] },
-  { label: 'backend (red real / mainnet)', args: ['test', '--manifest-path', manifest, '--features', 'mainnet'] },
+  { label: 'backend (test network / testnet)', args: ['test', '--manifest-path', manifest] },
+  { label: 'backend (real network / mainnet)', args: ['test', '--manifest-path', manifest, '--features', 'mainnet'] },
 ];
 
 let failed = false;

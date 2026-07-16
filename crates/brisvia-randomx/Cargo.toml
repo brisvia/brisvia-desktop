@@ -13,7 +13,7 @@ path = "src/lib.rs"
 name = "mine-once"
 path = "src/bin/mine_once.rs"
 
-# Chequeo manual del camino cifrado contra la pool REAL. No corre en CI: necesita internet y la pool viva.
+# Manual check of the encrypted path against the REAL pool. Not run in CI: it needs the internet and a live pool.
 [[bin]]
 name = "pool-tls-check"
 path = "src/bin/pool_tls_check.rs"
@@ -23,9 +23,9 @@ ureq = { version = "2", default-features = false, features = ["json"] }
 serde_json = "1"
 bitcoin = { version = "0.32", features = ["serde"] }
 hex = "0.4"
-# TLS para el stratum. Sin cifrado, la conversacion con la pool viaja en claro y un intermediario puede
-# cambiar la direccion de pago del minero: la gente mina y le pagan a otro. rustls ya viene en el arbol de
-# dependencias (el actualizador lo usa), asi que no agrega peso real al programa. webpki-roots trae los
-# certificados raiz embebidos: mismo comportamiento en Windows, Linux y Mac, sin depender del sistema.
+# TLS for the stratum link. Without encryption, the conversation with the pool travels in the clear and a
+# man in the middle can change the miner's payout address: people mine and someone else gets paid. rustls is
+# already in the dependency tree (the updater uses it), so it adds no real weight to the program. webpki-roots
+# ships the embedded root certificates: same behavior on Windows, Linux and Mac, without depending on the system.
 rustls = "0.23"
 webpki-roots = "0.26"

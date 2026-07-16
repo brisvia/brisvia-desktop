@@ -110,7 +110,7 @@ pub fn mine_with_cache(job: &MiningJob, cache: &Arc<Cache>, threads: usize, nonc
             s.spawn(move || {
                 let vm = Vm::new_light(cache);
                 let mut local = job.header80.clone();
-                let mut nonce = nonce_start + t as u64; // sweep from where the previous round of THIS job left off
+                let mut nonce = nonce_start + t as u64; // sweep from where THIS job's previous round left off
                 let mut count = 0u64;
                 while nonce <= max_nonces && nonce <= u32::MAX as u64 {
                     if count % 256 == 0 && (found.load(Ordering::Relaxed) || stop.load(Ordering::Relaxed)) {

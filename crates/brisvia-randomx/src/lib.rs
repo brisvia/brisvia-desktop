@@ -142,14 +142,14 @@ mod tests {
     const VEC: &str = "79b0e1d9d4115b18f6b17067db151d1c9afafaca770c2157b516bf398e497580";
 
     #[test]
-    fn vector_light_coincide_con_el_nodo() {
+    fn vector_light_matches_the_node() {
         let key: Vec<u8> = (0u8..32).collect();
         let input: Vec<u8> = (0u8..80).collect();
         assert_eq!(to_hex(&calculate_hash_light(&key, &input)), VEC);
     }
 
     #[test]
-    fn vector_fast_igual_que_light() {
+    fn vector_fast_equals_light() {
         let key: Vec<u8> = (0u8..32).collect();
         let input: Vec<u8> = (0u8..80).collect();
         let cache = Cache::new(&key);
