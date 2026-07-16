@@ -107,6 +107,12 @@ try {
         exit 0
     }
 
+    # ---------------------------------------------------------------- PHASE 1: resolve ALL, touch NOTHING
+    # Discover and validate every one of our nodes before sending a single `stop`. If ANY instance cannot
+    # be tied unambiguously to its datadir and RPC, abort here -- having stopped nothing. Stopping one node
+    # and only THEN finding a second is unresolvable leaves the user with a half-closed set and an aborted
+    # install. More than one instance is NOT ambiguity by itself; an instance that cannot be resolved is.
+    $targets = @()
     foreach ($p in $procs) {
         $pid_ = $p.ProcessId
         $creado = $p.CreationDate
@@ -116,9 +122,9 @@ try {
         # ------------------------------------------------------------ its REAL datadir, from its own
         # command line. Not guessed, not a hardcoded default: whatever this process was actually told.
         $argv = Get-Args $p.CommandLine
-        $datadir = Get-Flag $argv 'datadir' 
+        $datadir = Get-Flag $argv 'datadir'
         if (-not $datadir) {
-            Log "FAIL: cannot read -datadir from its command line. Not guessing where its data lives."
+            Log "FAIL: cannot read -datadir from PID $pid_. Ambiguous -- aborting without stopping anything."
             exit 1
         }
         Log "  datadir: $datadir"
@@ -127,9 +133,7 @@ try {
         #
         # This fallback is not optional: spawn_node in the app passes ONLY -datadir on the command line
         # and writes `chain=` into bitcoin.conf. Reading -chain from the command line alone therefore
-        # returns nothing for the real node and aborts EVERY update -- the exact class of bug the seven
-        # scenarios exist to catch, found here by reading how the app actually launches the node rather
-        # than how a test might conveniently launch it. rpcport already has this same conf fallback below.
+        # returns nothing for the real node and aborts EVERY update. rpcport has the same conf fallback.
         $chain = Get-Flag $argv 'chain'
         if (-not $chain) {
             $conf = Join-Path $datadir 'bitcoin.conf'
@@ -140,7 +144,7 @@ try {
             }
         }
         if (-not $chain) {
-            Log "FAIL: cannot determine its chain from the command line or bitcoin.conf."
+            Log "FAIL: cannot determine chain for PID $pid_. Ambiguous -- aborting without stopping anything."
             exit 1
         }
         $sub = if ($chain -eq 'main') { '' } else { $chain }
@@ -159,51 +163,61 @@ try {
             }
         }
         if (-not $port) {
-            Log "FAIL: cannot determine its RPC port. Not guessing: a wrong port talks to somebody else."
+            Log "FAIL: cannot determine RPC port for PID $pid_. Ambiguous -- aborting without stopping anything."
             exit 1
         }
-        Log "  RPC port: $port"
 
         if (-not (Test-Path $cookie)) {
-            Log "FAIL: no cookie at $cookie. Cannot authenticate, so cannot ask it to stop."
+            Log "FAIL: no cookie at $cookie for PID $pid_. Ambiguous -- aborting without stopping anything."
             exit 1
         }
         $auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes((Get-Content $cookie -Raw).Trim()))
 
-        # ------------------------------------------------------------ ask it to close, its own way
-        # `stop` is Bitcoin Core's own orderly-shutdown request. It is what writes "Shutdown in
-        # progress..." and then "Shutdown done" to debug.log -- the two lines that prove it closed
-        # properly rather than being cut off.
-        $t0 = Get-Date
-        try {
-            $r = Invoke-RestMethod -Uri "http://127.0.0.1:$port/" -Method Post -TimeoutSec 30 `
-                 -Headers @{ Authorization = "Basic $auth" } -ContentType 'application/json' `
-                 -Body '{"jsonrpc":"1.0","id":"installer","method":"stop","params":[]}'
-            Log "  RPC stop sent at $($t0.ToString('HH:mm:ss.fff')) -> $($r.result)"
-        } catch {
-            Log "FAIL: the node did not accept `stop` ($_). Not killing it: it may be writing."
-            exit 1
-        }
+        $targets += [pscustomobject]@{ Pid = $pid_; Created = $creado; Port = $port; Auth = $auth; Datadir = $datadir }
+        Log "  resolved: PID $pid_, port $port, datadir $datadir"
+    }
+    Log "resolved $($targets.Count) node(s) unambiguously; closing all of them now."
 
-        # ------------------------------------------------------------ wait for THIS process to be gone
-        # Same PID AND same creation time. Windows reuses PIDs: a PID on its own would let us conclude
-        # "it is gone" about a completely different program that happened to inherit the number.
-        $limite = (Get-Date).AddSeconds($TimeoutSeconds)
-        while ((Get-Date) -lt $limite) {
-            $vivo = Get-CimInstance Win32_Process -Filter "ProcessId = $pid_" -ErrorAction SilentlyContinue
-            if (-not $vivo -or $vivo.CreationDate -ne $creado) {
-                $s = ((Get-Date) - $t0).TotalSeconds
-                Log "  the node closed on its own after $([math]::Round($s,1))s"
-                break
-            }
-            Start-Sleep -Milliseconds 250
-        }
-        $vivo = Get-CimInstance Win32_Process -Filter "ProcessId = $pid_" -ErrorAction SilentlyContinue
-        if ($vivo -and $vivo.CreationDate -eq $creado) {
-            Log "FAIL: still running after ${TimeoutSeconds}s. NOT killing it: taking long means writing."
-            Log "      Aborting the install. Replacing files under a live node is what corrupts chains."
+    # ---------------------------------------------------------------- PHASE 2a: ask ALL to close, its way
+    # `stop` is Bitcoin Core's own orderly-shutdown request. It writes "Shutdown in progress..." then
+    # "Shutdown done" to debug.log -- the two lines that prove it closed properly rather than being cut off.
+    $t0 = Get-Date
+    foreach ($tg in $targets) {
+        try {
+            $r = Invoke-RestMethod -Uri "http://127.0.0.1:$($tg.Port)/" -Method Post -TimeoutSec 30 `
+                 -Headers @{ Authorization = "Basic $($tg.Auth)" } -ContentType 'application/json' `
+                 -Body '{"jsonrpc":"1.0","id":"installer","method":"stop","params":[]}'
+            Log "  RPC stop sent to PID $($tg.Pid) at $($t0.ToString('HH:mm:ss.fff')) -> $($r.result)"
+        } catch {
+            Log "FAIL: PID $($tg.Pid) did not accept `stop` ($_). Not killing it: it may be writing."
             exit 1
         }
+    }
+
+    # ---------------------------------------------------------------- PHASE 2b: wait for ALL to be gone
+    # Same PID AND same creation time. Windows reuses PIDs: a PID on its own would let us conclude "it is
+    # gone" about a completely different program that happened to inherit the number. Wait for the whole
+    # set within the one deadline, not TimeoutSeconds per node.
+    $limite = (Get-Date).AddSeconds($TimeoutSeconds)
+    $pendientes = [System.Collections.ArrayList]@($targets)
+    while ($pendientes.Count -gt 0 -and (Get-Date) -lt $limite) {
+        for ($k = $pendientes.Count - 1; $k -ge 0; $k--) {
+            $tg = $pendientes[$k]
+            $vivo = Get-CimInstance Win32_Process -Filter "ProcessId = $($tg.Pid)" -ErrorAction SilentlyContinue
+            if (-not $vivo -or $vivo.CreationDate -ne $tg.Created) {
+                $s = ((Get-Date) - $t0).TotalSeconds
+                Log "  PID $($tg.Pid) closed on its own after $([math]::Round($s,1))s"
+                $pendientes.RemoveAt($k)
+            }
+        }
+        if ($pendientes.Count -gt 0) { Start-Sleep -Milliseconds 250 }
+    }
+    if ($pendientes.Count -gt 0) {
+        foreach ($tg in $pendientes) {
+            Log "FAIL: PID $($tg.Pid) still running after ${TimeoutSeconds}s. NOT killing it: taking long means writing."
+        }
+        Log "      Aborting the install. Replacing files under a live node is what corrupts chains."
+        exit 1
     }
 
     # ---------------------------------------------------------------- the miner, ours and stateless
