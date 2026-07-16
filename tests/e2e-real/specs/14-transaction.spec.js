@@ -54,13 +54,18 @@ describe('Journey 14 — regtest transaction', () => {
     const bal0 = trustedBalance(run);
     expect(bal0).toBeGreaterThan(0);
 
-    // ...and the app shows a funded "available" in the send modal.
+    // ...and the app reflects it in the wallet view, which re-loads the balance every ~3s while visible.
+    await (await $('.nav-btn[data-view="wallet"]')).click();
+    await browser.waitUntil(async () => {
+      const t = (await (await $('#bal-amount')).getText()).trim();
+      return parseFloat(t.replace(/[^\d.]/g, '')) > 0;
+    }, { timeout: 30000, interval: 2000, timeoutMsg: 'the app wallet view did not show the funded balance' });
+
+    // Now the send modal's "available" (read from the freshly loaded balance) is funded.
     await (await $('#act-send')).click();
     await (await $('#modal-send')).waitForDisplayed({ timeout: 10000 });
-    await browser.waitUntil(async () => {
-      const t = (await (await $('#send-avail')).getText()).trim();
-      return parseFloat(t.replace(/[^\d.]/g, '')) > 0;
-    }, { timeout: 25000, interval: 1500, timeoutMsg: 'the app did not show the funded balance in "available"' });
+    const availTxt = (await (await $('#send-avail')).getText()).trim();
+    expect(parseFloat(availTxt.replace(/[^\d.]/g, ''))).toBeGreaterThan(0);
 
     // 4) Send to an EXTERNAL address (a separate throwaway node wallet), unlocking with the password.
     harness.rpc(run.datadir, run.port, ['createwallet', 'e2e_dest']);
