@@ -267,7 +267,11 @@ try {
         }
     }
 
-    Emit 'verdict' @{ failures = $fail; result = (if ($fail -eq 0) { 'PASS' } else { 'FAIL' }) }
+    # $(...) not (...): the grouping operator does not allow an `if` statement inside it and PowerShell
+    # tried to run `if` as a command -- "the term 'if' is not recognized". The scenario logic had already
+    # passed every assertion; only this verdict line threw. Computed in a variable to leave no doubt.
+    $veredicto = if ($fail -eq 0) { 'PASS' } else { 'FAIL' }
+    Emit 'verdict' @{ failures = $fail; result = $veredicto }
 }
 finally {
     # Teardown kills ONLY the PIDs this harness spawned, after the assertions ran. This is test cleanup,
