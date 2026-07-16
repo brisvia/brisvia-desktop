@@ -77,11 +77,11 @@ VALIDACION = '''
         shell: pwsh
         run: |
           $env:RANDOMX_LIB_DIR = (Split-Path $env:RANDOMX_LIB)
-          New-Item -ItemType Directory -Force -Path C:\\evidence | Out-Null
+          New-Item -ItemType Directory -Force -Path evidence | Out-Null
           . "$env:GITHUB_WORKSPACE\\tools\\ci\\Invoke-NativeProcess.ps1"
 
           $json = cargo test --manifest-path src-tauri/Cargo.toml --features mainnet --lib --no-run --message-format=json
-          $json | Out-File C:\\evidence\\cargo-json.txt
+          $json | Out-File evidence\\cargo-json.txt
 
           # profile.test marks THIS artifact as a test binary. target.test only says a target CAN be
           # tested -- filtering on that matched nothing and cost a whole run.
@@ -95,12 +95,12 @@ VALIDACION = '''
           }
           if ($found.Count -ne 1) { throw "expected exactly 1 test executable, found $($found.Count)" }
           $exe = $found[0]
-          Copy-Item $exe C:\\evidence\\test.exe
+          Copy-Item $exe evidence\\test.exe
           $sha = (Get-FileHash $exe -Algorithm SHA256).Hash
 
           # --list needs it to LOAD but runs no test. The exit code comes off the process object;
           # nothing critical is read through a pipeline.
-          $r = Invoke-NativeProcess -FilePath $exe -Arguments @('--list') -OutputDir C:\\evidence
+          $r = Invoke-NativeProcess -FilePath $exe -Arguments @('--list') -OutputDir evidence
           Write-NativeProcessReport -Result $r -PreviewLines 5
           $tests = ($r.StdOut -split "`n" | Where-Object { $_ -match ': test$' }).Count
 
@@ -121,21 +121,26 @@ VALIDACION = '''
         run: |
           python tools/ci/check_test_exe_imports.py --self-test
           if ($LASTEXITCODE -ne 0) { throw "the import gate does not trust itself" }
-          dumpbin /IMPORTS C:\\evidence\\test.exe | Out-File C:\\evidence\\imports.txt
-          python tools/ci/check_test_exe_imports.py C:\\evidence\\test.exe
+          # dumpbin is only for a human-readable imports.txt and lives in the MSVC toolchain, which is
+          # not on PATH in this step. It is decorative: the gate below reads the PE directly. So it is
+          # best-effort, never fatal -- a missing dumpbin must not fail a step whose real check is python.
+          if (Get-Command dumpbin -ErrorAction SilentlyContinue) {
+            dumpbin /IMPORTS evidence\\test.exe | Out-File evidence\\imports.txt
+          }
+          python tools/ci/check_test_exe_imports.py evidence\\test.exe
           if ($LASTEXITCODE -ne 0) { throw "the test executable imports something that kills it before main" }
 
       - name: Every Rust test
         shell: pwsh
         run: |
           $env:RANDOMX_LIB_DIR = (Split-Path $env:RANDOMX_LIB)
-          cargo test --manifest-path src-tauri/Cargo.toml --features mainnet --lib -- --nocapture 2>&1 | Tee-Object C:\\evidence\\rust-tests.txt
+          cargo test --manifest-path src-tauri/Cargo.toml --features mainnet --lib -- --nocapture 2>&1 | Tee-Object evidence\\rust-tests.txt
           if ($LASTEXITCODE -ne 0) { throw "Rust tests failed" }
 
       - name: Every JavaScript test
         shell: pwsh
         run: |
-          npm test 2>&1 | Tee-Object C:\\evidence\\js-tests.txt
+          npm test 2>&1 | Tee-Object evidence\\js-tests.txt
           if ($LASTEXITCODE -ne 0) { throw "JavaScript tests failed" }
 
       - name: Seal the evidence
@@ -159,8 +164,8 @@ VALIDACION = '''
             $m.tool_hashes[$_.Name] = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
           }
           # No -Encoding UTF8: PS 5.1 writes a BOM there and json.load, jq and fromJSON all choke.
-          $m | ConvertTo-Json -Depth 4 | Out-File C:\\evidence\\manifest.json
-          Get-Content C:\\evidence\\manifest.json
+          $m | ConvertTo-Json -Depth 4 | Out-File evidence\\manifest.json
+          Get-Content evidence\\manifest.json
 
       - name: Keep the installer and the evidence, published nowhere
         if: always()
@@ -168,7 +173,7 @@ VALIDACION = '''
         with:
           name: run-${{ github.run_id }}-attempt-${{ github.run_attempt }}-windows-validation
           path: |
-            C:\\evidence\\*
+            evidence/*
             src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: warn
 '''
