@@ -28,16 +28,26 @@
   "bundle": {
     "active": true,
     "createUpdaterArtifacts": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "category": "Utility",
     "publisher": "Brisvia",
     "shortDescription": "Mine Brisvia with your CPU and join the network.",
-    "icon": ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"],
-    "resources": ["binaries/bitcoind.exe", "binaries/bitcoin-cli.exe", "binaries/brisvia-worker.exe"],
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico",
+      "icons/icon.icns"
+    ],
+    "resources": [
+      "binaries/bitcoind.exe",
+      "binaries/bitcoin-cli.exe",
+      "binaries/brisvia-worker.exe"
+    ],
     "windows": {
       "nsis": {
         "installerIcon": "icons/installer_icon.ico",
-        "installerHooks": "installer-hooks.nsh"
+        "installerHooks": "windows/installer-hooks.nsh"
       }
     }
   },
