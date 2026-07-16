@@ -1,0 +1,280 @@
+# The sealed ablation ladder: five variants, one code path, every artifact stamped with its own identity.
+#
+# WHY A MATRIX AND NOT TWO HALVES
+# -------------------------------
+# The previous diagnostic pasted its steps twice, once per half. They drifted: one half's error message got
+# improved and the other's grew a "$filter:" that does not parse, which killed the step before its first
+# line -- after 80 minutes of compiling. A comparison whose halves run different code compares nothing.
+#
+# A matrix has one half. There is nothing to drift from. The variants differ only in `variant`, and every
+# difference between them is applied by tools/ci/ablate.py, whose self-test proves each patch does what it
+# claims against rc6's real source.
+#
+# WHAT IT ANSWERS
+# ---------------
+# rc6's node_shutdown_tests build a whole AppState, and AppState carries
+# tray: Arc<Mutex<Option<tauri::tray::TrayIcon>>>. Even holding None the type must be linked, dragging
+# Tauri's runtime into the test executable. That is a plausible route to 0xC0000139 -- Windows started a
+# DLL and could not find a procedure in it. Plausible is not proven, so each variant removes exactly one
+# thing and whichever loads names the cause:
+#
+#   rc5-control            proves the harness, not the fix
+#   rc6-intact             reproduces the failure, or there is nothing here to find
+#   rc6-no-shutdown-tests  loads -> the module is the cause
+#   rc6-no-appstate        loads -> AppState is, and the tests are innocent
+#   rc6-minimal-helper     loads and passes -> that is the fix, before a line of product moves
+#
+# If no-shutdown-tests loads but no-appstate does not, the cause is not the one above and this says so.
+#
+# fail-fast is off deliberately: a variant that dies is a data point, and killing its siblings would throw
+# away the comparison this exists to make.
+
+name: Ablate the Windows loader failure (sealed)
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: Which classification sent us here (e.g. "Case A provisional from 29461779944")
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: windows-2022
+    outputs:
+      ok: ${{ steps.gate.outputs.ok }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Every long run starts on a proven tool. This one costs seconds and has already saved two builds.
+      - name: The PowerShell inside this workflow parses
+        shell: pwsh
+        run: |
+          & tools\ci\Test-WorkflowPowerShell.ps1 -SelfTest
+          if ($LASTEXITCODE -ne 0) { throw "the parse check does not trust itself" }
+          & tools\ci\Test-WorkflowPowerShell.ps1 -WorkflowPath .github\workflows\ablate-windows-loader.yml
+          if ($LASTEXITCODE -ne 0) { throw "a step here would die before its first line" }
+
+      - name: The ablations do what they claim, against rc6's real source
+        shell: pwsh
+        run: |
+          git fetch --depth=1 origin daf47da0 2>&1 | Out-Null
+          python tools/ci/ablate.py --self-test
+          if ($LASTEXITCODE -ne 0) { throw "an ablation does not do what it says; the ladder would prove nothing" }
+
+      - name: The diagnostic tool is the approved one
+        shell: pwsh
+        run: |
+          & tools\ci\Test-DiagnosticPreflight.ps1
+          if ($LASTEXITCODE -ne 0) { throw "preflight failed" }
+
+      - id: gate
+        shell: pwsh
+        run: "'ok=1' | Out-File -Append $env:GITHUB_OUTPUT"
+
+  ablate:
+    needs: preflight
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: rc5-control
+            ref: c48a272e
+          - variant: rc6-intact
+            ref: daf47da0
+          - variant: rc6-no-shutdown-tests
+            ref: daf47da0
+          - variant: rc6-no-appstate
+            ref: daf47da0
+          - variant: rc6-minimal-helper
+            ref: daf47da0
+    steps:
+      - name: Bring in the approved tools, outside the workspace
+        uses: actions/checkout@v4
+        with:
+          path: approved-tools
+
+      - name: Park them where nothing can reach them
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path C:\tools | Out-Null
+          Copy-Item approved-tools\tools\ci\* C:\tools\ -Force -Recurse
+          # Hashes collected BEFORE writing, and written elsewhere: piping Get-ChildItem into a file
+          # inside the directory being walked made Get-FileHash race Tee-Object for the handle.
+          $h = Get-ChildItem C:\tools -Filter *.ps1 | Get-FileHash -Algorithm SHA256
+          $h | ForEach-Object { "$($_.Hash)  $(Split-Path $_.Path -Leaf)" } | Out-File C:\tool-hashes.txt
+          Get-Content C:\tool-hashes.txt
+
+      - name: Check out the source this variant measures
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+          submodules: recursive
+          path: work
+
+      - name: Apply the ablation, and record what it did
+        shell: pwsh
+        working-directory: work
+        run: |
+          python C:\tools\ablate.py --variant ${{ matrix.variant }} --file src-tauri/src/lib.rs
+          if ($LASTEXITCODE -ne 0) { throw "the ablation failed; this variant would not be the variant" }
+          $sha = (Get-FileHash src-tauri/src/lib.rs -Algorithm SHA256).Hash
+          "VARIANT_SOURCE_SHA=$sha" | Out-File -Append $env:GITHUB_ENV
+          "JOB_START_UTC=$([DateTime]::UtcNow.ToString('o'))" | Out-File -Append $env:GITHUB_ENV
+
+      - name: MSVC tools (dumpbin lives here)
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build RandomX (static, portable)
+        shell: pwsh
+        working-directory: work
+        run: |
+          cmake -S core/src/randomx -B core/src/randomx/build -DARCH=default -DBUILD_SHARED_LIBS=OFF
+          cmake --build core/src/randomx/build --config Release
+          $rx = Get-ChildItem core/src/randomx/build -Recurse -Filter randomx.lib | Select-Object -First 1
+          if (-not $rx) { throw "RandomX produced no randomx.lib" }
+          "RANDOMX_LIB=$($rx.FullName)" | Out-File -Append $env:GITHUB_ENV
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # PLACEHOLDERS, NOT A 15-MINUTE BUILD OF BITCOIN CORE
+      #
+      # tauri.conf.json lists the three .exe under `resources`, not `externalBin`. Resources are copied
+      # into the installer at bundle time; they are never linked. build.rs is bare tauri_build::build(),
+      # which only checks the paths exist -- the earlier failure said so in as many words: "resource path
+      # binaries\bitcoind.exe doesn't exist". A file that exists satisfies it.
+      #
+      # So building Core here spends 15 minutes producing something that cannot influence what this
+      # experiment measures: which DLLs the TEST executable imports. Five variants at 20 minutes is 100
+      # minutes; at 5, it is 25.
+      #
+      # I checked externalBin once before, saw None, and concluded these were unnecessary. Wrong field --
+      # `resources` is the one that matters, and it cost a run. So this is not taken on faith:
+      # rc6-intact here is built with placeholders, and 29461779944 built rc6 with the real binaries. Same
+      # exit code and same import list across the two proves the shortcut changes nothing. If they differ,
+      # the shortcut is wrong and the ladder is rebuilt with real binaries -- the comparison says so, not
+      # me.
+      - name: Stage placeholders (Core is not what this measures)
+        shell: pwsh
+        working-directory: work
+        run: |
+          New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
+          foreach ($f in @('bitcoind.exe', 'bitcoin-cli.exe', 'brisvia-worker.exe')) {
+            # Not empty: a zero-byte file is the kind of thing a packager special-cases. Bytes, no meaning.
+            [System.IO.File]::WriteAllBytes("src-tauri/binaries/$f", [byte[]](0x4D, 0x5A) + (New-Object byte[] 126))
+          }
+          Get-ChildItem src-tauri/binaries | Format-Table Name, Length -AutoSize
+          "PLACEHOLDER_BINARIES=true" | Out-File -Append $env:GITHUB_ENV
+
+      - name: Build the test executable (no run)
+        shell: pwsh
+        working-directory: work
+        env:
+          CARGO_INCREMENTAL: 0
+        run: |
+          $env:RANDOMX_LIB_DIR = (Split-Path $env:RANDOMX_LIB)
+          cargo test --lib --no-run --manifest-path src-tauri/Cargo.toml --features mainnet
+
+      - name: Find it, load it, record everything
+        id: load
+        continue-on-error: true
+        shell: pwsh
+        working-directory: work
+        run: |
+          . "C:\tools\Invoke-NativeProcess.ps1"
+          New-Item -ItemType Directory -Force -Path C:\evidence | Out-Null
+
+          # profile.test, not target.test: target.test says a target CAN be tested; profile.test says THIS
+          # artifact IS the test binary. Filtering on the wrong one matched nothing and cost a whole run.
+          $exe = Get-CargoTestExecutable -ManifestPath src-tauri/Cargo.toml -Features mainnet
+          "TEST_EXE=$exe" | Out-File -Append $env:GITHUB_ENV
+          Copy-Item $exe "C:\evidence\test-${{ matrix.variant }}.exe"
+
+          # --list needs the executable to LOAD but runs no test. If the loader cannot start it, no test
+          # name in the error means anything: cargo builds one binary and filters by name at run time.
+          $r = Invoke-NativeProcess -FilePath $exe -Arguments @('--list') -OutputDir C:\evidence
+          Write-NativeProcessReport -Result $r -PreviewLines 10
+          $listados = if ($r.ExitCode -eq 0) { ($r.StdOut -split "`n" | Where-Object { $_ -match ': test$' }).Count } else { 0 }
+
+          "EXIT_DEC=$($r.ExitCode)"    | Out-File -Append $env:GITHUB_ENV
+          "EXIT_HEX=$($r.ExitCodeHex)" | Out-File -Append $env:GITHUB_ENV
+          "TESTS_LISTED=$listados"     | Out-File -Append $env:GITHUB_ENV
+
+      - name: What it asks Windows for
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $exe = "C:\evidence\test-${{ matrix.variant }}.exe"
+          if (-not (Test-Path $exe)) { "no test executable to inspect" | Out-File C:\evidence\deps-${{ matrix.variant }}.txt; exit 0 }
+          dumpbin /DEPENDENTS $exe | Out-File C:\evidence\deps-${{ matrix.variant }}.txt
+          dumpbin /IMPORTS    $exe | Out-File C:\evidence\imports-${{ matrix.variant }}.txt
+
+          # Which copy Windows actually resolves -- not which one is on disk somewhere. Path, version and
+          # SHA-256, because "it loaded a DLL called X" is not evidence about a specific X.
+          $res = @()
+          foreach ($line in (Get-Content C:\evidence\deps-${{ matrix.variant }}.txt)) {
+            if ($line -match '^\s{4}(\S+\.dll)\s*$') {
+              $dll = $Matches[1]
+              $found = Get-Command $dll -ErrorAction SilentlyContinue
+              $p = if ($found) { $found.Source } else { (Get-ChildItem "$env:SystemRoot\System32\$dll" -ErrorAction SilentlyContinue).FullName }
+              if ($p) {
+                $res += [pscustomobject]@{
+                  dll = $dll; path = $p
+                  version = (Get-Item $p).VersionInfo.FileVersion
+                  sha256 = (Get-FileHash $p -Algorithm SHA256).Hash
+                }
+              } else {
+                $res += [pscustomobject]@{ dll = $dll; path = 'NOT RESOLVED'; version = $null; sha256 = $null }
+              }
+            }
+          }
+          $res | ConvertTo-Json -Depth 3 | Out-File C:\evidence\dlls-${{ matrix.variant }}.json
+          $res | Format-Table -AutoSize
+
+      # The seal. Identity lives INSIDE the artifact, not only in its name, because a name is a claim and
+      # a manifest is a record. Without this, a classifier can only prove where bytes came from -- never
+      # that the local copy was not mixed with another run's.
+      - name: Seal the manifest
+        if: always()
+        shell: pwsh
+        run: |
+          $m = [ordered]@{
+            run_id          = "${{ github.run_id }}"
+            run_attempt     = "${{ github.run_attempt }}"
+            workflow_commit = "${{ github.sha }}"
+            variant         = "${{ matrix.variant }}"
+            variant_ref     = "${{ matrix.ref }}"
+            variant_source_sha = $env:VARIANT_SOURCE_SHA
+            runner          = "windows-2022"
+            runner_name     = $env:RUNNER_NAME
+            preflight       = "PASS"
+            placeholder_binaries = $env:PLACEHOLDER_BINARIES
+            placeholder_note = "Core staged as placeholders: tauri.conf.json lists the three .exe under resources, not externalBin, so they are copied at bundle time and never linked. rc6-intact cross-checks this against 29461779944, which built rc6 with the real ones."
+            generated_utc   = [DateTime]::UtcNow.ToString('o')
+            job_start_utc   = $env:JOB_START_UTC
+            exit_decimal    = $env:EXIT_DEC
+            exit_hex        = $env:EXIT_HEX
+            tests_listed    = $env:TESTS_LISTED
+            test_exe        = $env:TEST_EXE
+            tool_hashes     = @{}
+          }
+          foreach ($l in (Get-Content C:\tool-hashes.txt)) {
+            if ($l -match '^(\S+)\s+(\S+)$') { $m.tool_hashes[$Matches[2]] = $Matches[1] }
+          }
+          # No -Encoding UTF8: on PS 5.1 that writes a BOM and json.load, jq and fromJSON all choke. pwsh 7
+          # defaults to UTF-8 without one. That cost a run too.
+          $m | ConvertTo-Json -Depth 4 | Out-File C:\evidence\manifest-${{ matrix.variant }}.json
+          Get-Content C:\evidence\manifest-${{ matrix.variant }}.json
+
+      - name: Keep it, whatever the verdict
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-${{ github.run_id }}-attempt-${{ github.run_attempt }}-${{ matrix.variant }}
+          path: C:\evidence\*${{ matrix.variant }}*
+          if-no-files-found: warn
