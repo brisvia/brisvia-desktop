@@ -134,6 +134,27 @@ if ($SelfTest) {
 
 if (-not (Test-Path $WorkflowPath)) { Write-Host "no such workflow: $WorkflowPath"; exit 1 }
 
+# NO TABS. A path written through one escaping layer too many turns C:\tools into C: + TAB + ools, and
+# the file still parses -- a TAB is legal PowerShell whitespace. It cost a full Bitcoin Core build once,
+# then cost five more builds when I did it again in the same day. Nothing here is ever meant to contain
+# one, so a tab inside an inline block is a mangled path until proven otherwise.
+$conTabs = @()
+$n = 0
+foreach ($l in (Get-Content -LiteralPath $WorkflowPath)) {
+    $n++
+    if ($l -match "`t") { $conTabs += "  line ${n}: " + ($l -replace "`t", '<<<TAB>>>').Trim() }
+}
+if ($conTabs.Count -gt 0) {
+    Write-Host "TAB CHARACTERS in $WorkflowPath"
+    $conTabs | ForEach-Object { Write-Host $_ }
+    Write-Host ''
+    Write-Host "A tab here is almost always a backslash that went through one escape too many:"
+    Write-Host '  "C:\tools\x.ps1"  ->  C: + TAB + ools\x.ps1'
+    Write-Host "It parses fine and resolves to nothing. Write the file directly instead of through a"
+    Write-Host "script that escapes it."
+    exit 1
+}
+
 $lineas = Get-Content -LiteralPath $WorkflowPath
 $bloques = Get-InlinePowerShellBlock -Lines $lineas
 Write-Host "$WorkflowPath"

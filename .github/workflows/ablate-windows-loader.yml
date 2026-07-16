@@ -213,7 +213,7 @@ jobs:
         run: |
           $env:RANDOMX_LIB_DIR = (Split-Path $env:RANDOMX_LIB)
           New-Item -ItemType Directory -Force -Path C:\evidence | Out-Null
-          . "C:	ools\Invoke-NativeProcess.ps1"
+          . "C:\tools\Invoke-NativeProcess.ps1"
 
           $json = cargo test --manifest-path src-tauri/Cargo.toml --features mainnet --lib --no-run --message-format=json
           $json | Out-File C:\evidence\cargo-json-${{ matrix.variant }}.txt
@@ -231,7 +231,7 @@ jobs:
           if ($found.Count -eq 0) { throw "INVALID: ${{ matrix.variant }} built no test executable. Nothing to measure." }
           if ($found.Count -gt 1) { throw "INVALID: $($found.Count) test executables; cannot tell which is under test." }
           $exe = $found[0]
-          Copy-Item $exe "C:\evidence	est-${{ matrix.variant }}.exe"
+          Copy-Item $exe "C:\evidence\test-${{ matrix.variant }}.exe"
           "TEST_EXE=$exe" | Out-File -Append $env:GITHUB_ENV
           "exe=$exe sha256=$((Get-FileHash $exe -Algorithm SHA256).Hash)" |
             Out-File -Append C:\evidence\env-${{ matrix.variant }}.txt
