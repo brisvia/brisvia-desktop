@@ -3591,12 +3591,18 @@ mod node_shutdown_tests {
     }
 
     /// Kill whatever is left, so a failing test cannot leave a process behind for 60 seconds.
+    ///
+    /// Reaps THROUGH a poisoned lock on purpose: the poison is about the data being unreliable, and the
+    /// process is real either way. The test that poisons the slot needs this most -- skipping cleanup
+    /// there is how a ping sits in the runner for a minute after the test "passed".
     fn reap(s: &Arc<Mutex<Option<Child>>>) {
-        if let Ok(mut g) = s.lock() {
-            if let Some(mut c) = g.take() {
-                let _ = c.kill();
-                let _ = c.wait();
-            }
+        let mut guard = match s.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(mut c) = guard.take() {
+            let _ = c.kill();
+            let _ = c.wait();
         }
     }
 
@@ -3664,9 +3670,7 @@ mod node_shutdown_tests {
         let r = wait_for_node_exit(&s, Duration::from_millis(50));
         assert!(matches!(r, Err(NodeExitError::LockPoisoned)), "expected LockPoisoned, got {r:?}");
         // Reap through the poison: the process is real and must not outlive the test.
-        if let Err(p) = s.lock() {
-            if let Some(mut c) = p.into_inner().take() { let _ = c.kill(); let _ = c.wait(); }
-        }
+        reap(&s);
     }
 
     #[test]
