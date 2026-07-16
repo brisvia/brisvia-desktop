@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
-"""Guarda de identidad de la release: todo lo que define "esto es la red real de Brisvia".
+"""Release identity guard: everything that defines "this is the real Brisvia network".
 
-Por que existe: cada uno de estos valores, si sale mal, produce un fallo SILENCIOSO que solo se descubre
-el dia del lanzamiento, cuando ya hay gente con el programa instalado. Una red equivocada, una billetera
-derivada en otra rama, una pool que se enciende sola, o el minado habilitado antes de tiempo no dan error:
-simplemente hacen otra cosa. Este script los pone todos en un solo lugar y falla si alguno se movio.
+Why it exists: each of these values, if it goes wrong, produces a SILENT failure that is only found on
+launch day, when people already have the program installed. A wrong network, a wallet derived on another
+branch, a pool that turns itself on, or mining enabled ahead of time do not raise an error: they simply do
+something else. This script gathers them all in one place and fails if any of them moved.
 
-Corre SIN compilar: lee las fuentes. La verificacion sobre el binario ya construido es aparte
-(los workflows extraen el sidecar y lo ejecutan).
+Runs WITHOUT building: it reads the sources. Verification against the already-built binary is separate
+(the workflows extract the sidecar and run it).
 
-Uso:  python tools/check_release_identity.py [--version 1.0.6]
+Usage:  python tools/check_release_identity.py [--version 1.0.6]
 """
 import argparse
 import pathlib
@@ -19,10 +19,10 @@ import sys
 RAIZ = pathlib.Path(__file__).resolve().parents[1]
 CORE = RAIZ.parent / "cripto-pow"
 
-# Los valores canonicos de la red real. Si alguno cambia a proposito, se cambia ACA, en el mismo commit,
-# y se explica por que. Que este script se ponga verde solo no significa que el cambio sea correcto.
+# The canonical values of the real network. If one changes on purpose, it changes HERE, in the same commit,
+# with the reason. This script going green on its own does not mean the change is correct.
 GENESIS = "aa6bc268339aa9f4f2e39ae33aca7b7e48e395033d08d37c08f828890af7baf7"
-GENESIS_TIME = "1785596400"   # 1-ago-2026 15:00 UTC: el instante del lanzamiento
+GENESIS_TIME = "1785596400"   # 2026-08-01 15:00 UTC: the launch instant
 MAINNET_START = "1_785_596_400"
 COIN_TYPE = "9339"
 HRP = "brv"
@@ -36,7 +36,7 @@ def leer(p: pathlib.Path) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--version", help="version esperada (ej: 1.0.6). Si se omite, solo chequea que coincidan entre si.")
+    ap.add_argument("--version", help="expected version (e.g. 1.0.6). If omitted, only checks that the sources agree with each other.")
     args = ap.parse_args()
 
     fallos, oks = [], []
@@ -44,60 +44,60 @@ def main() -> int:
     def chequear(cond, ok_msg, fail_msg):
         (oks if cond else fallos).append(ok_msg if cond else fail_msg)
 
-    # ---- Version: las dos unicas fuentes permitidas ----
+    # ---- Version: the only two allowed sources ----
     cargo = leer(RAIZ / "src-tauri/Cargo.toml")
     tauri = leer(RAIZ / "src-tauri/tauri.conf.json")
     v_cargo = re.search(r'^version = "([0-9.]+)"', cargo, re.M)
     v_tauri = re.search(r'"version": "([0-9.]+)"', tauri)
-    chequear(v_cargo and v_tauri, "version leible en las dos fuentes", "no pude leer la version")
+    chequear(v_cargo and v_tauri, "version readable in both sources", "could not read the version")
     if v_cargo and v_tauri:
         chequear(v_cargo.group(1) == v_tauri.group(1),
-                 f"version sincronizada ({v_cargo.group(1)})",
-                 f"VERSION DESINCRONIZADA: Cargo.toml={v_cargo.group(1)} vs tauri.conf.json={v_tauri.group(1)} "
-                 f"-> el actualizador ofreceria una version distinta a la que trae el instalador")
+                 f"version in sync ({v_cargo.group(1)})",
+                 f"VERSION OUT OF SYNC: Cargo.toml={v_cargo.group(1)} vs tauri.conf.json={v_tauri.group(1)} "
+                 f"-> the updater would offer a different version than the installer ships")
         if args.version:
             chequear(v_cargo.group(1) == args.version,
-                     f"version es la esperada ({args.version})",
-                     f"la version es {v_cargo.group(1)} y se esperaba {args.version}")
+                     f"version is the expected one ({args.version})",
+                     f"the version is {v_cargo.group(1)} but {args.version} was expected")
 
-    # ---- Identidad de red en el minero ----
+    # ---- Network identity in the miner ----
     lib = leer(RAIZ / "src-tauri/src/lib.rs")
     chequear(f'const MAINNET_START: i64 = {MAINNET_START};' in lib,
-             "MAINNET_START es el instante del lanzamiento",
-             f"MAINNET_START no es {MAINNET_START}: el programa esperaria a otra hora")
+             "MAINNET_START is the launch instant",
+             f"MAINNET_START is not {MAINNET_START}: the program would wait for a different time")
     chequear(re.search(r'pub const NET_CHAIN: &str = "brisvia";', lib) is not None,
-             "la red real se llama brisvia",
-             "no encuentro NET_CHAIN=brisvia en la config de mainnet")
+             "the real network is named brisvia",
+             "NET_CHAIN=brisvia not found in the mainnet config")
     chequear('const POOL_ENABLED: bool = false;' in lib,
-             "la pool esta apagada en el codigo",
-             "POOL_ENABLED no es false: la pool podria encenderse y la interfaz no sabe mostrar si te pagan")
+             "the pool is off in the code",
+             "POOL_ENABLED is not false: the pool could turn on and the UI cannot show whether you get paid")
     chequear(re.search(r'"84h/' + COIN_TYPE + r"h/0h\"|84h/9339h/0h", lib) is not None or "9339" in lib,
-             f"coin type {COIN_TYPE} presente",
-             f"no encuentro el coin type {COIN_TYPE}: la billetera derivaria en otra rama")
+             f"coin type {COIN_TYPE} present",
+             f"coin type {COIN_TYPE} not found: the wallet would derive on another branch")
 
-    # ---- Identidad de red en el nucleo ----
+    # ---- Network identity in the core ----
     if CORE.exists():
         chain = leer(CORE / "src/kernel/chainparams.cpp")
         main_blk = chain[chain.find("CBrisviaMainParams()"):]
         main_blk = main_blk[: main_blk.find("class C", 10) if main_blk.find("class C", 10) > 0 else 22000]
-        chequear(GENESIS in main_blk, "genesis de la red real correcto",
-                 f"el genesis de mainnet NO es {GENESIS[:16]}...: seria otra cadena")
+        chequear(GENESIS in main_blk, "real network genesis correct",
+                 f"the mainnet genesis is NOT {GENESIS[:16]}...: it would be a different chain")
         chequear(f"genesisTime = {GENESIS_TIME}" in main_blk,
-                 "el genesis esta fechado en el instante del lanzamiento",
-                 f"genesisTime no es {GENESIS_TIME}")
-        chequear(f'nDefaultPort = {P2P_PORT};' in main_blk, f"puerto P2P {P2P_PORT}",
-                 f"el puerto P2P de mainnet no es {P2P_PORT}")
-        chequear(f'bech32_hrp = "{HRP}"' in main_blk, f"direcciones {HRP}1...",
-                 f'el prefijo de direcciones no es "{HRP}"')
+                 "the genesis is dated at the launch instant",
+                 f"genesisTime is not {GENESIS_TIME}")
+        chequear(f'nDefaultPort = {P2P_PORT};' in main_blk, f"P2P port {P2P_PORT}",
+                 f"the mainnet P2P port is not {P2P_PORT}")
+        chequear(f'bech32_hrp = "{HRP}"' in main_blk, f"{HRP}1... addresses",
+                 f'the address prefix is not "{HRP}"')
         chequear("vSeeds.clear()" in main_blk,
-                 "sin semillas DNS (documentado: el arranque depende de las fijas)",
-                 "vSeeds cambio: revisar, el arranque depende de esto")
+                 "no DNS seeds (documented: bootstrap depends on the fixed ones)",
+                 "vSeeds changed: review, bootstrap depends on this")
 
-        # Las semillas fijas, decodificadas del array (no del comentario).
+        # The fixed seeds, decoded from the array (not from the comment).
         seeds_h = leer(CORE / "src/chainparamsseeds.h")
         m = re.search(r"chainparams_seed_brisvia_main\[\]\s*=\s*\{(.*?)\};", seeds_h, re.S)
         if not m:
-            fallos.append("no encuentro el array de semillas fijas de mainnet")
+            fallos.append("mainnet fixed-seed array not found")
         else:
             b = [int(x, 16) for x in re.findall(r"0x([0-9a-fA-F]{2})", m.group(1))]
             got = []
@@ -106,29 +106,29 @@ def main() -> int:
                 if e[0] == 0x01 and e[1] == 0x04:
                     got.append(f"{e[2]}.{e[3]}.{e[4]}.{e[5]}:{(e[6] << 8) | e[7]}")
             for s in SEEDS:
-                chequear(s in got, f"semilla {s} compilada",
-                         f"FALTA la semilla {s}: ningun programa recien instalado podria encontrar ese nodo")
-            chequear(len(got) == len(SEEDS), f"exactamente {len(SEEDS)} semillas",
-                     f"hay {len(got)} semillas y deberian ser {len(SEEDS)}: {got}")
+                chequear(s in got, f"seed {s} compiled in",
+                         f"MISSING seed {s}: no freshly installed program could find that node")
+            chequear(len(got) == len(SEEDS), f"exactly {len(SEEDS)} seeds",
+                     f"there are {len(got)} seeds and there should be {len(SEEDS)}: {got}")
     else:
-        fallos.append(f"no encuentro el nucleo en {CORE}: no puedo verificar genesis ni semillas")
+        fallos.append(f"core not found at {CORE}: cannot verify genesis or seeds")
 
-    # ---- Clave del actualizador: que no cambie por accidente ----
+    # ---- Updater key: guard against an accidental change ----
     pub = re.search(r'"pubkey"\s*:\s*"([^"]+)"', tauri)
     chequear(pub is not None and len(pub.group(1)) > 40,
-             "clave publica del actualizador presente",
-             "no encuentro la clave publica del actualizador: las actualizaciones no se verificarian")
+             "updater public key present",
+             "updater public key not found: updates would not be verified")
 
-    print(f"IDENTIDAD DE LA RELEASE — {len(oks)} OK, {len(fallos)} fallos\n")
+    print(f"RELEASE IDENTITY — {len(oks)} OK, {len(fallos)} failures\n")
     for o in oks:
         print(f"  OK    {o}")
     if fallos:
         print()
         for f in fallos:
-            print(f"  FALLA {f}")
-        print("\nNO CONGELAR NI COMPILAR HASTA RESOLVER ESTO.")
+            print(f"  FAIL  {f}")
+        print("\nDO NOT FREEZE OR BUILD UNTIL THIS IS RESOLVED.")
         return 1
-    print("\nOK: la identidad de la red real esta completa y coherente.")
+    print("\nOK: the real network identity is complete and coherent.")
     return 0
 
 
