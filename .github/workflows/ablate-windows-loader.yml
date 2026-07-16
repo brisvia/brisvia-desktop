@@ -136,6 +136,17 @@ jobs:
           "VARIANT_SOURCE_SHA=$sha" | Out-File -Append $env:GITHUB_ENV
           "JOB_START_UTC=$([DateTime]::UtcNow.ToString('o'))" | Out-File -Append $env:GITHUB_ENV
 
+      # RandomX lives in brisvia/brisvia, a separate repo. Dropping the Core BUILD was right -- it
+      # spends 15 minutes on something this experiment cannot observe -- but I dropped the CHECKOUT with
+      # it, and randomx.lib is not optional: the Rust library links it. All five variants died here.
+      # This costs ~2 minutes, not 15. The vcpkg/boost build is what was expensive, and it stays gone.
+      - name: Check out core (for the RandomX submodule only)
+        uses: actions/checkout@v4
+        with:
+          repository: brisvia/brisvia
+          submodules: recursive
+          path: core
+
       - name: MSVC tools (dumpbin lives here)
         uses: ilammy/msvc-dev-cmd@v1
 
@@ -143,8 +154,10 @@ jobs:
         shell: pwsh
         working-directory: work
         run: |
-          cmake -S core/src/randomx -B core/src/randomx/build -DARCH=default -DBUILD_SHARED_LIBS=OFF
-          cmake --build core/src/randomx/build --config Release
+          # The flags the diagnostic actually built with. Without CMP0091 + MultiThreaded the static
+          # runtime does not match what cargo links against, and it fails at link rather than here.
+          cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release -DARCH=default -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          cmake --build core/src/randomx/build --config Release -j
           $rx = Get-ChildItem core/src/randomx/build -Recurse -Filter randomx.lib | Select-Object -First 1
           if (-not $rx) { throw "RandomX produced no randomx.lib" }
           "RANDOMX_LIB=$($rx.FullName)" | Out-File -Append $env:GITHUB_ENV
