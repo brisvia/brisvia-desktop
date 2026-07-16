@@ -745,6 +745,84 @@ fn wait_for_early_exit(child: &mut Child, window: Duration) -> bool {
 /// common case still returns in a second or two, as soon as the process is actually gone.
 const NODE_SHUTDOWN_MAX: Duration = Duration::from_secs(180);
 
+/// How the wait ended, when it ended without anything going wrong.
+#[derive(Debug)]
+enum NodeExitOutcome {
+    /// There was never a process in the slot. Nothing to wait for.
+    AlreadyAbsent,
+    /// It closed on its own, and this is how.
+    Exited(std::process::ExitStatus),
+    /// Still alive when the deadline passed. It was NOT killed.
+    TimedOut,
+}
+
+/// The wait could not be carried out. Distinct from TimedOut: this means we do not KNOW.
+#[derive(Debug)]
+enum NodeExitError {
+    /// Another thread panicked holding the slot. The Child may be anything; we cannot claim it exited.
+    LockPoisoned,
+    /// The OS refused to tell us whether the process is alive.
+    WaitFailed(String),
+}
+
+/// Wait for a process to be gone. Takes a process slot and a deadline, and nothing else.
+///
+/// WHY IT TAKES A SLOT AND NOT AN AppState
+/// ---------------------------------------
+/// It used to take `&AppState`, and its tests built one to call it. AppState carries
+/// `tray: Arc<Mutex<Option<tauri::tray::TrayIcon>>>`, so constructing it made the TrayIcon type
+/// reachable, which linked Tauri's GUI runtime into the test binary, which imported
+/// TaskDialogIndirect from comctl32.dll -- a function only Common Controls v6 exports. A cargo test
+/// binary carries no manifest, so Windows hands it comctl32 5.82, which does not export it, and the
+/// executable died with 0xC0000139 before main. No test ran. Proven in run 29465731970: rc6-intact
+/// exit=-1073741511, this shape exit=0 with 61 tests listed.
+///
+/// So the coupling was the defect, and it is gone: nothing here can reach Tauri.
+///
+/// WHY NOT bool
+/// ------------
+/// `false` used to mean "still running" and "the OS would not answer" and "never started". Those need
+/// different responses -- one aborts the install, one is fine -- and a bool cannot tell them apart.
+///
+/// THE LOCK
+/// --------
+/// Held only for the try_wait, released before every sleep. Holding it for the full 180 seconds would
+/// block the node's own cleanup, and the shutdown path is exactly when other threads need the slot.
+///
+/// The Child is never taken out of the Option to wait on it: while it was out, another reader sees
+/// None and concludes the node is gone. It is cleared only once it has actually exited, which is true.
+fn wait_for_node_exit(
+    process_slot: &Arc<Mutex<Option<Child>>>,
+    timeout: Duration,
+) -> Result<NodeExitOutcome, NodeExitError> {
+    // Instant, not the wall clock: a clock that jumps back mid-wait would restart the deadline, and one
+    // that jumps forward would end it early. Instant is monotonic and answers "how long since", which
+    // is the only question here.
+    let started = std::time::Instant::now();
+    loop {
+        {
+            let mut guard = process_slot.lock().map_err(|_| NodeExitError::LockPoisoned)?;
+            match guard.as_mut() {
+                None => return Ok(NodeExitOutcome::AlreadyAbsent),
+                Some(child) => match child.try_wait() {
+                    Ok(Some(status)) => {
+                        // Gone. Clearing the slot now records what is true; it also reaps the handle.
+                        *guard = None;
+                        return Ok(NodeExitOutcome::Exited(status));
+                    }
+                    Ok(None) => {}
+                    Err(e) => return Err(NodeExitError::WaitFailed(e.to_string())),
+                },
+            }
+        } // lock released here, before the sleep
+
+        if started.elapsed() >= timeout {
+            return Ok(NodeExitOutcome::TimedOut);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 /// Ask the node to close and WAIT for it to actually be gone. Never kill it.
 ///
 /// Returns true if the process exited on its own, false if it was still alive after NODE_SHUTDOWN_MAX.
@@ -758,8 +836,12 @@ fn stop_node_and_wait(state: &AppState) -> bool {
     stop_node_and_wait_max(state, NODE_SHUTDOWN_MAX)
 }
 
-/// El mismo cierre, con el plazo por parametro. Existe para poder PROBARLO: 180 segundos
-/// en un test no es viable, y un candado que no se puede probar no es un candado.
+/// The same shutdown with the deadline as a parameter. Exists so it can be TESTED: 180 seconds is not
+/// viable in a test, and a guard that cannot be tested is not a guard.
+///
+/// This is the wrapper the directive asks for: it does the app-specific work -- stop mining, close the
+/// miner, ask the node over RPC -- and then hands the process slot to wait_for_node_exit. It pulls the
+/// slot out of AppState and knows nothing else about waiting.
 fn stop_node_and_wait_max(state: &AppState, plazo: Duration) -> bool {
     state.mining.store(false, Ordering::SeqCst);
     // The miner first: it keeps asking the node for work, and while it holds the .exe open the
@@ -777,31 +859,27 @@ fn stop_node_and_wait_max(state: &AppState, plazo: Duration) -> bool {
         eprintln!("[brisvia] the node did not accept `stop`; waiting for it anyway");
     }
 
-    let Some(mut child) = state.child.lock().unwrap().take() else {
-        return true; // we never started one
-    };
-    let arranque = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                eprintln!("[brisvia] the node closed on its own in {:.1}s", arranque.elapsed().as_secs_f32());
-                return true;
-            }
-            Ok(None) => {}
-            Err(e) => {
-                eprintln!("[brisvia] cannot check on the node: {e}");
-                return false;
-            }
+    let started = std::time::Instant::now();
+    match wait_for_node_exit(&state.child, plazo) {
+        Ok(NodeExitOutcome::AlreadyAbsent) => true, // we never started one
+        Ok(NodeExitOutcome::Exited(_)) => {
+            eprintln!("[brisvia] the node closed on its own in {:.1}s", started.elapsed().as_secs_f32());
+            true
         }
-        if arranque.elapsed() >= plazo {
-            // Put it back: it is still running, and whoever we hand `false` to needs to be able to
-            // find it. Dropping the handle here would orphan it.
-            *state.child.lock().unwrap() = Some(child);
-            eprintln!("[brisvia] the node is STILL running after {}s. Not killing it.",
-                      plazo.as_secs());
-            return false;
+        Ok(NodeExitOutcome::TimedOut) => {
+            eprintln!("[brisvia] the node is STILL running after {}s. Not killing it.", plazo.as_secs());
+            false
         }
-        std::thread::sleep(Duration::from_millis(200));
+        Err(NodeExitError::WaitFailed(e)) => {
+            eprintln!("[brisvia] cannot check on the node: {e}");
+            false
+        }
+        Err(NodeExitError::LockPoisoned) => {
+            // A thread panicked holding the slot. We cannot say the node exited, and saying so would
+            // let an installer overwrite a live datadir. Refuse.
+            eprintln!("[brisvia] the node slot is poisoned; cannot confirm it closed");
+            false
+        }
     }
 }
 
@@ -3487,93 +3565,134 @@ mod rpc_wire_format_tests {
 #[cfg(test)]
 mod node_shutdown_tests {
     use super::*;
+    use std::process::Child;
+    use std::sync::atomic::AtomicBool;
 
-    /// Un proceso que NO se va a cerrar solo, para representar al nodo ocupado escribiendo.
-    fn proceso_terco() -> std::process::Child {
+    /// A process that will NOT close on its own, standing in for a node busy writing.
+    fn stubborn_process() -> Child {
         #[cfg(target_os = "windows")]
-        let c = std::process::Command::new("cmd").args(["/c", "ping -n 60 127.0.0.1 >nul"]).spawn();
+        let c = Command::new("cmd").args(["/c", "ping -n 60 127.0.0.1 >nul"]).spawn();
         #[cfg(not(target_os = "windows"))]
-        let c = std::process::Command::new("sleep").arg("60").spawn();
-        c.expect("no se pudo lanzar el proceso de prueba")
+        let c = Command::new("sleep").arg("60").spawn();
+        c.expect("could not spawn the test process")
     }
 
-    fn estado_con(child: Option<std::process::Child>) -> AppState {
-        AppState {
-            child: Arc::new(Mutex::new(child)),
-            datadir: std::env::temp_dir().join("brisvia-test-shutdown"),
-            wallet_loaded: Arc::new(AtomicBool::new(false)),
-            sending: Arc::new(Mutex::new(())),
-            wallet_ops: Arc::new(Mutex::new(())),
-            receive_addr: Arc::new(Mutex::new(String::new())),
-            mining: Arc::new(AtomicBool::new(false)),
-            mined: Arc::new(AtomicU64::new(0)),
-            stale: Arc::new(AtomicU64::new(0)),
-            mine_start: Arc::new(Mutex::new(None)),
-            keep_session_on_relaunch: Arc::new(AtomicBool::new(false)),
-            intensity: Arc::new(Mutex::new("equilibrado".to_string())),
-            miner_child: Arc::new(Mutex::new(None)),
-            hashrate: Arc::new(Mutex::new(0.0)),
-            miner_ready: Arc::new(AtomicBool::new(false)),
-            tray_enabled: Arc::new(AtomicBool::new(true)),
-            mining_mode: Arc::new(Mutex::new("solo".to_string())),
-            pool_address: Arc::new(Mutex::new(String::new())),
-            pending_mnemonic: Arc::new(Mutex::new(None)),
-            lang: Arc::new(Mutex::new("es".to_string())),
-            tray: Arc::new(Mutex::new(None)),
-            cores: 2,
-            miner_threads: Arc::new(AtomicU64::new(0)),
-            total_mined_secs: Arc::new(Mutex::new(0)),
-            ach_cache: Arc::new(Mutex::new(None)),
+    /// A process that exits immediately.
+    fn quick_process() -> Child {
+        #[cfg(target_os = "windows")]
+        let c = Command::new("cmd").args(["/c", "exit 0"]).spawn();
+        #[cfg(not(target_os = "windows"))]
+        let c = Command::new("true").spawn();
+        c.expect("could not spawn the test process")
+    }
+
+    fn slot(child: Option<Child>) -> Arc<Mutex<Option<Child>>> {
+        Arc::new(Mutex::new(child))
+    }
+
+    /// Kill whatever is left, so a failing test cannot leave a process behind for 60 seconds.
+    fn reap(s: &Arc<Mutex<Option<Child>>>) {
+        if let Ok(mut g) = s.lock() {
+            if let Some(mut c) = g.take() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
         }
     }
 
     #[test]
-    fn el_plazo_es_de_180_segundos_no_de_cinco() {
-        // 5.5 s era el valor viejo, y era la causa del defecto. Si alguien lo vuelve a bajar "porque
-        // takes long", this test stops it: taking long is exactly when killing it does the damage.
+    fn the_deadline_is_180_seconds_not_five() {
+        // 5.5s was the old value and it was the defect. If someone lowers it again "because it takes
+        // too long", this stops them: taking too long is exactly when killing does the damage.
         assert_eq!(NODE_SHUTDOWN_MAX, Duration::from_secs(180),
-                   "el plazo de cierre del nodo no puede bajarse: Core avisa que puede tardar minutos");
+                   "the node shutdown deadline cannot be lowered: Core warns it may take minutes");
     }
 
     #[test]
-    fn si_el_nodo_no_cierra_devuelve_false_y_NO_lo_mata() {
-        let mut terco = proceso_terco();
-        let pid = terco.id();
-        let s = estado_con(Some(terco));
-
-        // Short window on purpose: what is tested is the decision, not the wait.
-        let cerro = stop_node_and_wait_max(&s, Duration::from_millis(600));
-        assert!(!cerro, "it must report that it did NOT close, not lie");
-
-        // And what really matters: it is still alive. It was not killed.
-        let mut guard = s.child.lock().unwrap();
-        let child = guard.as_mut().expect("the process must be kept, not released as an orphan");
-        assert_eq!(child.id(), pid, "tiene que ser el mismo proceso, devuelto al estado");
-        assert!(matches!(child.try_wait(), Ok(None)),
-                "RECHAZADO: el nodo fue terminado. Nunca se mata: puede estar guardando.");
-        let _ = child.kill(); // limpieza del test
-        let _ = child.wait();
+    fn an_empty_slot_is_already_absent() {
+        let s: Arc<Mutex<Option<Child>>> = slot(None);
+        assert!(matches!(wait_for_node_exit(&s, Duration::from_millis(50)),
+                         Ok(NodeExitOutcome::AlreadyAbsent)));
     }
 
     #[test]
-    fn si_el_nodo_cierra_solo_devuelve_true_enseguida() {
-        // Un proceso que termina solo: representa el caso normal, que es el 99% de las veces.
-        #[cfg(target_os = "windows")]
-        let c = std::process::Command::new("cmd").args(["/c", "exit"]).spawn().unwrap();
-        #[cfg(not(target_os = "windows"))]
-        let c = std::process::Command::new("true").spawn().unwrap();
-        let s = estado_con(Some(c));
-        let t = std::time::Instant::now();
-        assert!(stop_node_and_wait_max(&s, Duration::from_secs(30)), "closed by itself: it must say true");
-        assert!(t.elapsed() < Duration::from_secs(5),
-                "no puede esperar el plazo completo cuando el proceso ya se fue");
-        assert!(s.child.lock().unwrap().is_none(), "el proceso terminado no se guarda");
+    fn a_process_that_already_exited_reports_exited() {
+        let mut c = quick_process();
+        let _ = c.wait(); // it is gone before we even ask
+        let s = slot(Some(c));
+        // try_wait on an already-reaped Child still answers; what matters is that we do not hang.
+        let r = wait_for_node_exit(&s, Duration::from_millis(500));
+        assert!(matches!(r, Ok(NodeExitOutcome::Exited(_)) | Ok(NodeExitOutcome::AlreadyAbsent)),
+                "expected Exited or AlreadyAbsent, got {r:?}");
+        reap(&s);
     }
 
     #[test]
-    fn sin_nodo_lanzado_no_falla() {
-        let s = estado_con(None);
-        assert!(stop_node_and_wait_max(&s, Duration::from_secs(1)),
-                "if a node was never started, there is nothing to wait for");
+    fn a_process_that_exits_during_the_wait_reports_exited() {
+        let s = slot(Some(quick_process()));
+        match wait_for_node_exit(&s, Duration::from_secs(10)) {
+            Ok(NodeExitOutcome::Exited(_)) => {}
+            other => panic!("expected Exited, got {other:?}"),
+        }
+        // The slot is cleared only once it is true that the process is gone.
+        assert!(s.lock().unwrap().is_none(), "the slot should be empty after it exited");
+    }
+
+    #[test]
+    fn a_process_past_the_deadline_times_out_and_is_NOT_killed() {
+        let s = slot(Some(stubborn_process()));
+        let r = wait_for_node_exit(&s, Duration::from_millis(300));
+        assert!(matches!(r, Ok(NodeExitOutcome::TimedOut)), "expected TimedOut, got {r:?}");
+        // Still there, still alive, still findable. Killing it is the bug this guards.
+        let mut g = s.lock().unwrap();
+        let c = g.as_mut().expect("it was killed, and it must not be");
+        assert!(matches!(c.try_wait(), Ok(None)), "the process must still be running");
+        drop(g);
+        reap(&s);
+    }
+
+    #[test]
+    fn a_poisoned_lock_is_an_error_not_a_false_all_clear() {
+        let s = slot(Some(stubborn_process()));
+        let s2 = Arc::clone(&s);
+        // Panic while holding it. Afterwards nobody can know the process state -- and claiming it
+        // exited would let an installer overwrite a live datadir.
+        let _ = std::thread::spawn(move || {
+            let _g = s2.lock().unwrap();
+            panic!("poisoning the slot on purpose");
+        }).join();
+        let r = wait_for_node_exit(&s, Duration::from_millis(50));
+        assert!(matches!(r, Err(NodeExitError::LockPoisoned)), "expected LockPoisoned, got {r:?}");
+        // Reap through the poison: the process is real and must not outlive the test.
+        if let Err(p) = s.lock() {
+            if let Some(mut c) = p.into_inner().take() { let _ = c.kill(); let _ = c.wait(); }
+        }
+    }
+
+    #[test]
+    fn the_lock_is_free_between_polls() {
+        let s = slot(Some(stubborn_process()));
+        let s2 = Arc::clone(&s);
+        let waiter = std::thread::spawn(move || wait_for_node_exit(&s2, Duration::from_millis(900)));
+        // If the wait held the lock for its whole duration this would block until it finished.
+        std::thread::sleep(Duration::from_millis(250));
+        let grabbed = std::time::Instant::now();
+        let g = s.lock().expect("the slot should be lockable while the wait sleeps");
+        let waited = grabbed.elapsed();
+        drop(g);
+        assert!(waited < Duration::from_millis(200),
+                "took {waited:?} to acquire: the wait is holding the lock across its sleep");
+        let _ = waiter.join();
+        reap(&s);
+    }
+
+    #[test]
+    fn nothing_here_builds_an_AppState() {
+        // Not a runtime assertion -- a note for whoever edits this file. Constructing AppState makes
+        // tauri::tray::TrayIcon reachable, which links the GUI runtime, which imports
+        // TaskDialogIndirect from comctl32, which Windows resolves to 5.82 for a manifest-less cargo
+        // test binary, which does not export it: 0xC0000139 before main and zero tests run.
+        // tools/ci/check_imports_deep.py is the gate that enforces this from outside.
+        let _: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     }
 }
