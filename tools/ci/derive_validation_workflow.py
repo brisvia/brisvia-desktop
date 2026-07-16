@@ -137,11 +137,17 @@ VALIDACION = '''
           cargo test --manifest-path src-tauri/Cargo.toml --features mainnet --lib -- --nocapture 2>&1 | Tee-Object evidence\\rust-tests.txt
           if ($LASTEXITCODE -ne 0) { throw "Rust tests failed" }
 
-      - name: Every JavaScript test
+      # The JS unit tests, run with node's own runner. There is NO `npm test` script -- package.json has
+      # test:e2e (Playwright), test:rust, test:e2e:real, but no `test`. The Playwright e2e suite needs the
+      # built app and runs in its own workflow (e2e.yml); duplicating it here would be heavy and redundant.
+      # This runs the pure node unit tests (*.test.js) -- amount-separator today, whatever is added later.
+      - name: JavaScript unit tests (node --test; Playwright e2e is covered by e2e.yml)
         shell: pwsh
         run: |
-          npm test 2>&1 | Tee-Object evidence\\js-tests.txt
-          if ($LASTEXITCODE -ne 0) { throw "JavaScript tests failed" }
+          $unit = Get-ChildItem tests -Recurse -Filter *.test.js | ForEach-Object { $_.FullName }
+          if (-not $unit) { throw "no *.test.js unit tests found -- did the test files move?" }
+          node --test $unit 2>&1 | Tee-Object evidence\\js-tests.txt
+          if ($LASTEXITCODE -ne 0) { throw "JavaScript unit tests failed" }
 
       - name: Seal the evidence
         if: always()
