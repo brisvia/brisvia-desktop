@@ -200,11 +200,16 @@ def aplicar(variante, ruta):
 def self_test():
     """Every patch, against the REAL rc6 source. A patch validated on a toy proves nothing."""
     fallos = 0
+    # No cwd=: a hardcoded C:/dev/brisvia-miner exists on my disk and nowhere else. On the runner it threw
+    # NotADirectoryError and the gate refused to dispatch five builds on a tool that could not prove
+    # itself -- the gate working, and my path being wrong.
     r = subprocess.run(["git", "show", "daf47da0:src-tauri/src/lib.rs"],
-                       cwd=r"C:/dev/brisvia-miner", capture_output=True, text=True, encoding="utf-8")
+                       capture_output=True, text=True, encoding="utf-8")
     real = r.stdout
     if not real or "mod node_shutdown_tests" not in real:
-        print("  FAIL  no pude leer el lib.rs real de rc6")
+        print("  FAIL  no pude leer el lib.rs real de rc6 desde este repo")
+        print(f"        cwd={pathlib.Path.cwd()}")
+        print(f"        git dijo: {(r.stderr or '').strip()[:160]}")
         return 1
     print(f"  lib.rs de rc6: {len(real.splitlines())} lineas")
 

@@ -48,6 +48,11 @@ jobs:
       ok: ${{ steps.gate.outputs.ok }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The self-test reads rc6's source by object with `git show daf47da0:...`. A
+          # shallow clone has no such object and the read comes back empty, which looks
+          # exactly like a patch that did nothing: a true failure for a false reason.
+          fetch-depth: 0
 
       # Every long run starts on a proven tool. This one costs seconds and has already saved two builds.
       - name: The PowerShell inside this workflow parses
