@@ -39,3 +39,10 @@ LOGROS-50-DISENO.md
 # Release/updater manifests generated locally (published as release assets, not versioned)
 latest.json
 latest_*.json
+
+# Python bytecode from the tools/checkers (regenerated on each run)
+__pycache__/
+*.pyc
+
+# Sealed validation evidence (per-run hashes and manifests; kept private, never versioned)
+evidence/
