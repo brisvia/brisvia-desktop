@@ -1,10 +1,10 @@
-// Compila los DOS binarios de prueba E2E y los deja con nombre estable dentro de target/debug
-// (where its neighbouring DLLs are). They are NEVER published: they are only for real testing.
+// Compiles the TWO E2E test binaries and leaves them with a stable name inside target/debug
+// (where their neighboring DLLs live). They are never published: they are only for real testing.
 //
-//   brisvia-miner-e2e.exe          -> feature e2e (red de prueba / llaves tprv), se redirige a regtest por env.
-//   brisvia-miner-mainnet-e2e.exe  -> feature mainnet + e2e (para el recorrido de modo espera).
+//   brisvia-miner-e2e.exe          -> e2e feature (test network / tprv keys), redirected to regtest via env.
+//   brisvia-miner-mainnet-e2e.exe  -> mainnet + e2e feature (for the wait-mode journey).
 //
-// Locates cargo even if it is not on the PATH (rustup in ~/.cargo/bin), like run-rust-tests.js.
+// Locates cargo even if it is not on PATH (rustup in ~/.cargo/bin), just like run-rust-tests.js.
 'use strict';
 
 const { spawnSync } = require('child_process');
@@ -38,7 +38,7 @@ const builds = [
 ];
 
 for (const b of builds) {
-  console.log(`\n=== Compilando features: ${b.features} ===`);
+  console.log(`\n=== Building features: ${b.features} ===`);
   const r = spawnSync(cargo, ['build', '--manifest-path', manifest, '--features', b.features], {
     stdio: 'inherit',
     shell: false,
@@ -51,4 +51,4 @@ for (const b of builds) {
   fs.copyFileSync(base, dest);
   console.log(`OK -> ${dest}`);
 }
-console.log('\nBinarios E2E listos.');
+console.log('\nE2E binaries ready.');
