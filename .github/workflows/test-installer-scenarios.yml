@@ -118,7 +118,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [solo-brisvia, brisvia-plus-foreign, foreign-only, unicode-datadir, stale-reused-pid, bad-rpc-channel, multiple-ambiguous]
+        scenario: [solo-brisvia, brisvia-plus-foreign, foreign-only, unicode-datadir, stale-reused-pid, bad-rpc-channel, multiple-valid, multiple-one-ambiguous]
     steps:
       - uses: actions/checkout@v4
         with:

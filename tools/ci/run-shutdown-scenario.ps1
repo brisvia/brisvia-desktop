@@ -22,7 +22,7 @@
 param(
     [Parameter(Mandatory)][ValidateSet(
         'solo-brisvia', 'brisvia-plus-foreign', 'foreign-only', 'unicode-datadir',
-        'stale-reused-pid', 'bad-rpc-channel', 'multiple-ambiguous')]
+        'stale-reused-pid', 'bad-rpc-channel', 'multiple-valid', 'multiple-one-ambiguous')]
     [string]$Scenario,
     [Parameter(Mandatory)][string]$BitcoindExe,   # a real bitcoind.exe, from the build
     [Parameter(Mandatory)][string]$ShutdownScript, # src-tauri/windows/shutdown-brisvia-node.ps1
@@ -230,26 +230,40 @@ try {
             Check 'node_still_alive' ($ni -and $ni.CreationDate -eq $beforeCreated) "node PID $before must still be alive -- never killed"
         }
 
-        'multiple-ambiguous' {
-            # Two nodes from the SAME install path (different datadirs/ports). The current script iterates
-            # and stops each; ChatGPT recommended aborting on ambiguity. This scenario CAPTURES what the
-            # shipped code does and does not hard-assert a policy -- the evidence goes to ChatGPT to
-            # decide iterate-and-stop vs abort. Whatever the policy, nothing may be left half-installed.
+        'multiple-valid' {
+            # Two nodes from the SAME install path, each with its own datadir and RPC, both resolvable.
+            # Two instances is NOT ambiguity: the shutdown resolves both in phase 1, then closes both. The
+            # install may continue only once both are gone.
             $a = Track (Start-Node $ourExe $ourDd $Port1)
             $ourDd2 = Join-Path $WorkRoot 'brisvia-data-2'
-            $b = Track (Start-Process -FilePath $ourExe -ArgumentList "-datadir=$ourDd2", "-maxtipage=3153600000" -PassThru -WindowStyle Hidden)
-            # second node needs its own conf
-            New-Item -ItemType Directory -Force -Path $ourDd2 | Out-Null
-            @("chain=regtest","server=1","[regtest]","rpcport=$Port2","rpcbind=127.0.0.1","rpcallowip=127.0.0.1") |
-                Out-File -Encoding ascii (Join-Path $ourDd2 'bitcoin.conf')
+            $bExe = Join-Path $WorkRoot 'brisvia-2\binaries\bitcoind.exe'  # same install dir logically; second datadir
+            $b = Track (Start-Node $ourExe $ourDd2 $Port2)
             Check 'both_up' ((Wait-Rpc $ourDd $Port1) -and (Wait-Rpc $ourDd2 $Port2)) 'two nodes from our path are up'
+            $aPid = $a.Id; $bPid = $b.Id
             $r = Invoke-Shutdown $install
-            Emit 'ambiguous_behaviour_captured' @{ exit_code = $r.code; note = 'iterate-and-stop vs abort: decide with ChatGPT from this evidence' }
-            # No hard pass/fail on exit code here; only that it did not leave one closed and one open
-            # silently -- capture both states.
-            $aAlive = [bool](Proc-Info $a.Id)
-            $bAlive = [bool](Proc-Info $b.Id)
-            Emit 'both_states' @{ node_a_alive = $aAlive; node_b_alive = $bAlive; exit_code = $r.code }
+            Check 'exit_zero' ($r.code -eq 0) "exit=$($r.code): both resolvable, both should close"
+            Check 'both_closed' ((-not (Proc-Info $aPid)) -and (-not (Proc-Info $bPid))) "both PIDs ($aPid, $bPid) must be gone"
+        }
+
+        'multiple-one-ambiguous' {
+            # Two nodes from our path, but ONE cannot be resolved: its bitcoin.conf is gone, so its chain
+            # and port are unknown. Phase 1 must abort BEFORE stopping anything, so BOTH stay alive. This
+            # is the flaw the two-phase design fixes: never close one and then discover the other is
+            # unresolvable, leaving a half-closed set.
+            $a = Track (Start-Node $ourExe $ourDd $Port1)
+            $ourDd2 = Join-Path $WorkRoot 'brisvia-data-2'
+            $b = Track (Start-Node $ourExe $ourDd2 $Port2)
+            Check 'both_up' ((Wait-Rpc $ourDd $Port1) -and (Wait-Rpc $ourDd2 $Port2)) 'two nodes from our path are up'
+            $aPid = $a.Id; $bPid = $b.Id
+            $aCreated = (Proc-Info $aPid).CreationDate
+            $bCreated = (Proc-Info $bPid).CreationDate
+            # Make the SECOND one unresolvable: remove its conf so chain/port cannot be read.
+            Remove-Item (Join-Path $ourDd2 'bitcoin.conf') -Force -ErrorAction SilentlyContinue
+            $r = Invoke-Shutdown $install
+            Check 'exit_nonzero' ($r.code -ne 0) "exit=$($r.code), expected non-zero: one is ambiguous, abort"
+            $ai = Proc-Info $aPid; $bi = Proc-Info $bPid
+            Check 'nothing_stopped' (($ai -and $ai.CreationDate -eq $aCreated) -and ($bi -and $bi.CreationDate -eq $bCreated)) `
+                "BOTH PIDs must still be alive -- phase 1 aborts before touching anything"
         }
     }
 
