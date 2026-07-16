@@ -197,39 +197,54 @@ jobs:
           Get-ChildItem src-tauri/binaries | Format-Table Name, Length -AutoSize
           "PLACEHOLDER_BINARIES=true" | Out-File -Append $env:GITHUB_ENV
 
-      - name: Build the test executable (no run)
+      # COPIED from the diagnostic that actually found the executable, not written from memory.
+      # I wrote `Get-CargoTestExecutable -ManifestPath` out of my head; the real signature takes
+      # -CargoJsonLines. The parameter does not exist, the step died, and every job still went green
+      # because the load step carries continue-on-error -- so five green jobs meant nothing at all.
+      #
+      # RANDOMX_LIB_DIR, --features mainnet and --manifest-path all come from the real job. Without them
+      # this builds a different binary, or nothing, and compares neither.
+      - name: Build the test executable, find it, load it
+        id: load
         shell: pwsh
         working-directory: work
         env:
           CARGO_INCREMENTAL: 0
         run: |
           $env:RANDOMX_LIB_DIR = (Split-Path $env:RANDOMX_LIB)
-          cargo test --lib --no-run --manifest-path src-tauri/Cargo.toml --features mainnet
-
-      - name: Find it, load it, record everything
-        id: load
-        continue-on-error: true
-        shell: pwsh
-        working-directory: work
-        run: |
-          . "C:\tools\Invoke-NativeProcess.ps1"
           New-Item -ItemType Directory -Force -Path C:\evidence | Out-Null
+          . "C:	ools\Invoke-NativeProcess.ps1"
 
-          # profile.test, not target.test: target.test says a target CAN be tested; profile.test says THIS
-          # artifact IS the test binary. Filtering on the wrong one matched nothing and cost a whole run.
-          $exe = Get-CargoTestExecutable -ManifestPath src-tauri/Cargo.toml -Features mainnet
+          $json = cargo test --manifest-path src-tauri/Cargo.toml --features mainnet --lib --no-run --message-format=json
+          $json | Out-File C:\evidence\cargo-json-${{ matrix.variant }}.txt
+
+          # profile.test marks THIS artifact as a test binary. target.test only says a target CAN be
+          # tested -- filtering on that matched nothing and cost a whole run.
+          $found = @()
+          foreach ($line in $json) {
+            if ($line -notmatch '^\s*\{') { continue }
+            try { $m = $line | ConvertFrom-Json } catch { continue }
+            if ($m.reason -eq 'compiler-artifact' -and $m.executable -and $m.profile.test -eq $true) {
+              $found += $m.executable
+            }
+          }
+          if ($found.Count -eq 0) { throw "INVALID: ${{ matrix.variant }} built no test executable. Nothing to measure." }
+          if ($found.Count -gt 1) { throw "INVALID: $($found.Count) test executables; cannot tell which is under test." }
+          $exe = $found[0]
+          Copy-Item $exe "C:\evidence	est-${{ matrix.variant }}.exe"
           "TEST_EXE=$exe" | Out-File -Append $env:GITHUB_ENV
-          Copy-Item $exe "C:\evidence\test-${{ matrix.variant }}.exe"
+          "exe=$exe sha256=$((Get-FileHash $exe -Algorithm SHA256).Hash)" |
+            Out-File -Append C:\evidence\env-${{ matrix.variant }}.txt
 
-          # --list needs the executable to LOAD but runs no test. If the loader cannot start it, no test
-          # name in the error means anything: cargo builds one binary and filters by name at run time.
+          # --list needs the executable to LOAD but runs no test. The exit code comes off the process
+          # object; nothing here is read through a pipeline.
           $r = Invoke-NativeProcess -FilePath $exe -Arguments @('--list') -OutputDir C:\evidence
-          Write-NativeProcessReport -Result $r -PreviewLines 10
+          Write-NativeProcessReport -Result $r -PreviewLines 8
           $listados = if ($r.ExitCode -eq 0) { ($r.StdOut -split "`n" | Where-Object { $_ -match ': test$' }).Count } else { 0 }
-
           "EXIT_DEC=$($r.ExitCode)"    | Out-File -Append $env:GITHUB_ENV
           "EXIT_HEX=$($r.ExitCodeHex)" | Out-File -Append $env:GITHUB_ENV
           "TESTS_LISTED=$listados"     | Out-File -Append $env:GITHUB_ENV
+          Write-Host "VARIANT=${{ matrix.variant }} EXIT=$($r.ExitCode) HEX=$($r.ExitCodeHex) TESTS=$listados"
 
       - name: What it asks Windows for
         if: always()
