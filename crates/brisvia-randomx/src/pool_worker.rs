@@ -87,9 +87,9 @@ where
             let (job, cur_gen, cancel, done, tx) =
                 (job.clone(), cur_gen.clone(), cancel.clone(), done.clone(), tx.clone());
             s.spawn(move || {
-                // Barrido progresivo de nonces por job: `start` avanza tras cada share para NO re-enviar el
-                // mismo nonce (evita "duplicate") y para producir varias shares por job (clave en PPLNS).
-                // Resets to 0 when a new job arrives (the generation changes).
+                // Progressive nonce sweep per job: `start` advances after each share so we do NOT resend the
+                // same nonce (avoids "duplicate") and produce several shares per job (key for PPLNS).
+                // It resets to 0 when a new job arrives (the generation changes).
                 let mut start: u64 = 0;
                 let mut last_gen: u64 = 0;
                 while !done.load(Ordering::Relaxed) && !should_stop.load(Ordering::Relaxed) {
@@ -107,11 +107,11 @@ where
                                     if cur_gen.load(Ordering::SeqCst) == g && !should_stop.load(Ordering::Relaxed) {
                                         let _ = tx.try_send((sol.job_id, sol.nonce, g)); // drop if the queue is full
                                     }
-                                    start = sol.nonce as u64 + 1; // continue AFTER the nonce found
+                                    start = sol.nonce as u64 + 1; // continue AFTER the nonce we found
                                 }
                                 None => {
-                                    // Range exhausted or cancelled. If the job is still valid, wait for the next one
-                                    // (do not re-sweep from 0, which would resend nonces already tried).
+                                    // Range exhausted or cancelled. If the job is still current, wait for the
+                                    // next one (do not re-sweep from 0, which would resend already-tried nonces).
                                     if cur_gen.load(Ordering::SeqCst) == g {
                                         std::thread::sleep(Duration::from_millis(100));
                                     }

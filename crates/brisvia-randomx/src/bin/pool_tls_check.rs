@@ -21,77 +21,77 @@ fn main() {
     // clear reason is a PASS here: it proves the encrypted round trip works end to end.
     let addr = std::env::args().nth(2).unwrap_or_else(|| "tbrv1qcheckcheckcheckcheckcheckcheckcheck".to_string());
 
-    println!("1) conectando CIFRADO a {pool} ...");
+    println!("1) connecting ENCRYPTED to {pool} ...");
     let mut c = match StratumClient::connect_tls(&pool, Duration::from_secs(20)) {
         Ok(c) => {
-            println!("   OK: conexion cifrada establecida y certificado verificado");
+            println!("   OK: encrypted connection established and certificate verified");
             c
         }
         Err(e) => {
-            eprintln!("   FALLA: no se pudo establecer la conexion cifrada -> {e}");
-            eprintln!("   (si la pool todavia habla en claro, esto falla: es la senal correcta)");
+            eprintln!("   FAIL: could not establish the encrypted connection -> {e}");
+            eprintln!("   (if the pool still speaks in the clear, this fails: that is the correct signal)");
             std::process::exit(1);
         }
     };
 
-    println!("2) login (viaja SOLO la direccion publica de pago) ...");
+    println!("2) login (ONLY the public payout address travels) ...");
     match c.login(&addr, "tls-check", Duration::from_secs(20)) {
         Ok(Some(job)) => {
-            println!("   OK: la pool acepto y mando trabajo");
-            println!("      job_id={} altura={} header={} chars", job.job_id, job.height, job.header_template.len());
+            println!("   OK: the pool accepted and sent work");
+            println!("      job_id={} height={} header={} chars", job.job_id, job.height, job.header_template.len());
             match job.to_mining_job() {
-                Ok(_) => println!("   OK: el trabajo es valido y minable"),
+                Ok(_) => println!("   OK: the work is valid and mineable"),
                 Err(e) => {
-                    eprintln!("   FALLA: la pool mando un trabajo que el minero no puede usar -> {e}");
+                    eprintln!("   FAIL: the pool sent work the miner cannot use -> {e}");
                     std::process::exit(1);
                 }
             }
         }
         Ok(None) => {
-            println!("   OK: la pool confirmo el login explicitamente");
-            // El login confirmado no alcanza: el trabajo tiene que llegar despues, o el minero se queda
-            // conectado sin minar. Esperamos el primer job igual que hace la sesion real.
-            println!("3) esperando el primer trabajo ...");
+            println!("   OK: the pool confirmed the login explicitly");
+            // A confirmed login is not enough: the work must arrive afterwards, or the miner stays
+            // connected without mining. We wait for the first job just like the real session does.
+            println!("3) waiting for the first job ...");
             let hasta = std::time::Instant::now() + Duration::from_secs(30);
             let mut llego = false;
             while std::time::Instant::now() < hasta && !llego {
                 match c.poll_message(Duration::from_millis(500)) {
                     Ok(Poll::Message(Incoming::Job(j))) => {
-                        println!("   OK: llego trabajo -> job_id={} altura={}", j.job_id, j.height);
+                        println!("   OK: work arrived -> job_id={} height={}", j.job_id, j.height);
                         match j.to_mining_job() {
-                            Ok(_) => println!("   OK: el trabajo es valido y minable"),
+                            Ok(_) => println!("   OK: the work is valid and mineable"),
                             Err(e) => {
-                                eprintln!("   FALLA: trabajo que el minero no puede usar -> {e}");
+                                eprintln!("   FAIL: work the miner cannot use -> {e}");
                                 std::process::exit(1);
                             }
                         }
                         llego = true;
                     }
                     Ok(Poll::Closed) => {
-                        eprintln!("   FALLA: la pool cerro la conexion sin mandar trabajo");
+                        eprintln!("   FAIL: the pool closed the connection without sending work");
                         std::process::exit(1);
                     }
                     Ok(_) => continue,
                     Err(e) => {
-                        eprintln!("   FALLA: error leyendo de la pool -> {e}");
+                        eprintln!("   FAIL: error reading from the pool -> {e}");
                         std::process::exit(1);
                     }
                 }
             }
             if !llego {
-                eprintln!("   FALLA: la pool confirmo el login pero no mando trabajo en 30s");
+                eprintln!("   FAIL: the pool confirmed the login but sent no work in 30s");
                 std::process::exit(1);
             }
         }
         Err(LoginError::Permanent(m)) => {
-            println!("   OK: la pool respondio y RECHAZO explicitamente -> {m}");
-            println!("      (esperado si la direccion no corresponde a la red de esta pool)");
+            println!("   OK: the pool answered and explicitly REJECTED -> {m}");
+            println!("      (expected if the address does not match this pool's network)");
         }
         Err(LoginError::Temporary(m)) => {
-            eprintln!("   FALLA: la pool no dio una respuesta clara -> {m}");
+            eprintln!("   FAIL: the pool did not give a clear answer -> {m}");
             std::process::exit(1);
         }
     }
     c.shutdown();
-    println!("\nOK: el camino cifrado minero -> pool funciona de punta a punta.");
+    println!("\nOK: the encrypted miner -> pool path works end to end.");
 }

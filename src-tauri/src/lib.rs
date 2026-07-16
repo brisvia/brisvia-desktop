@@ -2166,7 +2166,7 @@ fn refresh_tooltip(state: &AppState) {
         let threads = state.miner_threads.load(Ordering::SeqCst);
         let cores = state.cores;
         if lang == "es" {
-            format!("Brisvia — Minando al {}% · {} de {} núcleos", pct, threads, cores)
+            format!("Brisvia — Minando al {}% · {} de {} núcleos", pct, threads, cores) // i18n-es (native tray tooltip, localized in code)
         } else {
             format!("Brisvia — Mining at {}% · {} of {} cores", pct, threads, cores)
         }
@@ -2743,7 +2743,7 @@ fn system_locale() -> String {
 
 // Tray menu labels by language.
 fn tray_labels(lang: &str) -> (&'static str, &'static str) {
-    if lang == "es" { ("Abrir Brisvia", "Salir de Brisvia") } else { ("Open Brisvia", "Exit Brisvia") }
+    if lang == "es" { ("Abrir Brisvia", "Salir de Brisvia") } else { ("Open Brisvia", "Exit Brisvia") } // i18n-es (native tray menu labels)
 }
 
 fn build_tray_menu(app: &AppHandle, lang: &str) -> Result<tauri::menu::Menu<tauri::Wry>, tauri::Error> {
@@ -3552,15 +3552,15 @@ mod rpc_wire_format_tests {
 }
 
 // ============================================================================================
-// El nodo NO se mata. Nunca.
+// The node is NEVER killed.
 //
-// The defect that led to these tests: `stop_node` gave the node 1.5s + 4s and then killed it.
-// Bitcoin Core flushes the chainstate on shutdown and its own documentation warns it can take several
-// minutes. Killing it in the middle of that write is exactly how a block database ends up half-written,
-// y el usuario lo paga en el arranque siguiente con una reparación — o con la base corrupta.
+// The defect that led to these tests: `stop_node` gave the node 1.5 s + 4 s and then killed it.
+// Bitcoin Core flushes the chainstate on shutdown and its own docs warn this can take several minutes.
+// Killing it halfway through that write is exactly how a block database is left half-written, and the
+// user pays for it on the next start with a repair -- or with a corrupt database.
 //
-// The comment "do not kill it" does not stop anyone from killing it. These tests do: if one appears again
-// kill en el camino del nodo, se ponen en rojo.
+// A comment saying "do not kill it" does not stop anyone from killing it. These tests do: if a kill
+// ever reappears on the node's path, they turn red.
 // ============================================================================================
 #[cfg(test)]
 mod node_shutdown_tests {
