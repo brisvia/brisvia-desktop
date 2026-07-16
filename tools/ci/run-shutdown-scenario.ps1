@@ -54,7 +54,9 @@ function Emit($event, $data) {
 # --- launch a bitcoind exactly the way the app does: -datadir on the cmdline, chain/rpcport in the conf
 function Start-Node($exePath, $dataDir, $port, $chain = 'regtest') {
     New-Item -ItemType Directory -Force -Path (Split-Path $exePath) | Out-Null
-    Copy-Item $BitcoindExe $exePath -Force
+    # Only copy if it is not already there. Two instances share one install path (multiple-*), and the
+    # first process holds the .exe open -- re-copying it fails with "being used by another process".
+    if (-not (Test-Path $exePath)) { Copy-Item $BitcoindExe $exePath -Force }
     New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
     # The app's conf shape: top-level chain=, and rpcport under the [chain] section. The script reads
     # chain from HERE (not the command line) -- the fallback this harness must exercise.
@@ -69,8 +71,13 @@ function Start-Node($exePath, $dataDir, $port, $chain = 'regtest') {
 
     # -maxtipage so regtest's 2011 genesis is not treated as "still syncing"; the app passes the same in
     # its isolated runs. Only -datadir goes on the command line, like the app.
+    #
+    # The whole -datadir=<path> is wrapped in quotes: Start-Process -ArgumentList does NOT quote array
+    # elements, so a spaced/unicode path ("datos de Juan ñ") would reach bitcoind split into several
+    # arguments -- it would use the wrong datadir and never come up on RPC. That was the unicode-datadir
+    # failure. Same trap as Start-Process in the diagnostic; it does not quote spaces.
     $p = Start-Process -FilePath $exePath `
-        -ArgumentList "-datadir=$dataDir", "-maxtipage=3153600000" `
+        -ArgumentList "`"-datadir=$dataDir`"", "-maxtipage=3153600000" `
         -PassThru -WindowStyle Hidden
     return $p
 }
@@ -117,8 +124,11 @@ function Invoke-Shutdown($installDir) {
     Emit 'hook_start' @{ install_dir = $installDir }
     $ps = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
     $out = Join-Path $WorkRoot 'shutdown.out.txt'
+    # Both paths quoted: Start-Process -ArgumentList does not quote array elements, so a spaced InstallDir
+    # ("Juan Perez ñ\Brisvia Sim") arrived split and "Perez" landed on -TimeoutSeconds ("cannot convert
+    # to Int32"). The real NSIS hook already quotes -InstallDir "$INSTDIR"; the harness must match it.
     $p = Start-Process -FilePath $ps `
-        -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $ShutdownScript, '-InstallDir', $installDir `
+        -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$ShutdownScript`"", '-InstallDir', "`"$installDir`"" `
         -NoNewWindow -Wait -PassThru -RedirectStandardOutput $out
     $code = $p.ExitCode
     $log = if (Test-Path $out) { Get-Content $out -Raw } else { '' }
