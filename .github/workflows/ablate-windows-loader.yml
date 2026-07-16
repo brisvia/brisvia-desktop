@@ -88,15 +88,20 @@ jobs:
       matrix:
         include:
           - variant: rc5-control
-            ref: c48a272e
+            ref: v1.0.6-rc5
           - variant: rc6-intact
-            ref: daf47da0
+            ref: v1.0.6-rc6
           - variant: rc6-no-shutdown-tests
-            ref: daf47da0
+            ref: v1.0.6-rc6
           - variant: rc6-no-appstate
-            ref: daf47da0
+            ref: v1.0.6-rc6
           - variant: rc6-minimal-helper
-            ref: daf47da0
+            ref: v1.0.6-rc6
+    # Tag names, not abbreviated SHAs. actions/checkout resolves a ref by asking the remote for it, and
+    # an 8-character SHA is not a ref any remote knows: all five variants died at checkout in under a
+    # minute. v1.0.6-rc5 -> c48a272efd69fd1c3024803ba3f3e7626f54987e and v1.0.6-rc6 ->
+    # daf47da0ab9d23afef5f3c5d0d255289b438bc69, confirmed against ls-remote on the official repo, so the
+    # ladder still measures exactly the two tags it claims to.
     steps:
       - name: Bring in the approved tools, outside the workspace
         uses: actions/checkout@v4
