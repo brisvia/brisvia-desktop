@@ -1,13 +1,13 @@
 // WebdriverIO configuration for Brisvia's REAL E2E testing (layers 3 and 4).
 //
-// Handles the real COMPILED app (real Rust backend) via @wdio/tauri-service:
-//   - driverProvider 'external': usa tauri-driver (se instala solo con cargo) y administra el Edge WebDriver.
+// Drives the actually COMPILED app (real Rust backend) via @wdio/tauri-service:
+//   - driverProvider 'external': uses tauri-driver (installed on its own by cargo) and manages Edge WebDriver.
 //   - autoDownloadEdgeDriver: downloads the msedgedriver compatible with this machine's WebView2.
 //
-// IMPORTANTE: esta config NO fija la carpeta/puerto/cadena de la corrida. Eso lo hace el runner
-// (tests/e2e-real/run.js), que corre wdio UNA VEZ POR SPEC con el entorno ya seteado — porque tauri-driver
-// (quien lanza la app) se arranca en el proceso principal de wdio y hereda ESE entorno, no el del worker.
-// Here we only read the binary and the folder from the environment.
+// IMPORTANT: this config does NOT set the run's folder/port/chain. That is done by the runner
+// (tests/e2e-real/run.js), which runs wdio ONCE PER SPEC with the environment already set -- because
+// tauri-driver (which launches the app) starts in wdio's main process and inherits THAT environment, not
+// the worker's. Here we only read the binary and the folder from the environment.
 //
 // How to run it:  npm run test:e2e:real   (uses the runner)
 'use strict';
@@ -15,15 +15,15 @@
 const path = require('path');
 const harness = require('./tests/e2e-real/helpers/harness');
 
-// Binario a manejar: lo elige el runner por variable de entorno (regtest usa el build e2e; el modo espera, el mainnet+e2e).
+// Binary to drive: the runner picks it via an environment variable (regtest uses the e2e build; wait mode, mainnet+e2e).
 const APP = process.env.BRISVIA_E2E_APP || harness.APP_E2E;
 
 exports.config = {
   runner: 'local',
   specs: [path.join(__dirname, 'tests', 'e2e-real', 'specs', '*.spec.js')],
-  // En SERIE: los recorridos de nodo/minado no deben pisarse (puertos, dataset RandomX, CPU).
+  // SERIALLY: the node/mining journeys must not step on each other (ports, RandomX dataset, CPU).
   maxInstances: 1,
-  // The runner already runs 1 spec per invocation; the retry is controlled by the runner (max 1). Here without internal retries.
+  // The runner already runs 1 spec per invocation; the retry is controlled by the runner (max 1). No internal retries here.
   specFileRetries: 0,
 
   capabilities: [
@@ -38,19 +38,19 @@ exports.config = {
       '@wdio/tauri-service',
       {
         appBinaryPath: APP,
-        driverProvider: 'external', // tauri-driver + Edge WebDriver administrados por el service
-        autoInstallTauriDriver: true, // instala tauri-driver con cargo si falta
-        autoDownloadEdgeDriver: true, // downloads the msedgedriver that matches the machine's WebView2
-        captureBackendLogs: true, // logs del backend Rust en el reporte
-        captureFrontendLogs: true, // console.* del frontend en el reporte
-        startTimeout: 60000, // la app arranca el nodo en segundo plano; damos margen
+        driverProvider: 'external', // tauri-driver + Edge WebDriver managed by the service
+        autoInstallTauriDriver: true, // installs tauri-driver with cargo if missing
+        autoDownloadEdgeDriver: true, // downloads the msedgedriver matching the machine's WebView2
+        captureBackendLogs: true, // Rust backend logs in the report
+        captureFrontendLogs: true, // frontend console.* in the report
+        startTimeout: 60000, // the app starts the node in the background; give it room
       },
     ],
   ],
 
   logLevel: 'warn',
   bail: 0,
-  waitforTimeout: 20000, // espera por defecto de los waitUntil de WebdriverIO
+  waitforTimeout: 20000, // default wait for WebdriverIO's waitUntil
   connectionRetryTimeout: 120000,
   connectionRetryCount: 3,
 
@@ -58,17 +58,17 @@ exports.config = {
   reporters: ['spec'],
   mochaOpts: {
     ui: 'bdd',
-    timeout: 180000, // los recorridos con nodo/minado pueden tardar; el corte real lo hacen los waitFor internos
+    timeout: 180000, // node/mining journeys can take a while; the real cutoff is done by the internal waitFor calls
   },
 
-  // Nota: el manejo de foco por-comando del @wdio/tauri-service (ensureActiveWindowFocus, que corre
+  // Note: the per-command focus handling of @wdio/tauri-service (ensureActiveWindowFocus, which runs
   // before $/findElement/click/getTitle) is DISABLED via patch-package
-  // (patches/@wdio+tauri-service+1.2.0.patch, reaplicado por el script postinstall). Esta app es de
-  // ONE single window, so that hook is unnecessary; and since it does not register Tauri's "wdio" plugin,
-  // cada consulta gastaba ~8s antes de fallar, reventando el presupuesto de 180s en los recorridos
-  // with many interactions (journey 01, with few commands, did reach it; 02 did not).
+  // (patches/@wdio+tauri-service+1.2.0.patch, reapplied by the postinstall script). This app is
+  // single-window, so that hook is unnecessary; and since it does not register Tauri's "wdio" plugin,
+  // each query spent ~8s before failing, blowing the 180s budget on journeys with many interactions
+  // (journey 01, with few commands, did make it; 02 did not).
 
-  // Evidencia en cada fallo (pantalla + logs del nodo/minero + procesos + estado RPC). La corrida se lee del entorno.
+  // Evidence on every failure (screen + node/miner logs + processes + RPC state). The run is read from the environment.
   afterTest: async function (test, context, { passed }) {
     if (!passed) {
       await harness.captureFailure(browser, harness.fromEnv(), test.title);
