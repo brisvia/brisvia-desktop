@@ -395,6 +395,10 @@ jobs:
           cmake --build core/src/randomx/build -j3
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+      - name: Placeholder sidecar binaries (the helper never runs the node; the Tauri build script only checks they exist)
+        run: |
+          mkdir -p src-tauri/binaries
+          touch src-tauri/binaries/bitcoind.exe src-tauri/binaries/bitcoin-cli.exe src-tauri/binaries/brisvia-worker.exe
       - name: Build the e2e wallet helper (feature-gated; never in a release build)
         run: |
           export RANDOMX_LIB_DIR="$PWD/core/src/randomx/build"
