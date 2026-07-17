@@ -205,7 +205,9 @@ jobs:
           APP="$DEST/Brisvia Miner.app"
           VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
           echo "version: $VER"; [ "$VER" = "1.0.6" ] || { echo "FAIL: version $VER != 1.0.6"; exit 1; }
-          MAIN="$APP/Contents/MacOS/Brisvia Miner"
+          MAIN=$(find "$APP/Contents/MacOS" -maxdepth 1 -type f -perm +111 | head -1)
+          echo "main binary: $MAIN"
+          [ -x "$MAIN" ] || { echo "FAIL: no main executable in the .app"; ls -la "$APP/Contents/MacOS"; exit 1; }
           "$MAIN" > "$RUNNER_TEMP/brisvia-app.log" 2>&1 &
           APP_PID=$!; sleep 20
           kill -0 "$APP_PID" 2>/dev/null || { echo "FAIL: app died on open"; cat "$RUNNER_TEMP/brisvia-app.log"; exit 1; }
