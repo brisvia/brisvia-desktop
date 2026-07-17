@@ -225,3 +225,137 @@ jobs:
           hdiutil detach "$MOUNT" || true
           if pgrep -fl 'Brisvia Miner|bitcoind|brisvia-worker' | grep -v grep; then echo "FAIL: orphan process"; exit 1; fi
           echo "OK: macOS package smoke passed"
+
+  migration-windows:
+    name: Windows - install 1.0.5, create wallet, install 1.0.6 over it, wallet survives
+    needs: build-v105-windows
+    runs-on: windows-2022
+    steps:
+      - name: Checkout desktop app (specs + wdio config)
+        uses: actions/checkout@v4
+
+      - name: Setup Rust (the wdio service installs tauri-driver with cargo)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Node dependencies (applies the tauri-service patch)
+        run: npm install
+
+      - name: Isolate %APPDATA% and the install dir (no spaces)
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "brismig-$env:GITHUB_RUN_ID"
+          $roaming = Join-Path $root "Roaming"; $local = Join-Path $root "Local"; $temp = Join-Path $root "Temp"
+          $installDir = Join-Path $root "Installed"
+          New-Item -ItemType Directory -Force $roaming,$local,$temp,$installDir | Out-Null
+          "APPDATA=$roaming"        | Out-File $env:GITHUB_ENV -Append
+          "LOCALAPPDATA=$local"     | Out-File $env:GITHUB_ENV -Append
+          "TEMP=$temp"              | Out-File $env:GITHUB_ENV -Append
+          "TMP=$temp"               | Out-File $env:GITHUB_ENV -Append
+          "INSTALL_DIR=$installDir" | Out-File $env:GITHUB_ENV -Append
+
+      - name: Download the rebuilt 1.0.5 NSIS
+        uses: actions/download-artifact@v4
+        with:
+          name: brisvia-v105-nsis
+          path: v105
+
+      - name: Install 1.0.5
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem v105 -Filter *.exe | Select-Object -First 1
+          $p = Start-Process -FilePath $exe.FullName -ArgumentList "/S","/D=$env:INSTALL_DIR" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "1.0.5 install failed: $($p.ExitCode)" }
+          $app = Get-ChildItem $env:INSTALL_DIR -Recurse -Filter brisvia-miner.exe | Select-Object -First 1
+          if (-not $app) { throw "1.0.5 exe not found after install" }
+          $v = (Get-Item $app.FullName).VersionInfo.ProductVersion
+          if ($v -notmatch "^1\.0\.5") { throw "installed version is $v, not 1.0.5" }
+          "BRISVIA_E2E_APP=$($app.FullName)" | Out-File $env:GITHUB_ENV -Append
+          Write-Host "1.0.5 installed: $($app.FullName) ($v)"
+
+      - name: Create a wallet on the installed 1.0.5 (tauri-driver over the real app)
+        run: npx wdio run wdio.conf.js --spec tests/e2e-real/migration/prepare.spec.js
+
+      - name: Record the wallet state BEFORE the update (no secrets)
+        shell: pwsh
+        run: |
+          Start-Sleep -Seconds 5
+          Get-Process bitcoind,brisvia-worker -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          $seed = Get-ChildItem $env:APPDATA -Recurse -Filter wallet_seed.enc -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $seed) { throw "FAIL: onboarding did not create wallet_seed.enc" }
+          if (-not $seed.FullName.StartsWith($env:APPDATA)) { throw "FAIL: seed outside the sandbox: $($seed.FullName)" }
+          $h = (Get-FileHash $seed.FullName -Algorithm SHA256).Hash.ToLower()
+          $dd = $seed.Directory.FullName
+          "SEED_PATH=$($seed.FullName)" | Out-File $env:GITHUB_ENV -Append
+          "SEED_HASH=$h"                | Out-File $env:GITHUB_ENV -Append
+          "DATADIR=$dd"                 | Out-File $env:GITHUB_ENV -Append
+          Write-Host "seed: $($seed.FullName)  SHA256=$h"
+
+      - name: Relaunch 1.0.5 so its node is running when 1.0.6 installs over it
+        shell: pwsh
+        run: |
+          $app = Get-ChildItem $env:INSTALL_DIR -Recurse -Filter brisvia-miner.exe | Select-Object -First 1
+          Start-Process -FilePath $app.FullName | Out-Null
+          $bd = $null
+          for ($i=0; $i -lt 45 -and -not $bd; $i++) { Start-Sleep 2; $bd = Get-Process bitcoind -ErrorAction SilentlyContinue | Select-Object -First 1 }
+          if (-not $bd) { throw "FAIL: 1.0.5 did not bring up the node; the hook has nothing to close" }
+          "NODE_PID=$($bd.Id)" | Out-File $env:GITHUB_ENV -Append
+          $log = Join-Path $env:DATADIR "debug.log"
+          $off = if (Test-Path $log) { (Get-Item $log).Length } else { 0 }
+          "LOG_OFFSET=$off" | Out-File $env:GITHUB_ENV -Append
+          Write-Host "1.0.5 node PID: $($bd.Id)"
+
+      - name: Download the sealed 1.0.6 NSIS from the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release download "${{ inputs.candidate_tag }}" --repo "${{ github.repository }}" --pattern 'Brisvia.Miner_1.0.6_x64-setup.exe' --dir . --clobber
+
+      - name: Install 1.0.6 over 1.0.5 (node up, the hook must close it - not a taskkill)
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem . -Filter 'Brisvia.Miner_1.0.6_x64-setup.exe' | Select-Object -First 1
+          $p = Start-Process -FilePath $exe.FullName -ArgumentList "/S","/D=$env:INSTALL_DIR" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "1.0.6 install failed: $($p.ExitCode)" }
+          Start-Sleep -Seconds 6
+          $still = Get-Process -Id ([int]$env:NODE_PID) -ErrorAction SilentlyContinue
+          if ($still) { throw "FAIL: the old bitcoind (PID $env:NODE_PID) survived the update" }
+          Write-Host "OK: the update closed the previous node"
+
+      - name: Version is 1.0.6, wallet survived byte-for-byte, no second wallet
+        shell: pwsh
+        run: |
+          $app = Get-ChildItem $env:INSTALL_DIR -Recurse -Filter brisvia-miner.exe | Select-Object -First 1
+          $v = (Get-Item $app.FullName).VersionInfo.ProductVersion
+          if ($v -notmatch "^1\.0\.6") { throw "FAIL: still $v, the update was not applied" }
+          "BRISVIA_E2E_APP=$($app.FullName)" | Out-File $env:GITHUB_ENV -Append
+          if (-not (Test-Path $env:SEED_PATH)) { throw "FAIL: wallet_seed.enc DISAPPEARED with the update" }
+          $h = (Get-FileHash $env:SEED_PATH -Algorithm SHA256).Hash.ToLower()
+          if ($h -ne $env:SEED_HASH) { throw "FAIL: wallet_seed.enc CHANGED: $env:SEED_HASH -> $h" }
+          $cnt = @(Get-ChildItem $env:APPDATA -Recurse -Filter wallet_seed.enc).Count
+          if ($cnt -ne 1) { throw "FAIL: $cnt seed files exist (a second wallet was created)" }
+          Write-Host "OK: 1.0.5 -> $v, seed byte-identical, single wallet"
+
+      - name: Open 1.0.6 and unlock with the same password (tauri-driver over the real app)
+        run: npx wdio run wdio.conf.js --spec tests/e2e-real/migration/verify.spec.js
+
+      - name: No reindex or rescan after the update
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:DATADIR "debug.log"
+          $fs = [System.IO.File]::Open($log,'Open','Read','ReadWrite')
+          $fs.Seek([long]$env:LOG_OFFSET,'Begin') | Out-Null
+          $new = (New-Object System.IO.StreamReader($fs)).ReadToEnd(); $fs.Close()
+          foreach ($m in @("Reindexing","Corrupted block database","Rescanning","Error opening block database")) {
+            if ($new -match [regex]::Escape($m)) { Write-Host $new; throw "FAIL: the update triggered '$m'" }
+          }
+          Write-Host "OK: no reindex/rescan after the update"
+
+      - name: No orphan processes
+        if: always()
+        shell: pwsh
+        run: |
+          Get-Process bitcoind,brisvia-worker,brisvia-miner -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
