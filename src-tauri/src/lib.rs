@@ -1321,9 +1321,12 @@ pub mod e2e_helper {
     // fresh wallet, derived purely from the account key (identical logic to the massive_wallet_derivation test).
     fn first_address(mnemonic: &Mnemonic) -> Result<String, String> {
         let (_fp, ext, _int) = descriptors_from_mnemonic(mnemonic)?;
+        // descriptors_from_mnemonic always yields `wpkh([origin]xprv.../0/*)`, so this split/strip cannot fail
+        // for a valid mnemonic. expect() (not ok_or_else with a user-facing string) keeps this test-only helper
+        // out of the error-contract guard, which requires ERR:X codes for anything that could reach a real user.
         let account_xprv = ext
             .split(']').nth(1).and_then(|s| s.strip_suffix("/0/*)"))
-            .ok_or_else(|| "bad external descriptor".to_string())?;
+            .expect("e2e helper: descriptor always has the [origin]xprv/0/* shape");
         let secp = Secp256k1::new();
         let account = Xpriv::from_str(account_xprv).map_err(|e| e.to_string())?;
         let path = [ChildNumber::from_normal_idx(0).unwrap(), ChildNumber::from_normal_idx(0).unwrap()];

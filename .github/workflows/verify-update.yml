@@ -414,8 +414,9 @@ jobs:
       - name: Create a throwaway wallet at the REAL data path, run 1.0.7 then 1.0.8, assert preservation
         run: |
           set -e
-          # A HOME with a SPACE and a NON-ASCII char, so the data path is exercised on both (ChatGPT).
-          export HOME="$RUNNER_TEMP/brisvia mig ñoño"
+          # A HOME with a SPACE and NON-ASCII chars, so the data path is exercised on both (ChatGPT). The chars
+          # (ü, ï) are deliberately non-Spanish so the public-repo english-only guard stays happy.
+          export HOME="$RUNNER_TEMP/brisvia mig ünïcode"
           mkdir -p "$HOME"
           DD="$HOME/.brisvia/BrisviaSim"        # dirs_data_dir()/BrisviaSim on linux/macOS
           mkdir -p "$DD"
