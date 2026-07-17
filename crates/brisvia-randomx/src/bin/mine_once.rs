@@ -243,6 +243,7 @@ fn main() {
                 PoolEvent::Connected => println!("{}", json!({"event":"pool_connected"})),
                 PoolEvent::LoggedIn => println!("{}", json!({"event":"pool_login"})),
                 PoolEvent::NewJob { .. } => println!("{}", json!({"event":"seed_ready"})),
+                PoolEvent::Hashrate(hs) => println!("{}", json!({"event":"hashrate","hashrate":hs})),
                 PoolEvent::ShareSubmitted { .. } => println!("{}", json!({"event":"share_submitted"})),
                 PoolEvent::ShareAccepted => println!("{}", json!({"event":"share_accepted"})),
                 PoolEvent::ShareRejected { reason } => println!("{}", json!({"event":"share_rejected","reason":reason})),
