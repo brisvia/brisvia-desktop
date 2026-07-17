@@ -356,6 +356,35 @@ jobs:
       - name: Open 1.0.8 and unlock with the same password (tauri-driver over the real app)
         run: npx wdio run wdio.conf.js --spec tests/e2e-real/migration/verify.spec.js
 
+      - name: Ports guard - the packaged 1.0.8 node binds 9342/9338, never 9332/9333
+        shell: pwsh
+        run: |
+          # Stop anything of ours first so the standalone check owns the ports.
+          Get-Process bitcoind,brisvia-worker,brisvia-miner -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep 2
+          $bd  = Get-ChildItem $env:INSTALL_DIR -Recurse -Filter bitcoind.exe     | Select-Object -First 1
+          $cli = Get-ChildItem $env:INSTALL_DIR -Recurse -Filter bitcoin-cli.exe  | Select-Object -First 1
+          if (-not $bd -or -not $cli) { throw "FAIL: the packaged node was not found in the install" }
+          $ddp = Join-Path $env:RUNNER_TEMP "ports"; New-Item -ItemType Directory -Force $ddp | Out-Null
+          "chain=brisvia`nserver=1`nlisten=1`ndiscover=0`ndnsseed=0`n[brisvia]`nrpcport=9338`nrpcbind=127.0.0.1`nrpcallowip=127.0.0.1" | Set-Content (Join-Path $ddp "bitcoin.conf") -Encoding ascii
+          $node = Start-Process -FilePath $bd.FullName -ArgumentList "-datadir=$ddp","-conf=$ddp\bitcoin.conf" -PassThru -WindowStyle Hidden
+          & $cli.FullName "-datadir=$ddp" "-rpcport=9338" "-rpcwait" "-rpcwaittimeout=90" getblockchaininfo | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "FAIL: RPC did not respond on 9338" }
+          Write-Host "OK: RPC responds on 9338"
+          Start-Sleep 3
+          $ports = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | ForEach-Object { $_.LocalPort } | Sort-Object -Unique)
+          Write-Host "listening ports: $($ports -join ', ')"
+          try {
+            if ($ports -notcontains 9342) { throw "FAIL: P2P is not listening on 9342" }
+            Write-Host "OK: P2P listens on 9342"
+            if (($ports -contains 9333) -or ($ports -contains 9332)) { throw "FAIL: still listening on an old Litecoin port (9333/9332)" }
+            Write-Host "OK: not on 9332/9333"
+          } finally {
+            & $cli.FullName "-datadir=$ddp" "-rpcport=9338" stop 2>$null
+            Start-Sleep 2
+            if ($node -and -not $node.HasExited) { Stop-Process -Id $node.Id -Force -ErrorAction SilentlyContinue }
+          }
+
       - name: No orphan processes
         if: always()
         shell: pwsh
@@ -469,3 +498,103 @@ jobs:
           echo "OK: not on 9332/9333"
           "$CLI" -datadir="$DDP" -rpcport=9338 stop || true
           wait "$NODE" 2>/dev/null || true
+
+  migration-macos:
+    name: macOS - headless data preservation across 1.0.7 -> 1.0.8 (real packages)
+    runs-on: macos-14
+    steps:
+      - name: Checkout desktop app (helper source)
+        uses: actions/checkout@v4
+      - name: Checkout core (RandomX submodule; pinned to the 9342/9338 commit, same as the builds)
+        uses: actions/checkout@v4
+        with:
+          repository: brisvia/brisvia
+          ref: 69c48b2dfcf20fba70f6b5aef6958786e61ab7ed
+          submodules: recursive
+          path: core
+      - name: Build RandomX (static lib)
+        run: |
+          cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build core/src/randomx/build -j3
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Placeholder sidecar binaries (the helper never runs the node; the Tauri build script only checks they exist)
+        run: |
+          mkdir -p src-tauri/binaries
+          touch src-tauri/binaries/bitcoind.exe src-tauri/binaries/bitcoin-cli.exe src-tauri/binaries/brisvia-worker.exe
+      - name: Build the e2e wallet helper (feature-gated; never in a release build)
+        run: |
+          export RANDOMX_LIB_DIR="$PWD/core/src/randomx/build"
+          cargo build --manifest-path src-tauri/Cargo.toml --features "e2e mainnet" --bin e2e-wallet-helper
+          echo "HELPER=$PWD/src-tauri/target/debug/e2e-wallet-helper" >> "$GITHUB_ENV"
+      - name: Download the exact 1.0.7 and 1.0.8 DMGs and extract the .app
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          gh release download v1.0.7 --repo "${{ github.repository }}" --pattern 'Brisvia.Miner_1.0.7_aarch64.dmg' --dir pkgs --clobber
+          gh release download "${{ inputs.candidate_tag }}" --repo "${{ github.repository }}" --pattern 'Brisvia.Miner_1.0.8_aarch64.dmg' --dir pkgs --clobber
+          extract_app() {
+            local dmg="$1" dest="$2"
+            local mnt="$RUNNER_TEMP/mnt-$dest"; mkdir -p "$mnt" "$RUNNER_TEMP/$dest"
+            hdiutil attach "$dmg" -mountpoint "$mnt" -nobrowse -readonly
+            cp -R "$mnt/Brisvia Miner.app" "$RUNNER_TEMP/$dest/"
+            xattr -dr com.apple.quarantine "$RUNNER_TEMP/$dest/Brisvia Miner.app" 2>/dev/null || true
+            hdiutil detach "$mnt" 2>/dev/null || true
+          }
+          extract_app "pkgs/Brisvia.Miner_1.0.7_aarch64.dmg" v107
+          extract_app "pkgs/Brisvia.Miner_1.0.8_aarch64.dmg" v108
+      - name: Create a throwaway wallet at the REAL data path, run 1.0.7 then 1.0.8, assert preservation
+        run: |
+          set -e
+          export HOME="$RUNNER_TEMP/brisvia mig ünïcode"
+          mkdir -p "$HOME"
+          DD="$HOME/.brisvia/BrisviaSim"        # dirs_data_dir()/BrisviaSim on macOS too
+          mkdir -p "$DD"
+          MN="abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+          PW="brisvia-e2e-1234"
+          ADDR_BEFORE=$(printf '%s\n%s\n' "$MN" "$PW" | "$HELPER" create "$DD")
+          echo "address before: $ADDR_BEFORE"
+          case "$ADDR_BEFORE" in brv1*) ;; *) echo "FAIL: helper did not return a mainnet address"; exit 1;; esac
+          H_BEFORE=$(shasum -a 256 "$DD/wallet_seed.enc" | cut -d' ' -f1)
+          echo "brisvia-witness" > "$DD/witness.txt"
+          run_app() {
+            local dir="$1" tag="$2"
+            local bin
+            bin=$(find "$RUNNER_TEMP/$dir/Brisvia Miner.app/Contents/MacOS" -type f -perm +111 | head -1)
+            env HOME="$HOME" "$bin" > "$RUNNER_TEMP/$tag.log" 2>&1 &
+            local pid=$!
+            sleep 25
+            if ! kill -0 "$pid" 2>/dev/null; then echo "FAIL: $tag died on open"; cat "$RUNNER_TEMP/$tag.log"; exit 1; fi
+            if grep -aiE "panic|SEED_CORRUPT" "$RUNNER_TEMP/$tag.log"; then echo "FAIL: $tag reported a fatal error"; cat "$RUNNER_TEMP/$tag.log"; exit 1; fi
+            kill -TERM "$pid" 2>/dev/null || true
+            sleep 5
+            pkill -f bitcoind 2>/dev/null || true
+            echo "OK: $tag opened over the existing wallet and stayed alive"
+          }
+          run_app v107 v107
+          run_app v108 v108
+          H_AFTER=$(shasum -a 256 "$DD/wallet_seed.enc" | cut -d' ' -f1)
+          [ "$H_BEFORE" = "$H_AFTER" ] || { echo "FAIL: wallet_seed.enc CHANGED $H_BEFORE -> $H_AFTER"; exit 1; }
+          [ "$(cat "$DD/witness.txt" 2>/dev/null)" = "brisvia-witness" ] || { echo "FAIL: witness file lost"; exit 1; }
+          CNT=$(find "$HOME/.brisvia" -name wallet_seed.enc | wc -l | tr -d ' ')
+          [ "$CNT" -eq 1 ] || { echo "FAIL: $CNT seed files exist (a second wallet was created)"; exit 1; }
+          ADDR_AFTER=$(printf '%s\n' "$PW" | "$HELPER" verify "$DD")
+          [ "$ADDR_BEFORE" = "$ADDR_AFTER" ] || { echo "FAIL: address changed $ADDR_BEFORE -> $ADDR_AFTER"; exit 1; }
+          echo "OK: seed byte-identical, single wallet, witness intact, same address unlocks after the update ($ADDR_AFTER)"
+      - name: Ports guard - the packaged node binds 9342/9338, never 9332/9333
+        run: |
+          set -e
+          BD=$(find "$RUNNER_TEMP/v108/Brisvia Miner.app/Contents" -type f -name bitcoind | head -1)
+          CLI=$(find "$RUNNER_TEMP/v108/Brisvia Miner.app/Contents" -type f -name bitcoin-cli | head -1)
+          DDP="$RUNNER_TEMP/ports"; mkdir -p "$DDP"
+          printf 'chain=brisvia\nserver=1\nlisten=1\ndiscover=0\ndnsseed=0\n[brisvia]\nrpcport=9338\nrpcbind=127.0.0.1\nrpcallowip=127.0.0.1\n' > "$DDP/bitcoin.conf"
+          "$BD" -datadir="$DDP" -conf="$DDP/bitcoin.conf" > "$RUNNER_TEMP/node.log" 2>&1 &
+          "$CLI" -datadir="$DDP" -rpcport=9338 -rpcwait -rpcwaittimeout=90 getblockchaininfo >/dev/null && echo "OK: RPC responds on 9338"
+          sleep 3
+          LISTEN=$(lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | awk '{print $9}')
+          echo "listening:"; echo "$LISTEN"
+          echo "$LISTEN" | grep -qE '[:.]9342$' && echo "OK: P2P listens on 9342" || { echo "FAIL: P2P not on 9342"; tail -20 "$RUNNER_TEMP/node.log"; "$CLI" -datadir="$DDP" -rpcport=9338 stop || true; exit 1; }
+          if echo "$LISTEN" | grep -qE '[:.](9332|9333)$'; then echo "FAIL: listening on an old Litecoin port"; "$CLI" -datadir="$DDP" -rpcport=9338 stop || true; exit 1; fi
+          echo "OK: not on 9332/9333"
+          "$CLI" -datadir="$DDP" -rpcport=9338 stop || true
