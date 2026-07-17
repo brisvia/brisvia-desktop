@@ -38,7 +38,7 @@ jobs:
       - name: Fetch the repo (for the verifier)
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }} # el tag del release borrador no existe en git; usar el SHA del que se compilo
+          ref: ${{ github.sha }} # the draft release tag does not exist in git yet; use the SHA it was built from
 
       - name: Download the draft installer
         shell: pwsh
@@ -118,7 +118,7 @@ jobs:
       - name: Fetch the repo (for the verifier)
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }} # el tag del release borrador no existe en git; usar el SHA del que se compilo
+          ref: ${{ github.sha }} # the draft release tag does not exist in git yet; use the SHA it was built from
 
       - name: Download the draft .deb
         env:
@@ -191,7 +191,7 @@ jobs:
       - name: Fetch the repo (for the verifier)
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }} # el tag del release borrador no existe en git; usar el SHA del que se compilo
+          ref: ${{ github.sha }} # the draft release tag does not exist in git yet; use the SHA it was built from
 
       - name: Download the draft package
         env:
