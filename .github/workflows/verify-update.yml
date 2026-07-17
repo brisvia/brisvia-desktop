@@ -380,10 +380,15 @@ jobs:
           repository: brisvia/brisvia
           submodules: recursive
           path: core
-      - name: Install deps (webkit to RUN the AppImage; cmake to build randomx for the helper)
+      - name: Install deps (the -dev packages COMPILE the helper's tauri deps; also xvfb/file to RUN the AppImage)
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake build-essential pkg-config curl libwebkit2gtk-4.1-0 xvfb file
+          # Compiling the helper drags in the full Tauri lib (gdk-sys, webkit, etc.), so the -DEV headers are
+          # required — the runtime-only lib is not enough. Same set the real Linux build uses, plus xvfb/file.
+          sudo apt-get install -y \
+            cmake build-essential pkg-config curl \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev \
+            xvfb file
       - name: Build RandomX (static lib)
         run: |
           cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release
