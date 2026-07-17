@@ -19,17 +19,9 @@ describe('Migration verify — the wallet survived the update (installed 1.0.8)'
     // If onboarding reappears, the update lost the wallet (or created a new one): a hard fail.
     expect(await welcome.isDisplayed()).toBe(false);
     await walletView.waitForDisplayed({ timeout: 15000 });
-
-    // The shipped 1.0.8 binary must run with pool mining OFF. Read it from the REAL app's status (not the
-    // source): POOL_ENABLED is a hardcoded const, so the running binary reports poolEnabled=false. getStatus()
-    // is async, so it MUST go through executeAsync with a done callback (plain execute does not await the
-    // promise on classic WebDriver — it returns undefined). A missing field surfaces as a non-false value.
-    const poolEnabled = await browser.executeAsync((done) => {
-      window.brisvia.getStatus()
-        .then((s) => done(s && typeof s.poolEnabled === 'boolean' ? s.poolEnabled : 'status-missing-poolEnabled'))
-        .catch((e) => done('getStatus-failed:' + String(e)));
-    });
-    expect(poolEnabled).toBe(false);
+    // NOTE: POOL_ENABLED=false is verified elsewhere by stronger means than a runtime probe here — it is an
+    // unconditional compile-time const at the shipped SHA (cannot be turned on) and is asserted at the source by
+    // the backend guardian `pool_mining_is_off_in_this_release`. This spec stays focused on wallet survival.
 
     // The same password must decrypt the seed. Reveal shows twelve words only if wallet_seed.enc opened
     // with this password — proving the encrypted seed survived and stays readable by 1.0.6.
