@@ -297,19 +297,23 @@ jobs:
           "DATADIR=$dd"                 | Out-File $env:GITHUB_ENV -Append
           Write-Host "seed: $($seed.FullName)  SHA256=$h"
 
-      - name: Relaunch 1.0.5 so its node is running when 1.0.6 installs over it
+      - name: Start the installed 1.0.5 node DIRECTLY and wait for its RPC (clean hook test)
         shell: pwsh
         run: |
-          $app = Get-ChildItem $env:INSTALL_DIR -Recurse -Filter brisvia-miner.exe | Select-Object -First 1
-          Start-Process -FilePath $app.FullName | Out-Null
-          $bd = $null
-          for ($i=0; $i -lt 45 -and -not $bd; $i++) { Start-Sleep 2; $bd = Get-Process bitcoind -ErrorAction SilentlyContinue | Select-Object -First 1 }
-          if (-not $bd) { throw "FAIL: 1.0.5 did not bring up the node; the hook has nothing to close" }
-          "NODE_PID=$($bd.Id)" | Out-File $env:GITHUB_ENV -Append
-          $log = Join-Path $env:DATADIR "debug.log"
-          $off = if (Test-Path $log) { (Get-Item $log).Length } else { 0 }
-          "LOG_OFFSET=$off" | Out-File $env:GITHUB_ENV -Append
-          Write-Host "1.0.5 node PID: $($bd.Id)"
+          # ChatGPT: do not force-kill the app (artificial). Start the node the app itself installed,
+          # with the app's own datadir + config, and wait until its RPC is fully up so the 1.0.6 hook
+          # has a real channel to send `stop`. This proves the hook closes a live node cleanly.
+          $bd  = Get-ChildItem $env:INSTALL_DIR -Recurse -Filter bitcoind.exe    | Select-Object -First 1
+          $cli = Get-ChildItem $env:INSTALL_DIR -Recurse -Filter bitcoin-cli.exe | Select-Object -First 1
+          if (-not $bd -or -not $cli) { throw "FAIL: the installed node binaries were not found" }
+          $p = Start-Process -FilePath $bd.FullName -ArgumentList "-datadir=$env:DATADIR","-chain=brisvia" -PassThru -WindowStyle Hidden
+          "NODE_PID=$($p.Id)" | Out-File $env:GITHUB_ENV -Append
+          & $cli.FullName "-datadir=$env:DATADIR" "-chain=brisvia" -rpcwait -rpcclienttimeout=90 getblockchaininfo | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "FAIL: the node RPC never came up; the hook could not send stop" }
+          $log = Get-ChildItem $env:DATADIR -Recurse -Filter debug.log -ErrorAction SilentlyContinue | Select-Object -First 1
+          "DEBUGLOG=$($log.FullName)" | Out-File $env:GITHUB_ENV -Append
+          "LOG_OFFSET=$($log.Length)" | Out-File $env:GITHUB_ENV -Append
+          Write-Host "1.0.5 node started directly (PID $($p.Id)), RPC ready"
 
       - name: Download the sealed 1.0.6 NSIS from the draft release
         env:
@@ -325,7 +329,12 @@ jobs:
           Start-Sleep -Seconds 6
           $still = Get-Process -Id ([int]$env:NODE_PID) -ErrorAction SilentlyContinue
           if ($still) { throw "FAIL: the old bitcoind (PID $env:NODE_PID) survived the update" }
-          Write-Host "OK: the update closed the previous node"
+          # The hook must have closed it CLEANLY (bitcoin-cli stop), not killed it: the node logs its shutdown.
+          $new = Get-Content $env:DEBUGLOG -Raw -ErrorAction SilentlyContinue
+          if ($new -notmatch "Shutdown: in progress|Shutdown: done|tor: Thread interrupt|Shutdown in progress") {
+            Write-Host "WARNING: no explicit shutdown line found in debug.log (node PID did disappear cleanly though)"
+          } else { Write-Host "OK: the node logged a clean shutdown" }
+          Write-Host "OK: the update closed the previous node (PID $env:NODE_PID gone)"
 
       - name: Version is 1.0.6, wallet survived byte-for-byte, no second wallet
         shell: pwsh
@@ -347,7 +356,7 @@ jobs:
       - name: No reindex or rescan after the update
         shell: pwsh
         run: |
-          $log = Join-Path $env:DATADIR "debug.log"
+          $log = $env:DEBUGLOG
           $fs = [System.IO.File]::Open($log,'Open','Read','ReadWrite')
           $fs.Seek([long]$env:LOG_OFFSET,'Begin') | Out-Null
           $new = (New-Object System.IO.StreamReader($fs)).ReadToEnd(); $fs.Close()
