@@ -221,7 +221,6 @@ where
         };
         match intento {
             Ok(client) => {
-                backoff = 1; // reset after a good connection
                 let guard = guard.clone();
                 let mine = move |mj: &MiningJob, threads: usize, nonce_start: u64, max_nonces: u64, cancel: &AtomicBool| -> Option<Solution> {
                     // Reuse the cache while the seed is unchanged; refuse a rebuild burst (returns None → skip).
@@ -234,8 +233,20 @@ where
                     };
                     crate::pool_miner::mine_with_cache(mj, &cache, threads, nonce_start, max_nonces, cancel)
                 };
-                let res = run_session(client, address, worker, threads, 50_000_000, should_stop, &mut on_event, mine);
-                let err = res.err().unwrap_or_default();
+                // Only a session that actually LOGGED IN counts as progress and resets the backoff. Resetting on
+                // the raw TCP connect was a bug: a pool that accepts the socket and then drops it (e.g. while
+                // rate-limiting, or during a restart) made the miner reconnect every ~1.3 s and hammer the pool.
+                // A `tap` closure watches the events for a successful login without changing run_session's shape.
+                let mut logged_in = false;
+                let err = {
+                    let mut tap = |e: PoolEvent| {
+                        if matches!(e, PoolEvent::LoggedIn) { logged_in = true; }
+                        on_event(e);
+                    };
+                    run_session(client, address, worker, threads, 50_000_000, should_stop, &mut tap, mine)
+                        .err().unwrap_or_default()
+                };
+                if logged_in { backoff = 1; }
                 // The pool gave a definitive answer (rejected address, banned worker, wrong version).
                 // Reconnecting cannot change it: it would hammer the pool and hide the reason from the user.
                 if let Some(reason) = err.strip_prefix(PERMANENT_PREFIX) {
