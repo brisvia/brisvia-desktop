@@ -203,6 +203,15 @@ h1 { font-size: 26px; line-height: 1.14; letter-spacing: -.02em; max-width: 15ch
 .metric-row { display: flex; gap: 18px; }
 .metric-row .metric { flex: 1; }
 .contrib .metric-row:last-of-type .metric { border-bottom: 0; }
+/* Pool-mode status (mining tab): honest connection + shares. Shown only in pool/custom mode. */
+.pool-status { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
+.pool-conn { display: flex; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 600; margin-bottom: 10px; }
+.conn-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
+.conn-dot.on { background: var(--mineral); box-shadow: 0 0 0 3px rgba(118,199,160,.18); }
+.conn-dot.wait { background: var(--sand); box-shadow: 0 0 0 3px rgba(213,166,111,.18); }
+.conn-dot.off { background: var(--muted); }
+.pool-status .metric-row .metric { border-bottom: 0; }
+.pool-err { color: var(--danger); margin-top: 6px; }
 .note { margin: 14px 0 0; line-height: 1.4; }
 
 /* ---- Settings ---- */

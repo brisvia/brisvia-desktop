@@ -94,6 +94,16 @@ window.LOCALES = {
       unit_d: 'd', unit_min: 'min', unit_h: 'h', unit_s: 's',
       note: 'Estadísticas de esta sesión y de tu actividad total de minado.',
     },
+    pool: {
+      connected: 'Conectado al grupo',
+      connecting: 'Conectando al grupo…',
+      disconnected: 'Sin conexión al grupo',
+      shares_accepted: 'Aportes aceptados',
+      shares_sent: 'Aportes enviados',
+      last_accepted: 'Último aporte aceptado: {t}',
+      measuring: 'midiendo…',
+      note_no_guarantee: 'Un aporte aceptado no es un pago: cobras cuando el grupo encuentra bloques, maduran y la red no los descarta.',
+    },
     ach: {
       subtitle: 'Todos tus logros viajan con tus 12 palabras: si cambias de computadora y restauras, se recuperan solos. Pasa el mouse por cada medalla para ver qué es.',
       empty: 'Cuando empieces a minar y a usar tu billetera, tus logros aparecerán aquí.',
@@ -388,6 +398,16 @@ window.LOCALES = {
       session_time: 'This session', total_time: 'Total mining time',
       unit_d: 'd', unit_min: 'min', unit_h: 'h', unit_s: 's',
       note: 'Statistics for this session and your total mining activity.',
+    },
+    pool: {
+      connected: 'Connected to the pool',
+      connecting: 'Connecting to the pool…',
+      disconnected: 'Not connected to the pool',
+      shares_accepted: 'Shares accepted',
+      shares_sent: 'Shares sent',
+      last_accepted: 'Last share accepted: {t}',
+      measuring: 'measuring…',
+      note_no_guarantee: 'An accepted share is not a payout: you get paid when the pool finds blocks, they mature, and the network does not drop them.',
     },
     ach: {
       subtitle: 'All your achievements travel with your 12 words: if you switch computers and restore, they come back on their own. Hover each medal to see what it is.',

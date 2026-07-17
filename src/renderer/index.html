@@ -214,6 +214,18 @@
             <div class="metric" data-tip-key="mine_session"><div class="m-val" id="m-session">0</div><div class="m-lbl muted" data-i18n="mine.session_time"></div></div>
             <div class="metric" data-tip-key="mine_total"><div class="m-val" id="m-total">0</div><div class="m-lbl muted" data-i18n="mine.total_time"></div></div>
           </div>
+          <!-- Pool status: shown ONLY in pool mode. Honest by design: a share SENT is not a share ACCEPTED, and
+               an accepted share is not a guaranteed payout. Values come from miner_status().pool. -->
+          <div id="pool-status" class="pool-status" hidden>
+            <div class="pool-conn"><span id="pool-conn-dot" class="conn-dot"></span><span id="pool-conn-text"></span></div>
+            <div class="metric-row">
+              <div class="metric"><div class="m-val" id="pool-accepted" data-testid="pool-accepted">0</div><div class="m-lbl muted" data-i18n="pool.shares_accepted"></div></div>
+              <div class="metric"><div class="m-val" id="pool-sent" data-testid="pool-sent">0</div><div class="m-lbl muted" data-i18n="pool.shares_sent"></div></div>
+            </div>
+            <p id="pool-last-accepted" class="muted small" hidden></p>
+            <p id="pool-error" class="pool-err small" data-testid="pool-error" hidden></p>
+            <p class="muted small" data-i18n="pool.note_no_guarantee"></p>
+          </div>
         </aside>
       </div>
     </section>

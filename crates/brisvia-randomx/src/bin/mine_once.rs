@@ -236,13 +236,20 @@ fn main() {
         brisvia_randomx::pool_worker::run_pool_worker(&pool_url, addr, &worker_name, threads, tls, &stop, |e| {
             use brisvia_randomx::pool_worker::PoolEvent;
             if !json_mode { return; }
+            // Distinct pool events so the UI can be HONEST: a share SENT is not a share ACCEPTED, and a block is
+            // not a share. The backend keeps separate counters and counts a contribution ONLY on ShareAccepted.
+            // Disconnected goes out as JSON (not stderr) so the backend, which tails stdout, actually sees it.
             match e {
+                PoolEvent::Connected => println!("{}", json!({"event":"pool_connected"})),
+                PoolEvent::LoggedIn => println!("{}", json!({"event":"pool_login"})),
                 PoolEvent::NewJob { .. } => println!("{}", json!({"event":"seed_ready"})),
-                // Count a contribution only when the pool CONFIRMS the share (or it was a block), never on submit.
-                PoolEvent::ShareAccepted | PoolEvent::BlockFound => println!("{}", json!({"event":"accepted"})),
+                PoolEvent::ShareSubmitted { .. } => println!("{}", json!({"event":"share_submitted"})),
+                PoolEvent::ShareAccepted => println!("{}", json!({"event":"share_accepted"})),
+                PoolEvent::ShareRejected { reason } => println!("{}", json!({"event":"share_rejected","reason":reason})),
                 PoolEvent::ShareStale => println!("{}", json!({"event":"stale"})),
-                PoolEvent::Disconnected(msg) => eprintln!("pool disconnected: {msg}"),
-                _ => {}
+                PoolEvent::BlockFound => println!("{}", json!({"event":"pool_block"})),
+                PoolEvent::TargetChangeIgnored => {}
+                PoolEvent::Disconnected(msg) => println!("{}", json!({"event":"pool_disconnected","reason":msg})),
             }
         });
         return;

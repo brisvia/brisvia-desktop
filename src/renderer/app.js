@@ -338,6 +338,32 @@ async function refreshMine() {
   $('#m-cpu').textContent = (mining ? pct : 0) + '%';
   $('#m-session').innerHTML = fmtDuration(s.secondsMining || 0);
   $('#m-total').innerHTML = fmtDuration(s.totalSeconds || 0);
+  // ---- Pool status panel: shown only in pool/custom mode with the pool switch on. Honest by design:
+  //      a share SENT is not a share ACCEPTED, and an accepted share is not a guaranteed payout. ----
+  const poolBox = $('#pool-status');
+  if (poolBox) {
+    const p = s.pool || {};
+    const inPool = !!p.enabled && (s.mode === 'pool' || s.mode === 'custom');
+    poolBox.hidden = !inPool;
+    if (inPool) {
+      $('#pool-accepted').textContent = window.I18N.fmtNum(p.sharesAccepted || 0);
+      $('#pool-sent').textContent = window.I18N.fmtNum(p.sharesSent || 0);
+      const connected = !!p.connected;
+      $('#pool-conn-dot').className = 'conn-dot ' + (connected ? 'on' : (mining ? 'wait' : 'off'));
+      $('#pool-conn-text').textContent = connected ? T('pool.connected') : (mining ? T('pool.connecting') : T('pool.disconnected'));
+      const la = $('#pool-last-accepted');
+      if (p.lastAcceptedTs > 0) {
+        la.hidden = false;
+        la.textContent = T('pool.last_accepted', { t: new Date(p.lastAcceptedTs * 1000).toLocaleTimeString() });
+      } else { la.hidden = true; }
+      const err = $('#pool-error');
+      if (p.lastError) { err.hidden = false; err.textContent = p.lastError; } else { err.hidden = true; }
+      // Speed in pool mode: the pool worker does not emit a per-second hashrate yet, so avoid a misleading
+      // "0 H/s" — say "measuring" while connected. The honest work signal here is accepted shares (above).
+      // Emitting the real pool hashrate is a tracked follow-up, validated against the live pool.
+      if (mining && connected && (s.hashrate || 0) === 0) $('#m-speed').textContent = T('pool.measuring');
+    }
+  }
   // Real core count -> power label ("50% · 16 of 32 cores").
   if (s.cores && s.cores !== POW_CORES) { POW_CORES = s.cores; refreshPowLabel(); }
   if (s.physicalCores && s.physicalCores !== POW_PHYSICAL) {
