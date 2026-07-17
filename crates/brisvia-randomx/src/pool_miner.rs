@@ -3,7 +3,7 @@
 //! "approach D" the header comes ready from the pool; here we just vary the 4 nonce bytes (offset 76).
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -97,7 +97,15 @@ pub fn hash_meets_target(raw_hash: &[u8; 32], target_be: &[u8; 32]) -> bool {
     &be <= target_be
 }
 
+/// `mine_with_cache_counted` with no hash accounting — used by tests and callers that do not report speed.
 pub fn mine_with_cache(job: &MiningJob, cache: &Arc<Cache>, threads: usize, nonce_start: u64, max_nonces: u64, stop: &AtomicBool) -> Option<Solution> {
+    mine_with_cache_counted(job, cache, threads, nonce_start, max_nonces, stop, &AtomicU64::new(0))
+}
+
+/// Same search, but every thread adds the hashes it computed to `hashes` (batched by 512 to avoid contention)
+/// so a watcher can report a real per-second speed in pool mode. Showing 0 H/s while the CPU is working reads
+/// as a failure, so the pool UI needs a real number.
+pub fn mine_with_cache_counted(job: &MiningJob, cache: &Arc<Cache>, threads: usize, nonce_start: u64, max_nonces: u64, stop: &AtomicBool, hashes: &AtomicU64) -> Option<Solution> {
     if job.header80.len() != 80 {
         return None;
     }
@@ -106,7 +114,7 @@ pub fn mine_with_cache(job: &MiningJob, cache: &Arc<Cache>, threads: usize, nonc
     let threads = threads.max(1);
     std::thread::scope(|s| {
         for t in 0..threads {
-            let (cache, found, winner) = (cache.clone(), &found, &winner);
+            let (cache, found, winner, hashes) = (cache.clone(), &found, &winner, hashes);
             s.spawn(move || {
                 let vm = Vm::new_light(cache);
                 let mut local = job.header80.clone();
@@ -119,6 +127,7 @@ pub fn mine_with_cache(job: &MiningJob, cache: &Arc<Cache>, threads: usize, nonc
                     local[76..80].copy_from_slice(&(nonce as u32).to_le_bytes());
                     let h = vm.hash(&local);
                     count += 1;
+                    if count & 0x1ff == 0 { hashes.fetch_add(512, Ordering::Relaxed); } // batch every 512 hashes
                     if hash_meets_target(&h, &job.target_be) {
                         winner.store(nonce as u32, Ordering::SeqCst);
                         found.store(true, Ordering::SeqCst);
@@ -126,6 +135,7 @@ pub fn mine_with_cache(job: &MiningJob, cache: &Arc<Cache>, threads: usize, nonc
                     }
                     nonce += threads as u64;
                 }
+                hashes.fetch_add(count & 0x1ff, Ordering::Relaxed); // the leftover below a full batch
             });
         }
     });

@@ -10,7 +10,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::stratum::{Incoming, LoginError, Poll, StratumClient};
 use crate::worksource::{MiningJob, Solution};
@@ -27,6 +27,7 @@ pub enum PoolEvent {
     Connected,
     LoggedIn,
     NewJob { job_id: String, height: u64 },
+    Hashrate(f64), // periodic real per-second speed for the pool UI (avoids a misleading 0 H/s while mining)
     ShareSubmitted { job_id: String, nonce: u32 }, // found locally and sent — NOT yet confirmed
     ShareAccepted,                                 // pool confirmed the share
     ShareRejected { reason: String },              // pool rejected (low diff, duplicate, unknown job…)
@@ -45,6 +46,7 @@ pub fn run_session<F, M>(
     threads: usize,
     max_nonces: u64,
     should_stop: &AtomicBool,
+    hashes: &AtomicU64,
     on_event: &mut F,
     mine: M,
 ) -> Result<(), String>
@@ -126,9 +128,20 @@ where
 
         // ---- reader loop (this thread): owns the socket; receives jobs, submits queued shares ----
         let out = (|| -> Result<(), String> {
+            let mut last_rate = Instant::now();
+            let mut last_h: u64 = 0;
             loop {
                 if should_stop.load(Ordering::Relaxed) {
                     return Ok(());
+                }
+                // Emit a real per-second speed every ~2s from the shared hash counter, so the pool UI shows a
+                // real number instead of a misleading 0 H/s. Each window measures the hashes since the last emit.
+                if last_rate.elapsed() >= Duration::from_secs(2) {
+                    let now_h = hashes.load(Ordering::Relaxed);
+                    let hs = now_h.saturating_sub(last_h) as f64 / last_rate.elapsed().as_secs_f64().max(0.001);
+                    on_event(PoolEvent::Hashrate(hs));
+                    last_h = now_h;
+                    last_rate = Instant::now();
                 }
                 // submit any solutions the miner queued (only for the current generation)
                 while let Ok((jid, nonce, g)) = rx.try_recv() {
@@ -212,6 +225,8 @@ where
     // One SeedGuard for the whole worker: it reuses the RandomX cache across jobs (and reconnections) and
     // rate-limits rebuilds so a hostile pool cannot force a rebuild loop. Shared into the per-session mine closure.
     let guard = Arc::new(Mutex::new(crate::pool_miner::SeedGuard::new()));
+    // Shared hash counter for the whole worker; the session's reader loop turns it into a per-second speed.
+    let hashes = Arc::new(AtomicU64::new(0));
     let mut backoff = 1u64;
     while !should_stop.load(Ordering::Relaxed) {
         let intento = if tls {
@@ -222,6 +237,7 @@ where
         match intento {
             Ok(client) => {
                 let guard = guard.clone();
+                let hashes_mine = hashes.clone();
                 let mine = move |mj: &MiningJob, threads: usize, nonce_start: u64, max_nonces: u64, cancel: &AtomicBool| -> Option<Solution> {
                     // Reuse the cache while the seed is unchanged; refuse a rebuild burst (returns None → skip).
                     let cache = match guard.lock().unwrap().cache_for(&mj.seed_key) {
@@ -231,7 +247,7 @@ where
                             return None;
                         }
                     };
-                    crate::pool_miner::mine_with_cache(mj, &cache, threads, nonce_start, max_nonces, cancel)
+                    crate::pool_miner::mine_with_cache_counted(mj, &cache, threads, nonce_start, max_nonces, cancel, &hashes_mine)
                 };
                 // Only a session that actually LOGGED IN counts as progress and resets the backoff. Resetting on
                 // the raw TCP connect was a bug: a pool that accepts the socket and then drops it (e.g. while
@@ -243,7 +259,7 @@ where
                         if matches!(e, PoolEvent::LoggedIn) { logged_in = true; }
                         on_event(e);
                     };
-                    run_session(client, address, worker, threads, 50_000_000, should_stop, &mut tap, mine)
+                    run_session(client, address, worker, threads, 50_000_000, should_stop, &hashes, &mut tap, mine)
                         .err().unwrap_or_default()
                 };
                 if logged_in { backoff = 1; }
@@ -331,7 +347,7 @@ mod tests {
             if let PoolEvent::ShareSubmitted { .. } = e { stop_ref.store(true, Ordering::SeqCst); }
             events.push(e);
         };
-        run_session(client, "brv1qexample", "rig1", 1, 1000, &stop, &mut on_event, stub).unwrap();
+        run_session(client, "brv1qexample", "rig1", 1, 1000, &stop, &std::sync::atomic::AtomicU64::new(0), &mut on_event, stub).unwrap();
         let submit_line = server.join().unwrap();
         assert!(submit_line.contains("\"submit\"") && submit_line.contains("\"j1\"") && submit_line.contains("0000002a"), "{submit_line}");
         assert!(events.contains(&PoolEvent::LoggedIn));
@@ -381,7 +397,7 @@ mod tests {
                 stop_ref.store(true, Ordering::SeqCst);
             }
         };
-        run_session(client, "brv1qexample", "rig1", 1, 1000, &stop, &mut on_event, stub).unwrap();
+        run_session(client, "brv1qexample", "rig1", 1, 1000, &stop, &std::sync::atomic::AtomicU64::new(0), &mut on_event, stub).unwrap();
         let submit_line = server.join().unwrap();
         // the submit must be for the NEW job, not the abandoned one
         assert!(submit_line.contains("\"easy2\""), "should submit for the new job, got: {submit_line}");
@@ -444,7 +460,7 @@ mod tests {
             Some(Solution { job_id: mj.job_id.clone(), nonce: 1, ntime: 0, extranonce2: String::new() })
         };
         let mut on_event = |_e: PoolEvent| {};
-        let err = run_session(client, "brv1qbad", "rig1", 1, 1000, &stop, &mut on_event, stub).unwrap_err();
+        let err = run_session(client, "brv1qbad", "rig1", 1, 1000, &stop, &std::sync::atomic::AtomicU64::new(0), &mut on_event, stub).unwrap_err();
         server.join().unwrap();
         assert!(!mined.load(Ordering::SeqCst), "must not mine a single hash after a rejected login");
         // Marked permanent so the reconnect loop stops instead of hammering the pool forever.
@@ -523,7 +539,7 @@ mod tests {
                 stop_ref.store(true, Ordering::SeqCst);
             }
         };
-        run_session(client, "brv1qexample", "rig1", 1, 1000, &stop, &mut on_event, stub).unwrap();
+        run_session(client, "brv1qexample", "rig1", 1, 1000, &stop, &std::sync::atomic::AtomicU64::new(0), &mut on_event, stub).unwrap();
         let submit_line = server.join().unwrap();
         assert!(submit_line.contains("\"first\""), "the job that came with the login must be mined: {submit_line}");
     }
@@ -568,7 +584,7 @@ mod tests {
                 stop_ref.store(true, Ordering::SeqCst);
             }
         };
-        run_session(client, "brv1qexample", "rig1", 1, 1000, &stop, &mut on_event, stub).unwrap();
+        run_session(client, "brv1qexample", "rig1", 1, 1000, &stop, &std::sync::atomic::AtomicU64::new(0), &mut on_event, stub).unwrap();
         server.join().unwrap();
         assert!(accepted, "worker should mark the share accepted only after the pool's ack");
     }
