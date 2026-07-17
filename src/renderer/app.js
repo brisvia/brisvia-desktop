@@ -1331,16 +1331,17 @@ async function init() {
           }
         }
       } catch {}
-    } else if (walletOnDisk) {
-      // Wallet exists on disk but the node hasn't finished loading it yet (slow/syncing node).
-      // Do NOT fall back to onboarding: go to the wallet view; pollNet + the refresh interval
-      // load it once the node reports it ready. Prevents the welcome tour from reappearing.
+    } else {
+      // We are here only because the encrypted seed EXISTS on disk (walletExists is true). Whether the node
+      // reported its wallet in time (walletOnDisk) or it was just too slow to connect within the window, we
+      // must NEVER show create/restore on top of an existing wallet: that is how a user ends up re-prompted
+      // for the 12 words (which they may not have) or, worse, overwriting their wallet. Go to the wallet view;
+      // pollNet + the refresh interval load it once the node is ready. A slow node after an update (or the
+      // mainnet port change) must not be mistaken for "no wallet".
+      void walletOnDisk; // (kept for logging/telemetry; the decision no longer branches on it)
       $('#setup').hidden = true;
       showView('wallet');
       loadWallet();
-    } else {
-      $('#setup').hidden = false;
-      onbStep = 0; renderOnb(); setupStep('welcome');
     }
     setInterval(pollNet, 3000);
     }
