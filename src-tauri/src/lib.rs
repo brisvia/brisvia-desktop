@@ -1298,6 +1298,63 @@ fn descriptors_from_mnemonic(mnemonic: &Mnemonic) -> Result<(String, String, Str
     Ok((fp.to_string(), external, internal))
 }
 
+// ============================================================================================================
+// E2E MIGRATION HELPER — compiled ONLY under the `e2e-helper` feature, NEVER in the public app.
+// It exists so the macOS/Linux migration jobs can create a THROWAWAY wallet_seed.enc using the EXACT production
+// crypto (so the file is byte-compatible with what the app writes) and, after an update, prove the surviving
+// file still unlocks and derives the SAME address. Security (ChatGPT): there is deliberately NO seed-input path
+// in the production binary — this whole module and its bin are feature-gated out of every release build. The
+// throwaway mnemonic/password travel over STDIN (never argv/logs); only the PUBLIC address is printed.
+// Gated behind the existing `e2e` feature (test-only, never in a release build).
+#[cfg(feature = "e2e")]
+pub mod e2e_helper {
+    use super::{decrypt_phrase_file, descriptors_from_mnemonic, encrypt_phrase_file};
+    use bitcoin::bip32::{ChildNumber, Xpriv};
+    use bitcoin::hashes::Hash;
+    use bitcoin::secp256k1::Secp256k1;
+    use bitcoin::CompressedPublicKey;
+    use bip39::Mnemonic;
+    use std::path::Path;
+    use std::str::FromStr;
+
+    // First external receiving address (change 0, index 0) — the same one the node's getnewaddress returns for a
+    // fresh wallet, derived purely from the account key (identical logic to the massive_wallet_derivation test).
+    fn first_address(mnemonic: &Mnemonic) -> Result<String, String> {
+        let (_fp, ext, _int) = descriptors_from_mnemonic(mnemonic)?;
+        let account_xprv = ext
+            .split(']').nth(1).and_then(|s| s.strip_suffix("/0/*)"))
+            .ok_or_else(|| "bad external descriptor".to_string())?;
+        let secp = Secp256k1::new();
+        let account = Xpriv::from_str(account_xprv).map_err(|e| e.to_string())?;
+        let path = [ChildNumber::from_normal_idx(0).unwrap(), ChildNumber::from_normal_idx(0).unwrap()];
+        let child = account.derive_priv(&secp, &path).map_err(|e| e.to_string())?;
+        let pubkey = CompressedPublicKey::from_private_key(&secp, &child.to_priv()).map_err(|e| e.to_string())?;
+        let program = pubkey.wpubkey_hash().to_byte_array();
+        #[cfg(feature = "mainnet")]
+        let hrp = "brv";
+        #[cfg(not(feature = "mainnet"))]
+        let hrp = "tbrv";
+        let hrp = bitcoin::bech32::Hrp::parse(hrp).map_err(|e| e.to_string())?;
+        bitcoin::bech32::segwit::encode_v0(hrp, &program).map_err(|e| e.to_string())
+    }
+
+    /// Create a throwaway wallet_seed.enc at `datadir` from `mnemonic`+`password` (real production crypto).
+    /// Returns the wallet's first (public) receiving address.
+    pub fn create(datadir: &Path, mnemonic: &str, password: &str) -> Result<String, String> {
+        let m = Mnemonic::parse(mnemonic).map_err(|e| e.to_string())?;
+        encrypt_phrase_file(datadir, &m.to_string(), password)?;
+        first_address(&m)
+    }
+
+    /// Decrypt the surviving wallet_seed.enc and return the first (public) address — proves it still unlocks with
+    /// the same password and derives the SAME address after an update.
+    pub fn verify(datadir: &Path, password: &str) -> Result<String, String> {
+        let phrase = decrypt_phrase_file(datadir, password)?;
+        let m = Mnemonic::parse(&phrase).map_err(|e| e.to_string())?;
+        first_address(&m)
+    }
+}
+
 // Adds ONLY the checksum to the PRIVATE descriptor (we don't use info["descriptor"], which returns the public/xpub
 // version and would leave the wallet without spending keys). getdescriptorinfo["checksum"] is for the string we pass.
 fn checksummed(datadir: &PathBuf, desc: &str) -> Result<String, String> {
