@@ -77,6 +77,9 @@ h1, h2, h3 { margin: 0; }
 .sec-actions { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; }
 /* Trust signal at the bottom of the balance card. */
 .bal-trust { margin-top: 16px; position: relative; z-index: 1; line-height: 1.4; opacity: .82; }
+/* Positive, reassuring backup status (shown only when verified — no alarming "pending" warning). */
+.backup-badge { margin-top: 10px; font-size: 12px; font-weight: 600; color: var(--mineral); position: relative; z-index: 1; }
+.backup-badge::before { content: "\2713\00a0"; font-weight: 700; }
 
 /* Network panel */
 .net-panel .panel-head { margin-bottom: 10px; }
@@ -176,11 +179,16 @@ h1 { font-size: 26px; line-height: 1.14; letter-spacing: -.02em; max-width: 15ch
 .pow-val { min-width: 44px; text-align: right; font-weight: 600; color: var(--text); }
 .contrib-sub { margin: -2px 0 14px; }
 .addr-history { list-style: none; counter-reset: addr; margin: 10px 0 0; padding: 8px 10px; max-height: 170px; overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; text-align: left; }
-/* Each address row: number · address (left, grows) · current balance (right, informational). */
-.addr-history li { display: flex; align-items: baseline; gap: 8px; counter-increment: addr; font-size: 12px; padding: 4px 0; }
-.addr-history li::before { content: counter(addr) "."; color: var(--muted); flex-shrink: 0; min-width: 15px; }
-.addr-history code { flex: 1; font-size: 11px; word-break: break-all; color: var(--muted); }
-.addr-history .addr-bal { flex-shrink: 0; font-size: 11.5px; font-weight: 700; color: var(--mineral); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* Each address is a small card: number · address · Copy on line 1, and the balance on its own line 2, so a
+   long brv1… address and its amount never crowd each other (and the address never gets cut mid-way). */
+.addr-history li { counter-increment: addr; font-size: 12px; padding: 8px 0; border-bottom: 1px solid rgba(38,54,66,.4); }
+.addr-history li:last-child { border-bottom: 0; }
+.addr-row { display: flex; align-items: center; gap: 8px; }
+.addr-row::before { content: counter(addr) "."; color: var(--muted); flex-shrink: 0; min-width: 16px; }
+.addr-history code { flex: 1; font-size: 11px; word-break: break-all; color: var(--muted); text-align: left; }
+.addr-copy { flex-shrink: 0; }
+.addr-bal-line { margin: 4px 0 0 22px; }
+.addr-history .addr-bal { font-size: 11.5px; font-weight: 700; color: var(--mineral); font-variant-numeric: tabular-nums; }
 .addr-history .addr-bal.zero { color: var(--muted); font-weight: 600; }
 #recv-history-toggle { margin-top: 10px; display: inline-block; }
 .contrib { background: linear-gradient(160deg, var(--surface-2), var(--surface)); border: 1px solid var(--border); border-radius: 18px; padding: 20px; box-shadow: var(--shadow); }
@@ -202,8 +210,10 @@ h1 { font-size: 26px; line-height: 1.14; letter-spacing: -.02em; max-width: 15ch
 .set-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 10px 0; border-bottom: 1px solid rgba(38,54,66,.6); }
 .set-row:last-child { border-bottom: 0; }
 .set-title { font-weight: 600; }
+/* "Current mode: SOLO" — the selected mode, stated plainly so it isn't buried in a paragraph. */
+.mode-current { margin-top: 6px; font-size: 13px; font-weight: 600; }
 /* Plain-language explanation of the selected mining mode (solo vs grouped). */
-.set-mode-desc { margin-top: 6px; max-width: 360px; line-height: 1.4; }
+.set-mode-desc { margin-top: 4px; max-width: 360px; line-height: 1.4; }
 .foot-note { text-align: center; margin-top: 10px; }
 /* switch */
 .switch { position: relative; display: inline-block; width: 46px; height: 26px; flex-shrink: 0; }
@@ -273,6 +283,12 @@ h1 { font-size: 26px; line-height: 1.14; letter-spacing: -.02em; max-width: 15ch
 .send-avail strong { color: var(--text); font-variant-numeric: tabular-nums; }
 .send-avail .link { white-space: nowrap; }
 .send-net { margin: 8px 0 0; opacity: .85; }
+/* Send confirmation (step 2): a clear "receives / fee / total debited" review before the payment goes out. */
+.send-summary { margin: 6px 0 12px; padding: 12px 14px; background: var(--brand-soft); border: 1px solid var(--border); border-radius: 12px; }
+.confirm-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 5px 0; font-size: 13px; }
+.confirm-row code { word-break: break-all; text-align: right; font-size: 11px; color: var(--text); }
+.confirm-row strong { color: var(--text); font-variant-numeric: tabular-nums; }
+.confirm-row.confirm-total { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 9px; font-size: 15px; }
 #send-go.is-busy { opacity: .6; pointer-events: none; }
 .addr-box { background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin: 12px 0 0; word-break: break-all; }
 .addr-box code { font-size: 12.5px; color: var(--brand); }

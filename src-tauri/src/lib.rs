@@ -1060,6 +1060,36 @@ fn wallet_send(state: State<AppState>, address: String, amount: String, password
     }
 }
 
+// Estimate the network fee for a payment WITHOUT sending it. Builds a funded PSBT (Core picks the inputs and
+// computes the change + fee) but does NOT lock any UTXO, sign, or broadcast — a read-only price check so the
+// confirmation screen can show "receives / fee / total" before the person commits. The real send still goes
+// through the audited sendtoaddress path; on this no-congestion network the two match, so the shown value is
+// the network fee for this exact payment. amount uses the same exact parse as the real send; the fee itself
+// is informational, so reading it as f64 is fine (the actual send stays exact via the amount string).
+#[tauri::command]
+fn wallet_estimate_send(state: State<AppState>, address: String, amount: String) -> Result<Value, String> {
+    let briv = parse_amount_briv(&amount)?;
+    // The SAME exact 8-decimal string the real send uses — never routed through an f64 — so the estimate and
+    // the send agree on the amount to the base unit (ChatGPT's correction).
+    let exact = briv_to_decimal(briv);
+    let mut out = serde_json::Map::new();
+    out.insert(address, json!(exact));
+    let outputs = serde_json::Value::Array(vec![serde_json::Value::Object(out)]);
+    // add_inputs:true -> Core picks the inputs for the empty input list; lockUnspents:false -> reserve nothing.
+    // Both stated explicitly rather than relying on defaults. This funds a PSBT only to read the fee: no sign,
+    // no broadcast, no UTXO held. The real payment still goes out through the audited sendtoaddress path.
+    let opts = json!({ "add_inputs": true, "lockUnspents": false });
+    let psbt = rpc(&state.datadir, Some(WALLET_NAME), "walletcreatefundedpsbt", json!([[], outputs, 0, opts]))
+        .map_err(|e| friendly_error(&e))?;
+    let fee = psbt.get("fee").and_then(|f| f.as_f64()).unwrap_or(0.0);
+    let fee_briv = (fee * 100_000_000.0).round() as u64; // back to integer base units for an exact total
+    Ok(json!({
+        "receives": exact,
+        "fee": briv_to_decimal(fee_briv),
+        "total": briv_to_decimal(briv + fee_briv)
+    }))
+}
+
 /// Turns a send failure into the code the user sees. Only a genuinely ambiguous outcome gets the warning:
 /// telling someone "the payment may have gone out, check your transactions" when the node simply refused
 /// would scare them for nothing and invite a pointless double check. And staying silent about a real
@@ -2419,6 +2449,15 @@ fn miner_set_intensity(app: AppHandle, state: State<AppState>, intensity: String
     json!({ "intensity": intensity })
 }
 
+// Physical core count, detected ONCE per session (the CPU topology never changes while running, so there is
+// no point querying it on every status poll). num_cpus falls back to the logical count if it cannot tell the
+// physical one apart; the UI treats "physical >= logical" as "unknown" and then shows only the thread count.
+fn physical_cores() -> usize {
+    use std::sync::OnceLock;
+    static PHYS: OnceLock<usize> = OnceLock::new();
+    *PHYS.get_or_init(num_cpus::get_physical)
+}
+
 #[tauri::command]
 fn miner_status(state: State<AppState>) -> Value {
     let mining = state.mining.load(Ordering::SeqCst);
@@ -2442,7 +2481,10 @@ fn miner_status(state: State<AppState>) -> Value {
         "hashrate": if mining { *state.hashrate.lock().unwrap() } else { 0.0 },
         "intensity": intensity,
         "threads": state.miner_threads.load(Ordering::SeqCst),
+        // `cores` is the max the miner can use = logical processors (threads). `physicalCores` is the real
+        // core count, shown alongside it so "24 cores / 32 threads" reads honestly (mining runs on threads).
         "cores": state.cores as u64,
+        "physicalCores": physical_cores() as u64,
         "totalSeconds": total
     })
 }
@@ -3050,6 +3092,7 @@ pub fn run() {
             wallet_new_address,
             wallet_addresses,
             wallet_send,
+            wallet_estimate_send,
             wallet_history,
             miner_start,
             miner_stop,

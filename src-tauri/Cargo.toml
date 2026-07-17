@@ -1,6 +1,6 @@
 [package]
 name = "brisvia-miner"
-version = "1.0.6"
+version = "1.0.7"
 description = "Brisvia (BRVA) desktop miner"
 authors = ["Brisvia"]
 edition = "2021"
@@ -39,6 +39,8 @@ aes-gcm = "0.10"
 rand = "0.8"
 # Operating system language (to pick es/en on first run).
 sys-locale = "0.3"
+# Physical core count (vs logical threads): an i9-13900 has 24 cores / 32 threads; we show both honestly.
+num_cpus = "1"
 # Start with the system (opt-in from Settings).
 tauri-plugin-autostart = "2"
 # Single instance: prevents opening two windows (and two mining engines) if the program is launched while already open.

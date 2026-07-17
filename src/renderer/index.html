@@ -150,6 +150,7 @@
             <button id="act-send" class="btn mineral" data-i18n="wallet.send"></button>
           </div>
           <div class="bal-trust muted small" data-i18n="wallet.trust"></div>
+          <div class="backup-badge" id="backup-badge" hidden></div>
         </div>
 
         <div class="panel net-panel">
@@ -198,6 +199,7 @@
               <input type="range" id="pow-range" min="1" max="100" value="50" step="1" data-i18n-attr="aria-label:mine.how_much">
               <span id="pow-val" class="pow-val">50%</span>
             </div>
+            <span id="cpu-info" class="muted small"></span>
           </div>
         </div>
         <aside class="contrib">
@@ -238,7 +240,7 @@
           <label class="switch"><input type="checkbox" id="set-tray"><span class="slider"></span></label>
         </div>
         <div class="set-row">
-          <div><div class="set-title" data-i18n="settings.mining_mode_title"></div><div class="muted small" data-i18n="settings.mining_mode_sub"></div><div class="muted small set-mode-desc" id="mining-mode-desc"></div></div>
+          <div><div class="set-title" data-i18n="settings.mining_mode_title"></div><div class="muted small" data-i18n="settings.mining_mode_sub"></div><div class="mode-current" id="mining-mode-current"></div><div class="muted small set-mode-desc" id="mining-mode-desc"></div></div>
           <div class="seg small-seg" id="set-mining-mode">
             <button class="seg-btn active" data-mode="solo" data-i18n="settings.mode_solo"></button>
             <button class="seg-btn" data-mode="pool" data-i18n="settings.mode_pool"></button>
@@ -313,21 +315,37 @@
     <div class="card modal">
       <button class="modal-x" data-close data-i18n-attr="aria-label:common.close">×</button>
       <h2 data-i18n="send.title"></h2>
-      <label class="field"><span class="muted small" data-i18n="send.to"></span>
-        <input id="send-addr" type="text" placeholder="brv1q…" autocomplete="off" spellcheck="false"></label>
-      <div class="send-avail">
-        <span class="muted small"><span data-i18n="send.available"></span> <strong id="send-avail">0</strong> BRVA</span>
-        <button type="button" id="send-max" class="link small" data-i18n="send.max"></button>
+      <div id="send-step1">
+        <label class="field"><span class="muted small" data-i18n="send.to"></span>
+          <input id="send-addr" type="text" placeholder="brv1q…" autocomplete="off" spellcheck="false"></label>
+        <div class="send-avail">
+          <span class="muted small"><span data-i18n="send.available"></span> <strong id="send-avail">0</strong> BRVA</span>
+          <button type="button" id="send-max" class="link small" data-i18n="send.max"></button>
+        </div>
+        <label class="field"><span class="muted small" data-i18n="send.amount"></span>
+          <input id="send-amount" type="text" inputmode="decimal" autocomplete="off" data-i18n-attr="placeholder:send.amount_ph"></label>
+        <p class="send-net muted small" data-i18n="send.testnet_note"></p>
+        <label class="field" id="send-pass-field"><span class="muted small" data-i18n="send.password"></span>
+          <input id="send-pass" type="password" autocomplete="current-password" placeholder="••••••••"></label>
+        <p id="send-msg" class="verify-msg" hidden></p>
+        <div class="row-gap">
+          <button data-close class="btn ghost" data-i18n="send.cancel"></button>
+          <button id="send-go" class="btn mineral" data-i18n="send.review"></button>
+        </div>
       </div>
-      <label class="field"><span class="muted small" data-i18n="send.amount"></span>
-        <input id="send-amount" type="text" inputmode="decimal" autocomplete="off" data-i18n-attr="placeholder:send.amount_ph"></label>
-      <p class="send-net muted small" data-i18n="send.testnet_note"></p>
-      <label class="field" id="send-pass-field"><span class="muted small" data-i18n="send.password"></span>
-        <input id="send-pass" type="password" autocomplete="current-password" placeholder="••••••••"></label>
-      <p id="send-msg" class="verify-msg" hidden></p>
-      <div class="row-gap">
-        <button data-close class="btn ghost" data-i18n="send.cancel"></button>
-        <button id="send-go" class="btn mineral" data-i18n="send.go"></button>
+      <div id="send-step2" hidden>
+        <div class="send-summary">
+          <div class="confirm-row"><span class="muted small" data-i18n="send.confirm_to"></span><code id="conf-addr" class="mono"></code></div>
+          <div class="confirm-row"><span class="muted small" data-i18n="send.confirm_net"></span><span id="conf-net"></span></div>
+          <div class="confirm-row"><span class="muted small" data-i18n="send.confirm_recv"></span><strong id="conf-recv"></strong></div>
+          <div class="confirm-row"><span class="muted small" data-i18n="send.confirm_fee"></span><span id="conf-fee"></span></div>
+          <div class="confirm-row confirm-total"><span data-i18n="send.confirm_total"></span><strong id="conf-total"></strong></div>
+        </div>
+        <p id="send-msg2" class="verify-msg" hidden></p>
+        <div class="row-gap">
+          <button id="send-back" class="btn ghost" data-i18n="send.back"></button>
+          <button id="send-confirm-go" class="btn mineral" data-i18n="send.confirm_go"></button>
+        </div>
       </div>
     </div>
   </div>
