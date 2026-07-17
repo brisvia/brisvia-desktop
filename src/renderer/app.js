@@ -340,6 +340,15 @@ async function refreshMine() {
   $('#m-total').innerHTML = fmtDuration(s.totalSeconds || 0);
   // Real core count -> power label ("50% · 16 of 32 cores").
   if (s.cores && s.cores !== POW_CORES) { POW_CORES = s.cores; refreshPowLabel(); }
+  if (s.physicalCores && s.physicalCores !== POW_PHYSICAL) {
+    POW_PHYSICAL = s.physicalCores;
+    const ci = $('#cpu-info');
+    // Show "24 cores · 32 threads" only when the physical count is trustworthy (lower than the logical one);
+    // if detection is dubious (>= logical), show just the threads so we never assert a wrong core count.
+    if (ci) ci.textContent = (s.physicalCores > 0 && s.physicalCores < s.cores)
+      ? T('mine.cpu_info', { p: s.physicalCores, t: s.cores })
+      : T('mine.cpu_info_threads', { t: s.cores });
+  }
 }
 $('#toggle').addEventListener('click', async () => {
   if (isWaitMode()) { refreshMine(); return; } // wait mode: the button is disabled; ignore any click
@@ -358,7 +367,8 @@ $('#toggle').addEventListener('click', async () => {
 // Maps legacy named settings (suave/equilibrado/intenso) to a percentage for backward compatibility.
 function pctOf(v) { return ({ suave: '25', equilibrado: '50', intenso: '100' })[v] || String(parseInt(v, 10) || 50); }
 function currentIntensity() { return String($('#pow-range')?.value || '50'); }
-let POW_CORES = 0; // real core count, filled from miner_status
+let POW_CORES = 0; // logical processors (threads) the miner can use, filled from miner_status
+let POW_PHYSICAL = 0; // physical core count, shown beside the threads so "24 cores / 32 threads" reads honestly
 let suppressPreparingUntil = 0; // after a live power change, keep showing "Mining" instead of "Preparing…" for a few seconds
 function powThreads(pct) { return POW_CORES > 0 ? Math.max(1, Math.ceil((POW_CORES * pct) / 100)) : 0; }
 function refreshPowLabel() {
@@ -404,6 +414,7 @@ async function loadWallet() {
   // Big number = what can be spent now (available). Maturing (mining rewards) and Incoming (unconfirmed) are
   // shown apart, each only if there is an amount. They are NEVER added into the available number.
   availableBalance = w.balance || 0;
+  const bb = $('#backup-badge'); if (bb) { bb.textContent = T('wallet.backup_ok'); bb.hidden = !w.backed_up; }
   try { const k = await window.brisvia.wallet.kind(); walletEncrypted = !!(k && k.encrypted); } catch {}
   $('#bal-amount').textContent = fmt(w.balance);
   const mat = w.immature || 0, inc = w.incoming || 0;
@@ -540,15 +551,26 @@ $('#recv-history-toggle').addEventListener('click', async () => {
   ol.innerHTML = '';
   // Each row: the address plus the BRVA currently held at it (informational). Backend returns {address, balance};
   // older/preview shapes may return a plain string, handled here too.
+  // Each row is a small card: address on its own line (monospace, wraps whole so it can't look like a
+  // different address) with a Copy button, and the balance on a SECOND line so they never crowd each other.
   list.forEach((a) => {
     const addr = (typeof a === 'string') ? a : (a.address || '');
     const bal = (typeof a === 'string') ? null : (a.balance || 0);
-    const balHtml = (bal != null) ? `<span class="addr-bal${bal > 0 ? '' : ' zero'}">${fmt(bal)} BRVA</span>` : '';
+    const balHtml = (bal != null) ? `<div class="addr-bal-line"><span class="addr-bal${bal > 0 ? '' : ' zero'}">${fmt(bal)} BRVA</span></div>` : '';
     const li = document.createElement('li');
-    li.innerHTML = `<code class="mono">${addr}</code>${balHtml}`;
+    li.innerHTML = `<div class="addr-row"><code class="mono addr-code">${addr}</code><button class="copy-btn addr-copy" data-addr="${addr}">${T('receive.copy_short')}</button></div>${balHtml}`;
     ol.appendChild(li);
   });
   ol.hidden = false;
+});
+// Copy any address from the list (event-delegated), with a brief "Copied" confirmation on the button itself.
+$('#recv-history').addEventListener('click', async (e) => {
+  const btn = e.target.closest('.addr-copy'); if (!btn) return;
+  try {
+    await navigator.clipboard.writeText(btn.dataset.addr);
+    const prev = btn.textContent; btn.textContent = T('receive.copied_addr');
+    setTimeout(() => { btn.textContent = prev; }, 1500);
+  } catch {}
 });
 function showReceive(addr) {
   $('#recv-history').hidden = true;
@@ -612,6 +634,7 @@ $('#act-send').addEventListener('click', () => {
   $('#send-addr').value = ''; $('#send-amount').value = ''; $('#send-pass').value = ''; $('#send-msg').hidden = true;
   $('#send-avail').textContent = fmt(availableBalance);
   $('#send-pass-field').hidden = !walletEncrypted; // old unencrypted wallets don't ask for a password
+  $('#send-step1').hidden = false; $('#send-step2').hidden = true; pendingSend = null; // always open on the review step
   const go = $('#send-go'); go.disabled = false; go.classList.remove('is-busy');
   openModal('modal-send');
 });
@@ -629,9 +652,11 @@ $('#send-max').addEventListener('click', () => {
   const el = $(s);
   if (el) el.addEventListener('input', () => { const m = $('#send-msg'); if (m && !m.hidden) m.hidden = true; });
 });
+// Step 1 (Review): validate, price-check the fee (read-only), and show the confirmation with receives/fee/total.
+let pendingSend = null;
 $('#send-go').addEventListener('click', async () => {
   const go = $('#send-go');
-  if (go.disabled) return; // already sending: block a double click
+  if (go.disabled) return;
   const addr = $('#send-addr').value.trim();
   // The canonical STRING is what travels: money must not pass through a JS number on its way to the
   // backend, which parses it into integer base units. null means the text was ambiguous (a separator that
@@ -644,13 +669,34 @@ $('#send-go').addEventListener('click', async () => {
   if (amountCanon == null || !(amount > 0)) { msg.textContent = T('send.invalid_amount'); return; }
   if (amount > availableBalance + 1e-8) { msg.textContent = T('send.over_balance'); return; }
   if (walletEncrypted && !pass) { msg.textContent = T('send.need_pass'); return; }
+  msg.hidden = true;
   go.disabled = true; go.classList.add('is-busy');
-  const r = await window.brisvia.wallet.send(addr, amountCanon, pass);
+  // Read-only fee check (funds a PSBT, reserves nothing, sends nothing). If it fails, show the reason here.
+  const est = await window.brisvia.wallet.estimateSend(addr, amountCanon).catch(() => null);
+  go.disabled = false; go.classList.remove('is-busy');
+  if (!est || est.error) { msg.hidden = false; msg.textContent = est && est.error ? transError(est.error) : T('send.fail'); return; }
+  pendingSend = { addr, amountCanon, pass };
+  $('#conf-addr').textContent = addr;
+  $('#conf-net').textContent = T('send.net_name');
+  $('#conf-recv').textContent = fmt(Number(est.receives)) + ' BRVA';
+  $('#conf-fee').textContent = fmt(Number(est.fee)) + ' BRVA';
+  $('#conf-total').textContent = fmt(Number(est.total)) + ' BRVA';
+  $('#send-msg2').hidden = true;
+  $('#send-step1').hidden = true; $('#send-step2').hidden = false;
+});
+// Back: return to the form without sending.
+$('#send-back').addEventListener('click', () => { $('#send-step2').hidden = true; $('#send-step1').hidden = false; });
+// Step 2 (Confirm): the actual payment, through the audited sendtoaddress path.
+$('#send-confirm-go').addEventListener('click', async () => {
+  const go = $('#send-confirm-go');
+  if (go.disabled || !pendingSend) return;
+  const msg = $('#send-msg2'); msg.hidden = false; msg.className = 'verify-msg err';
+  go.disabled = true; go.classList.add('is-busy');
+  const r = await window.brisvia.wallet.send(pendingSend.addr, pendingSend.amountCanon, pendingSend.pass);
   if (r && r.ok) { msg.className = 'verify-msg ok'; msg.textContent = T('send.done'); setTimeout(() => closeModal('modal-send'), 1200); loadWallet(); }
   else if (r && r.error === 'ERR:SEND_STATUS_UNKNOWN') {
-    // The node never confirmed: the payment MAY be on the network. Do not re-enable the button and do not
-    // retry — a retry here could pay twice. Refresh the balance and history so the answer is on screen,
-    // and leave the decision to the person, who can now see whether it went out.
+    // The node never confirmed: the payment MAY be on the network. Do not re-enable and do not retry — a
+    // retry could pay twice. Refresh so the answer is on screen and let the person decide.
     go.classList.remove('is-busy');
     msg.textContent = transError(r.error);
     loadWallet();
@@ -692,6 +738,9 @@ function applyMiningMode(mode) {
   const m = (mode === 'pool' || mode === 'custom') ? mode : 'solo';
   currentMiningMode = m;
   $$('#set-mining-mode .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.mode === m));
+  // Big, plain "Current mode: SOLO" with the mode word highlighted, so it doesn't depend on reading a paragraph.
+  const cur = $('#mining-mode-current');
+  if (cur) cur.innerHTML = T('settings.mode_current') + ' <strong class="brand-fg">' + T('settings.mode_' + m).toUpperCase() + '</strong>';
   // Plain-language explanation of the chosen mode.
   const desc = $('#mining-mode-desc');
   if (desc) desc.textContent = T('settings.mode_' + m + '_desc');
@@ -1132,9 +1181,12 @@ function isWaitMode() { return isMainnetBuild && Date.now() < MAINNET_START; }
 // Human countdown to launch ("Real mining in Xd Yh" / "…about to begin"). Reused by the banner and the Mine view.
 function launchCountdownText() {
   const diff = MAINNET_START - Date.now();
-  const days = Math.floor(diff / 86400000);
-  const hours = Math.floor((diff % 86400000) / 3600000);
-  return days >= 1 ? T('testnet.mainnet_in', { d: days, h: hours }) : T('testnet.mainnet_soon');
+  if (diff <= 0) return T('testnet.mainnet_soon');
+  const d = Math.floor(diff / 86400000);
+  const h = Math.floor((diff % 86400000) / 3600000);
+  const m = Math.floor((diff % 3600000) / 60000);
+  const s = Math.floor((diff % 60000) / 1000);
+  return T('testnet.mainnet_in', { d, h, m, s });
 }
 
 // Top notice shown before launch. On a REAL-network build it is the "wait mode" notice (mining opens Aug 1,
@@ -1164,7 +1216,20 @@ function updateTestnetBanner() {
   if (cd) { cd.hidden = false; cd.textContent = launchCountdownText(); }
   banner.hidden = false;
 }
-setInterval(updateTestnetBanner, 60000); // refresh the countdown every minute
+setInterval(updateTestnetBanner, 60000); // refresh the testnet banner every minute
+// Tick the launch countdown every second so days/hours/minutes/SECONDS all advance live (not just d/h).
+// One module-level timer (never duplicated); always computed from MAINNET_START - now, never subtracting by hand.
+let _wasWaiting = null;
+setInterval(() => {
+  const waiting = (typeof isWaitMode === 'function') && isWaitMode();
+  if (waiting) {
+    const sub = $('#hero-sub'); if (sub) sub.textContent = T('wait.sub') + ' — ' + launchCountdownText();
+    const cd = $('#countdown'); if (cd && !cd.hidden) cd.textContent = launchCountdownText();
+  } else if (_wasWaiting === true) {
+    refreshMine(); // the launch instant just passed: leave wait mode right away, no restart needed
+  }
+  _wasWaiting = waiting;
+}, 1000);
 
 // ===================== Startup =====================
 async function init() {
