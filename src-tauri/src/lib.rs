@@ -602,6 +602,23 @@ fn repair_blocked(datadir: &Path) -> bool {
 }
 
 // ---- start the node as a child process ----
+/// Build the node's `bitcoin.conf`. Pure and testable on purpose: the app rewrites this file on EVERY start
+/// (see start_node), so a stale conf from an older version — e.g. one still pinning the pre-9338 RPC port — is
+/// always replaced. A user can never be silently stranded on an old port. It sets ONLY the RPC port; the P2P
+/// port is the chainparams default (9342 mainnet) and is deliberately never written here, so no stale P2P port
+/// can linger either. `peers.dat` may still hold old-port peers, but the addnode seeds bootstrap recovery.
+fn node_conf(chain: &str, net_lines: &str, rpc_port: u16, seeds: &str) -> String {
+    format!(
+        // The node connects to the network on its own (dnsseed + fixed seed), accepts inbound if the router
+        // allows it (natpmp tries to open the port), and validates everything locally. RPC stays on 127.0.0.1 only.
+        "chain={chain}\nserver=1\n{net_lines}rpcthreads=16\nrpcworkqueue=128\n[{chain}]\nrpcport={port}\nrpcbind=127.0.0.1\nrpcallowip=127.0.0.1\n{seeds}",
+        chain = chain,
+        net_lines = net_lines,
+        port = rpc_port,
+        seeds = seeds
+    )
+}
+
 fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
     let bitcoind = find_binary(app, &format!("bitcoind{EXE_SUFFIX}")).ok_or("ERR:NODE_BINARY_MISSING")?;
     std::fs::create_dir_all(&state.datadir).map_err(|e| e.to_string())?;
@@ -632,15 +649,7 @@ fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
         "listen=1\ndiscover=1\ndnsseed=1\nnatpmp=1\nfallbackfee=0.02\nminrelaytxfee=0.01\nincrementalrelayfee=0.01\ndustrelayfee=0.03\nblockmintxfee=0.01\nmaxmempool=50\nmempoolexpiry=24\npersistmempool=1\n"
     };
     let seeds = if isolated { "" } else { seeds };
-    let conf = format!(
-        // The node connects to the network on its own (dnsseed + fixed seed), accepts inbound if the router
-        // allows it (natpmp tries to open the port), and validates everything locally. RPC stays on 127.0.0.1 only.
-        "chain={chain}\nserver=1\n{net_lines}rpcthreads=16\nrpcworkqueue=128\n[{chain}]\nrpcport={port}\nrpcbind=127.0.0.1\nrpcallowip=127.0.0.1\n{seeds}",
-        chain = chain,
-        net_lines = net_lines,
-        port = rpc_port(),
-        seeds = seeds
-    );
+    let conf = node_conf(&chain, net_lines, rpc_port(), seeds);
     std::fs::write(state.datadir.join("bitcoin.conf"), conf).map_err(|e| e.to_string())?;
     // Remember how big the log is BEFORE launching, so we only ever read what THIS attempt writes.
     let mark = log_size(&state.datadir);
@@ -1692,6 +1701,31 @@ mod seed_crypto_tests {
         assert_eq!(refuse_if_wallet_exists(&dir), Err("ERR:WALLET_EXISTS".to_string()),
                    "an existing wallet must never be overwritten by create/restore");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod node_conf_tests {
+    use super::node_conf;
+
+    // Guardian (ChatGPT P0 #2): after the mainnet port move (P2P 9333->9342, RPC 9332->9338), a stale install
+    // must never linger on the old ports. The app rewrites bitcoin.conf on EVERY start, so the generated conf
+    // must carry exactly the rpc port it is given, must NOT pin a P2P port (the chainparams default 9342 is used),
+    // and — fed the mainnet RPC port — must never contain Litecoin's 9333/9332.
+    #[test]
+    fn node_conf_emits_the_given_rpc_port_and_no_p2p_port() {
+        let conf = node_conf("brisvia", "listen=1\n", 9338, "addnode=1.2.3.4\n");
+        assert!(conf.contains("rpcport=9338"), "must carry the mainnet RPC port: {conf}");
+        assert!(!conf.contains("9333"), "must never emit Litecoin's P2P port 9333: {conf}");
+        assert!(!conf.contains("9332"), "must never emit Litecoin's RPC port 9332: {conf}");
+        assert!(!conf.contains("\nport="), "must not pin a P2P port; the chainparams default (9342) is used: {conf}");
+    }
+
+    // The compiled mainnet RPC port is the new, own port — not Litecoin's 9332.
+    #[cfg(feature = "mainnet")]
+    #[test]
+    fn mainnet_rpc_port_is_the_new_own_port() {
+        assert_eq!(super::RPC_PORT, 9338);
     }
 }
 
