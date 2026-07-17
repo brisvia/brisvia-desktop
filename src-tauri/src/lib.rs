@@ -33,7 +33,7 @@ mod netcfg {
 }
 #[cfg(feature = "mainnet")]
 mod netcfg {
-    pub const RPC_PORT: u16 = 9338; // local RPC of the node (real network); own port (P2P 9339), distinct from Litecoin 9333/9332
+    pub const RPC_PORT: u16 = 9338; // local RPC of the node (real network); own port (P2P 9342), distinct from Litecoin 9333/9332
     pub const NET_CHAIN: &str = "brisvia"; // real network (mainnet)
     pub const NET_SUBDIR: &str = "brisvia-mainnet"; // data subfolder the node creates (cookie, wallets, blocks)
     // Extended-key network for the wallet's BIP32 keys. Must match the node's EXT prefixes:
@@ -1253,7 +1253,7 @@ fn wallet_network() -> bitcoin::Network {
 // The extended private key is serialized with wallet_network()'s EXT prefix (tprv on the test build,
 // xprv on the mainnet build; regtest tprv under e2e) so the local node's wpkh() descriptor accepts it.
 // Coin type per build: mainnet uses 9339' (path 84h/9339h/0h) — Brisvia's OWN coin type: 9339 is free in
-// the SLIP-44 registry and matches the P2P port 9339, and is NOT Bitcoin's 0' (so the same seed does not
+// the SLIP-44 registry (independent of the P2P port 9342), and is NOT Bitcoin's 0' (so the same seed does not
 // reuse Bitcoin's keys). The test/e2e build keeps 1' (path 84h/1h/0h). This does NOT change the EXT prefix
 // (xprv/tprv). The same 12 words still derive a working wallet on both networks; only the account coin type
 // (and the address HRP) differ.
