@@ -43,6 +43,7 @@ pub enum Incoming {
     Block { accepted: bool },                               // our share was a block (accepted or lost the race)
     PoolError(String),                                      // pool-level error (bad login, too many bad shares…)
     LoginResult { ok: bool },
+    Suspended { retry_after: Option<u64> },                 // the pool is under maintenance (explicit, not a crash)
     Other,                                                  // anything unrecognized — ignored, never fatal
 }
 
@@ -109,6 +110,12 @@ pub fn parse_incoming(line: &str) -> Incoming {
         // never learned whether it had been accepted.
         Some("login_result") => Incoming::LoginResult {
             ok: v.get("ok").and_then(Value::as_bool).unwrap_or(false),
+        },
+        // The pool is under maintenance. Distinct from a dropped socket so the miner can show "under
+        // maintenance" and keep reconnecting instead of falling to solo or crying error. `retry_after_seconds`
+        // (when present) lets the pool spread reconnections so every miner does not come back at once.
+        Some("pool_suspended") => Incoming::Suspended {
+            retry_after: v.get("retry_after_seconds").and_then(Value::as_u64),
         },
         _ => {
             // Legacy stratum-style ack (result/error with an id).
@@ -211,16 +218,21 @@ pub enum Poll {
 /// Permanent = the pool gave an answer that retrying cannot change (rejected address, banned worker, wrong
 /// version). Reconnecting there hammers the pool forever and hides the real reason from the user.
 /// Temporary = nobody answered (network, pool restarting): retrying is exactly right.
+/// Suspended = the pool told us, explicitly, that it is under maintenance (`pool_suspended`). Like Temporary
+/// we keep reconnecting with backoff and NEVER fall back to solo, but the UI shows "under maintenance" rather
+/// than an error, so the user is not misled into thinking something broke.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LoginError {
     Permanent(String),
     Temporary(String),
+    Suspended { message: String, retry_after: Option<u64> },
 }
 
 impl LoginError {
     pub fn message(&self) -> &str {
         match self {
             LoginError::Permanent(m) | LoginError::Temporary(m) => m,
+            LoginError::Suspended { message, .. } => message,
         }
     }
 }
@@ -397,6 +409,14 @@ impl StratumClient {
                     return Err(LoginError::Permanent("the pool rejected the login".into()))
                 }
                 Ok(Poll::Message(Incoming::PoolError(e))) => return Err(LoginError::Permanent(e)),
+                // The pool is under maintenance: not an error and not a reason to go solo. Reconnect after the
+                // suggested delay and let the UI say so.
+                Ok(Poll::Message(Incoming::Suspended { retry_after })) => {
+                    return Err(LoginError::Suspended {
+                        message: "the pool is under maintenance".into(),
+                        retry_after,
+                    })
+                }
                 // Work arrived without an explicit ok: that IS the acceptance. Keep the job.
                 Ok(Poll::Message(Incoming::Job(j))) => return Ok(Some(j)),
                 Ok(Poll::Message(_)) | Ok(Poll::Timeout) => continue, // anything else before the verdict: ignore
@@ -480,6 +500,19 @@ mod tests {
         assert_eq!(parse_incoming(r#"{"type":"set_target","share_target":"1f"}"#), Incoming::SetTarget("1f".into()));
         assert_eq!(parse_incoming("not json at all"), Incoming::Other);
         assert_eq!(parse_incoming("{}"), Incoming::Other);
+    }
+
+    #[test]
+    fn parses_pool_suspended_with_and_without_retry() {
+        assert_eq!(
+            parse_incoming(r#"{"type":"pool_suspended","retry_after_seconds":45}"#),
+            Incoming::Suspended { retry_after: Some(45) }
+        );
+        // A pool that omits the hint is still valid maintenance; the miner falls back to its own 30–60s window.
+        assert_eq!(
+            parse_incoming(r#"{"type":"pool_suspended"}"#),
+            Incoming::Suspended { retry_after: None }
+        );
     }
 
     #[test]

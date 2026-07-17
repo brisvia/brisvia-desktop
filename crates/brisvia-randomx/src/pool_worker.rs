@@ -19,6 +19,19 @@ use crate::worksource::{MiningJob, Solution};
 /// A string prefix keeps `run_session`'s signature (and its tests) unchanged.
 const PERMANENT_PREFIX: &str = "PERMANENT:";
 
+/// Marks a session that ended because the pool is under maintenance. The suffix carries the pool's suggested
+/// retry delay in seconds (0 = none given), so the reconnect loop waits a spread-out interval instead of the
+/// growing backoff — and NEVER falls to solo. Same string-prefix trick as PERMANENT_PREFIX.
+const SUSPENDED_PREFIX: &str = "SUSPENDED:";
+/// Fallback maintenance retry window when the pool did not send `retry_after_seconds`: 30–60 s, spread per
+/// address so miners do not all reconnect at the same instant (thundering herd).
+fn suspended_retry_secs(address: &str, given: Option<u64>) -> u64 {
+    if let Some(s) = given.filter(|&s| s > 0) {
+        return s.clamp(5, 3600);
+    }
+    30 + (jitter_ms(address, 1) % 31_000) / 1000 // 30..=60
+}
+
 /// One event the worker reports (the Tauri backend turns these into UI updates, like the solo worker).
 /// Per ChatGPT: found-locally, submitted, and accepted are DISTINCT — the UI counts a contribution only on
 /// `ShareAccepted` (the pool's explicit confirmation), never on submit.
@@ -34,6 +47,7 @@ pub enum PoolEvent {
     ShareStale,                                    // arrived late (not fraud)
     TargetChangeIgnored,                           // pool tried to change difficulty mid-job; v1 waits for a new job
     BlockFound,                                    // our share met the network target → a block
+    Suspended { retry_after: Option<u64> },        // pool is under maintenance (explicit) — retry, never solo
     Disconnected(String),
 }
 
@@ -57,12 +71,18 @@ where
     on_event(PoolEvent::Connected);
     // Wait for the pool's verdict before mining anything: a rejected miner must not burn CPU for nobody.
     // A pool that answers with work instead of an explicit ok has accepted us, and that first job is mined.
-    let first_job = client
-        .login(address, worker, Duration::from_secs(20))
-        .map_err(|e| match e {
-            LoginError::Permanent(m) => format!("{PERMANENT_PREFIX}{m}"),
-            LoginError::Temporary(m) => m,
-        })?;
+    let first_job = match client.login(address, worker, Duration::from_secs(20)) {
+        Ok(j) => j,
+        Err(LoginError::Permanent(m)) => return Err(format!("{PERMANENT_PREFIX}{m}")),
+        Err(LoginError::Temporary(m)) => return Err(m),
+        // The pool answered, explicitly, that it is under maintenance. Tell the UI (so it shows "under
+        // maintenance", not an error) and hand the reconnect loop the suggested delay. Never solo.
+        Err(LoginError::Suspended { retry_after, .. }) => {
+            on_event(PoolEvent::Hashrate(0.0));
+            on_event(PoolEvent::Suspended { retry_after });
+            return Err(format!("{SUSPENDED_PREFIX}{}", retry_after.unwrap_or(0)));
+        }
+    };
     on_event(PoolEvent::LoggedIn);
 
     let job: Arc<Mutex<Option<(MiningJob, u64)>>> = Arc::new(Mutex::new(None));
@@ -189,6 +209,18 @@ where
                     }
                     // A pool-level error (bad login, too many bad shares) is terminal for this session.
                     Poll::Message(Incoming::PoolError(e)) => return Err(format!("pool error: {e}")),
+                    // The pool went into maintenance mid-session. Atomic cutoff (ChatGPT): invalidate the
+                    // current job and cancel mining so NO share found from this instant on is submitted; zero
+                    // the hashrate; tell the UI; then end the session so the reconnect loop waits the suggested
+                    // delay and comes back — it must NEVER fall to solo.
+                    Poll::Message(Incoming::Suspended { retry_after }) => {
+                        cancel.store(true, Ordering::SeqCst);
+                        cur_gen.fetch_add(1, Ordering::SeqCst); // any queued share is now for a stale generation
+                        *job.lock().unwrap() = None;
+                        on_event(PoolEvent::Hashrate(0.0));
+                        on_event(PoolEvent::Suspended { retry_after });
+                        return Err(format!("{SUSPENDED_PREFIX}{}", retry_after.unwrap_or(0)));
+                    }
                     // A rejected login is permanent — stop this session with an error.
                     Poll::Message(Incoming::LoginResult { ok: false }) => return Err("login rejected".into()),
                     // v1 does not support changing the target mid-job: each job carries its own share_target and
@@ -268,6 +300,19 @@ where
                 if let Some(reason) = err.strip_prefix(PERMANENT_PREFIX) {
                     on_event(PoolEvent::Disconnected(reason.to_string()));
                     return;
+                }
+                // The pool is under maintenance. run_session already emitted PoolEvent::Suspended (the UI shows
+                // "under maintenance", not an error), so do NOT emit Disconnected here. Wait the suggested/spread
+                // delay and reconnect — this loop never exits to solo.
+                if let Some(retry_str) = err.strip_prefix(SUSPENDED_PREFIX) {
+                    let wait = suspended_retry_secs(address, retry_str.parse::<u64>().ok());
+                    for _ in 0..(wait * 10) {
+                        if should_stop.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    continue; // skip the normal backoff sleep; keep the backoff untouched for real drops
                 }
                 on_event(PoolEvent::Disconnected(err));
             }
@@ -587,5 +632,81 @@ mod tests {
         run_session(client, "brv1qexample", "rig1", 1, 1000, &stop, &std::sync::atomic::AtomicU64::new(0), &mut on_event, stub).unwrap();
         server.join().unwrap();
         assert!(accepted, "worker should mark the share accepted only after the pool's ack");
+    }
+
+    // Guardian (ChatGPT P0 #1): a pool under maintenance must be reported as Suspended, NOT as a Disconnect or
+    // an error, and the miner must never submit a share or fall to solo. Login-time path.
+    #[test]
+    fn login_time_maintenance_is_suspended_not_disconnected() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = std::thread::spawn(move || {
+            let (sock, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(sock.try_clone().unwrap());
+            let mut writer = sock;
+            let mut login = String::new();
+            reader.read_line(&mut login).unwrap();
+            // answer the login with maintenance + a retry hint, then keep the socket open briefly so it lands
+            writer
+                .write_all(b"{\"type\":\"pool_suspended\",\"retry_after_seconds\":45}\n")
+                .unwrap();
+            writer.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+        });
+        let client = StratumClient::connect(&addr, Duration::from_secs(5)).unwrap();
+        let stop = AtomicBool::new(false);
+        let mut events = Vec::new();
+        let stub = |_mj: &MiningJob, _t: usize, _ns: u64, _mx: u64, _s: &AtomicBool| -> Option<Solution> { None };
+        let mut on_event = |e: PoolEvent| events.push(e);
+        let err = run_session(client, "brv1qexample", "rig1", 1, 1000, &stop, &std::sync::atomic::AtomicU64::new(0), &mut on_event, stub)
+            .unwrap_err();
+        server.join().unwrap();
+        assert!(err.starts_with(SUSPENDED_PREFIX), "maintenance must be flagged suspended, got: {err}");
+        assert!(
+            events.iter().any(|e| matches!(e, PoolEvent::Suspended { retry_after: Some(45) })),
+            "must emit Suspended with the pool's retry hint: {events:?}"
+        );
+        assert!(!events.iter().any(|e| matches!(e, PoolEvent::Disconnected(_))), "suspension is NOT a disconnect");
+        assert!(!events.iter().any(|e| matches!(e, PoolEvent::LoggedIn)), "never logged in during maintenance");
+        assert!(!events.iter().any(|e| matches!(e, PoolEvent::ShareSubmitted { .. })), "never submit while suspended");
+    }
+
+    // Guardian: maintenance that arrives mid-session (already logged in and working). The session must end as
+    // Suspended, cancel the current job (atomic cutoff), and not report a Disconnect.
+    #[test]
+    fn mid_session_maintenance_cancels_and_reports_suspended() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = std::thread::spawn(move || {
+            let (sock, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(sock.try_clone().unwrap());
+            let mut writer = sock;
+            let mut login = String::new();
+            reader.read_line(&mut login).unwrap();
+            writer.write_all((job_line("j1", true, 7) + "\n").as_bytes()).unwrap();
+            writer.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(30));
+            writer.write_all(b"{\"type\":\"pool_suspended\"}\n").unwrap(); // no hint -> miner uses its own 30-60s
+            writer.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+        });
+        let client = StratumClient::connect(&addr, Duration::from_secs(5)).unwrap();
+        let stop = AtomicBool::new(false);
+        let mut events = Vec::new();
+        // never solve: the ONLY thing that ends the session is the pool going into maintenance.
+        let stub = |_mj: &MiningJob, _t: usize, _ns: u64, _mx: u64, s: &AtomicBool| -> Option<Solution> {
+            while !s.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            None
+        };
+        let mut on_event = |e: PoolEvent| events.push(e);
+        let err = run_session(client, "brv1qexample", "rig1", 1, 1000, &stop, &std::sync::atomic::AtomicU64::new(0), &mut on_event, stub)
+            .unwrap_err();
+        server.join().unwrap();
+        assert!(err.starts_with(SUSPENDED_PREFIX), "got: {err}");
+        assert!(events.contains(&PoolEvent::LoggedIn), "logged in first: {events:?}");
+        assert!(events.iter().any(|e| matches!(e, PoolEvent::Suspended { .. })), "must report Suspended: {events:?}");
+        assert!(!events.iter().any(|e| matches!(e, PoolEvent::Disconnected(_))), "suspension is not a disconnect");
     }
 }
