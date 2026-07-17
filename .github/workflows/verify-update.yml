@@ -361,3 +361,101 @@ jobs:
         shell: pwsh
         run: |
           Get-Process bitcoind,brisvia-worker,brisvia-miner -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+  # ------------------------------------------------------------------------------------------------
+  # Linux/macOS headless data-preservation across the update. The GUI driver (tauri-driver + Edge WebDriver)
+  # is Windows-only, so instead of driving onboarding we CREATE a throwaway wallet with the e2e-wallet-helper
+  # (feature-gated, never shipped; reuses the app's REAL crypto so the file is byte-identical to the app's),
+  # then run the EXACT 1.0.7 and 1.0.8 packages over the same data directory and assert nothing was lost.
+  # Secrets stay on STDIN; only the public address is printed.
+  migration-linux:
+    name: Linux - headless data preservation across 1.0.7 -> 1.0.8 (real packages)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout desktop app (helper source)
+        uses: actions/checkout@v4
+      - name: Checkout core (RandomX submodule; the helper links the app lib which links randomx)
+        uses: actions/checkout@v4
+        with:
+          repository: brisvia/brisvia
+          submodules: recursive
+          path: core
+      - name: Install deps (webkit to RUN the AppImage; cmake to build randomx for the helper)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential pkg-config curl libwebkit2gtk-4.1-0 xvfb file
+      - name: Build RandomX (static lib)
+        run: |
+          cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build core/src/randomx/build -j3
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build the e2e wallet helper (feature-gated; never in a release build)
+        run: |
+          export RANDOMX_LIB_DIR="$PWD/core/src/randomx/build"
+          cargo build --manifest-path src-tauri/Cargo.toml --features "e2e mainnet" --bin e2e-wallet-helper
+          echo "HELPER=$PWD/src-tauri/target/debug/e2e-wallet-helper" >> "$GITHUB_ENV"
+      - name: Download the exact 1.0.7 and 1.0.8 AppImages
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download v1.0.7 --repo "${{ github.repository }}" --pattern 'Brisvia.Miner_1.0.7_amd64.AppImage' --dir pkgs --clobber
+          gh release download "${{ inputs.candidate_tag }}" --repo "${{ github.repository }}" --pattern 'Brisvia.Miner_1.0.8_amd64.AppImage' --dir pkgs --clobber
+          chmod +x pkgs/*.AppImage
+      - name: Create a throwaway wallet at the REAL data path, run 1.0.7 then 1.0.8, assert preservation
+        run: |
+          set -e
+          # A HOME with a SPACE and a NON-ASCII char, so the data path is exercised on both (ChatGPT).
+          export HOME="$RUNNER_TEMP/brisvia mig ñoño"
+          mkdir -p "$HOME"
+          DD="$HOME/.brisvia/BrisviaSim"        # dirs_data_dir()/BrisviaSim on linux/macOS
+          mkdir -p "$DD"
+          MN="abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+          PW="brisvia-e2e-1234"
+          ADDR_BEFORE=$(printf '%s\n%s\n' "$MN" "$PW" | "$HELPER" create "$DD")
+          echo "address before: $ADDR_BEFORE"
+          case "$ADDR_BEFORE" in brv1*) ;; *) echo "FAIL: helper did not return a mainnet address"; exit 1;; esac
+          [ -f "$DD/wallet_seed.enc" ] || { echo "FAIL: helper did not create the seed"; exit 1; }
+          H_BEFORE=$(sha256sum "$DD/wallet_seed.enc" | cut -d' ' -f1)
+          echo "brisvia-witness" > "$DD/witness.txt"
+          run_pkg() {
+            local img="$1" tag="$2"
+            env HOME="$HOME" APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a "$img" > "$RUNNER_TEMP/$tag.log" 2>&1 &
+            local pid=$!
+            sleep 25
+            if ! kill -0 "$pid" 2>/dev/null; then echo "FAIL: $tag died on open"; cat "$RUNNER_TEMP/$tag.log"; exit 1; fi
+            if grep -aiE "panic|cannot open shared object|SEED_CORRUPT" "$RUNNER_TEMP/$tag.log"; then echo "FAIL: $tag reported a fatal error"; cat "$RUNNER_TEMP/$tag.log"; exit 1; fi
+            kill -TERM "$pid" 2>/dev/null || true
+            sleep 5
+            pkill -f bitcoind 2>/dev/null || true
+            echo "OK: $tag opened over the existing wallet and stayed alive"
+          }
+          run_pkg "pkgs/Brisvia.Miner_1.0.7_amd64.AppImage" "v107"
+          run_pkg "pkgs/Brisvia.Miner_1.0.8_amd64.AppImage" "v108"
+          H_AFTER=$(sha256sum "$DD/wallet_seed.enc" | cut -d' ' -f1)
+          [ "$H_BEFORE" = "$H_AFTER" ] || { echo "FAIL: wallet_seed.enc CHANGED $H_BEFORE -> $H_AFTER"; exit 1; }
+          [ "$(cat "$DD/witness.txt" 2>/dev/null)" = "brisvia-witness" ] || { echo "FAIL: witness file lost"; exit 1; }
+          CNT=$(find "$HOME/.brisvia" -name wallet_seed.enc | wc -l)
+          [ "$CNT" -eq 1 ] || { echo "FAIL: $CNT seed files exist (a second wallet was created)"; exit 1; }
+          ADDR_AFTER=$(printf '%s\n' "$PW" | "$HELPER" verify "$DD")
+          [ "$ADDR_BEFORE" = "$ADDR_AFTER" ] || { echo "FAIL: address changed $ADDR_BEFORE -> $ADDR_AFTER"; exit 1; }
+          echo "OK: seed byte-identical, single wallet, witness intact, same address unlocks after the update ($ADDR_AFTER)"
+      - name: Ports guard - the packaged node binds 9342/9338, never 9332/9333
+        run: |
+          set -e
+          ./pkgs/Brisvia.Miner_1.0.8_amd64.AppImage --appimage-extract >/dev/null
+          BD=$(find squashfs-root -type f -name bitcoind | head -1)
+          CLI=$(find squashfs-root -type f -name bitcoin-cli | head -1)
+          DDP="$RUNNER_TEMP/ports"; mkdir -p "$DDP"
+          printf 'chain=brisvia\nserver=1\nlisten=1\ndiscover=0\ndnsseed=0\n[brisvia]\nrpcport=9338\nrpcbind=127.0.0.1\nrpcallowip=127.0.0.1\n' > "$DDP/bitcoin.conf"
+          "$BD" -datadir="$DDP" -conf="$DDP/bitcoin.conf" > "$RUNNER_TEMP/node.log" 2>&1 &
+          NODE=$!
+          "$CLI" -datadir="$DDP" -rpcport=9338 -rpcwait -rpcwaittimeout=90 getblockchaininfo >/dev/null && echo "OK: RPC responds on 9338"
+          sleep 3
+          ss -tlnH | awk '{print $4}' > listen.txt
+          echo "listening:"; cat listen.txt
+          grep -qE '[:.]9342$' listen.txt && echo "OK: P2P listens on 9342" || { echo "FAIL: P2P not on 9342"; cat "$RUNNER_TEMP/node.log" | tail -20; "$CLI" -datadir="$DDP" -rpcport=9338 stop || true; exit 1; }
+          if grep -qE '[:.](9332|9333)$' listen.txt; then echo "FAIL: listening on an old Litecoin port"; "$CLI" -datadir="$DDP" -rpcport=9338 stop || true; exit 1; fi
+          echo "OK: not on 9332/9333"
+          "$CLI" -datadir="$DDP" -rpcport=9338 stop || true
+          wait "$NODE" 2>/dev/null || true
