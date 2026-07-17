@@ -227,11 +227,16 @@ jobs:
           sleep 25
           if ! pgrep -f "$APP/Contents/MacOS" > /dev/null; then echo "FAIL: the .app did not open"; exit 1; fi
           echo "OK: the .app opened"
-          # `quit` lets the app run its own shutdown (closing its node cleanly), unlike killing the process.
-          osascript -e 'tell application id "com.brisvia.miner" to quit' 2>/dev/null || true
+          # Trigger a NORMAL quit so the app runs its own shutdown (fires ExitRequested -> closes its node),
+          # unlike a hard kill. An unsigned app launched via `open` in CI can miss the AppleEvent, so escalate:
+          # quit by name, then by id, then a graceful SIGTERM (which the tao/Tauri loop also handles).
+          APP_PID=$(pgrep -f "$APP/Contents/MacOS" | head -1)
+          osascript -e 'tell application "Brisvia Miner" to quit' 2>/dev/null || true
           CLEAN=0
           for i in $(seq 1 60); do
             if ! pgrep -f "$APP/Contents" > /dev/null; then CLEAN=1; break; fi
+            if [ "$i" -eq 8 ]; then osascript -e 'tell application id "com.brisvia.miner" to quit' 2>/dev/null || true; fi
+            if [ "$i" -eq 18 ] && [ -n "$APP_PID" ]; then kill -TERM "$APP_PID" 2>/dev/null || true; fi
             sleep 1
           done
           if [ "$CLEAN" -ne 1 ]; then
@@ -322,11 +327,17 @@ jobs:
           $bd  = Get-ChildItem $env:INSTALL_DIR -Recurse -Filter bitcoind.exe    | Select-Object -First 1
           $cli = Get-ChildItem $env:INSTALL_DIR -Recurse -Filter bitcoin-cli.exe | Select-Object -First 1
           if (-not $bd -or -not $cli) { throw "FAIL: the installed node binaries were not found" }
-          # The app spawns the node with ONLY -datadir; the chain (brisvia) + rpcport come from the
-          # bitcoin.conf it wrote. Passing -chain on the command line lands the cookie in the wrong
-          # subfolder (brisvia vs brisvia-mainnet), so auth fails. Mirror the app exactly.
+          # Remove any STALE cookie the app's earlier node left behind: bitcoin-cli would read the old one
+          # and fail auth against the fresh node ("Incorrect rpcuser or rpcpassword").
+          Get-ChildItem $env:DATADIR -Recurse -Filter .cookie -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+          # The app spawns the node with ONLY -datadir; the chain (brisvia) + rpcport come from bitcoin.conf.
           $p = Start-Process -FilePath $bd.FullName -ArgumentList "-datadir=$env:DATADIR" -PassThru -WindowStyle Hidden
           "NODE_PID=$($p.Id)" | Out-File $env:GITHUB_ENV -Append
+          # Wait for the node to write its FRESH cookie before bitcoin-cli tries to authenticate.
+          $ck = $null
+          for ($i=0; $i -lt 60 -and -not $ck; $i++) { Start-Sleep 1; $ck = Get-ChildItem $env:DATADIR -Recurse -Filter .cookie -ErrorAction SilentlyContinue | Select-Object -First 1 }
+          if (-not $ck) { throw "FAIL: the node never wrote its cookie (it did not start)" }
+          Start-Sleep 2
           & $cli.FullName "-datadir=$env:DATADIR" -rpcwait -rpcclienttimeout=90 getblockchaininfo | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "FAIL: the node RPC never came up; the hook could not send stop" }
           $log = Get-ChildItem $env:DATADIR -Recurse -Filter debug.log -ErrorAction SilentlyContinue | Select-Object -First 1
