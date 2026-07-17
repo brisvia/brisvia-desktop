@@ -1,13 +1,13 @@
-name: Verify migration 1.0.5 -> 1.0.6 (real install-over-install)
+name: Verify migration 1.0.5 -> 1.0.7 (real install-over-install)
 
 # ChatGPT's #1 required control before sealing rc7: prove the EXACT installers upgrade cleanly.
 # Four jobs:
 #   build-v105-windows          rebuild the 1.0.5 NSIS from its tag (no updater artifacts, no signing key)
-#   migration-windows           install 1.0.5 -> create wallet (installed app, tauri-driver) -> install 1.0.6
+#   migration-windows           install 1.0.5 -> create wallet (installed app, tauri-driver) -> install 1.0.7
 #                               exact over it -> the wallet, address and datadir survive; no reindex/rescan
 #   smoke-linux / smoke-macos   open the EXACT sealed package; node + worker start, respond and close clean
 #
-# The candidate 1.0.6 packages are the sealed fe9657e artifacts already on the v1.0.6 draft release.
+# The candidate 1.0.7 packages are the sealed fe9657e artifacts already on the v1.0.7 draft release.
 # NOTE (documented limitation): the sealed installers are MAINNET builds (the regtest redirect is compiled
 # out of the public binary). So the installed-app test proves wallet creation + seed/address/datadir
 # survival across the update; funding + a confirmed transaction surviving is covered by the regtest E2E
@@ -18,9 +18,9 @@ on:
   workflow_dispatch:
     inputs:
       candidate_tag:
-        description: "Draft tag holding the sealed 1.0.6 packages"
+        description: "Draft tag holding the sealed 1.0.7 packages"
         required: true
-        default: "v1.0.6"
+        default: "v1.0.7"
 
 permissions:
   contents: write # draft releases are only visible to write-level tokens
@@ -138,7 +138,7 @@ jobs:
 
   # ------------------------------------------------------------------------------------------------
   smoke-linux:
-    name: Smoke - the exact 1.0.6 AppImage opens on Linux
+    name: Smoke - the exact 1.0.7 AppImage opens on Linux
     runs-on: ubuntu-22.04
     steps:
       - name: Install WebKit + xvfb
@@ -146,18 +146,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-0 xvfb file
 
-      - name: Download the exact 1.0.6 AppImage from the draft release
+      - name: Download the exact 1.0.7 AppImage from the draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release download "${{ inputs.candidate_tag }}" --repo "${{ github.repository }}" \
-            --pattern 'Brisvia.Miner_1.0.6_amd64.AppImage' --dir . --clobber
-          chmod +x Brisvia.Miner_1.0.6_amd64.AppImage
-          echo "AppImage SHA-256: $(sha256sum Brisvia.Miner_1.0.6_amd64.AppImage | cut -d' ' -f1)"
+            --pattern 'Brisvia.Miner_1.0.7_amd64.AppImage' --dir . --clobber
+          chmod +x Brisvia.Miner_1.0.7_amd64.AppImage
+          echo "AppImage SHA-256: $(sha256sum Brisvia.Miner_1.0.7_amd64.AppImage | cut -d' ' -f1)"
 
       - name: Open the exact package and confirm it stays alive
         run: |
-          APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a ./Brisvia.Miner_1.0.6_amd64.AppImage > appimage.log 2>&1 &
+          APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a ./Brisvia.Miner_1.0.7_amd64.AppImage > appimage.log 2>&1 &
           APP_PID=$!
           sleep 20
           if ! kill -0 "$APP_PID" 2>/dev/null; then echo "FAIL: the app died on open"; cat appimage.log; exit 1; fi
@@ -168,7 +168,7 @@ jobs:
 
       - name: Extract the sidecars and smoke-test the exact node + worker
         run: |
-          ./Brisvia.Miner_1.0.6_amd64.AppImage --appimage-extract >/dev/null
+          ./Brisvia.Miner_1.0.7_amd64.AppImage --appimage-extract >/dev/null
           BD=$(find squashfs-root -type f -name bitcoind | head -1)
           CLI=$(find squashfs-root -type f -name bitcoin-cli | head -1)
           WK=$(find squashfs-root -type f -name brisvia-worker | head -1)
@@ -185,16 +185,16 @@ jobs:
 
   # ------------------------------------------------------------------------------------------------
   smoke-macos:
-    name: Smoke - the exact 1.0.6 .app opens on macOS
+    name: Smoke - the exact 1.0.7 .app opens on macOS
     runs-on: macos-14
     steps:
-      - name: Download the exact 1.0.6 DMG from the draft release
+      - name: Download the exact 1.0.7 DMG from the draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release download "${{ inputs.candidate_tag }}" --repo "${{ github.repository }}" \
-            --pattern 'Brisvia.Miner_1.0.6_aarch64.dmg' --dir . --clobber
-          echo "DMG SHA-256: $(shasum -a 256 Brisvia.Miner_1.0.6_aarch64.dmg | cut -d' ' -f1)"
+            --pattern 'Brisvia.Miner_1.0.7_aarch64.dmg' --dir . --clobber
+          echo "DMG SHA-256: $(shasum -a 256 Brisvia.Miner_1.0.7_aarch64.dmg | cut -d' ' -f1)"
 
       - name: Mount, verify, smoke the sidecars, and attempt a clean app exit
         run: |
@@ -209,7 +209,7 @@ jobs:
           codesign --verify --deep --strict "$APP" 2>&1 | head -3 || echo "(unsigned, as documented)"
           spctl --assess --type execute "$APP" 2>&1 | head -3 || echo "(Gatekeeper would reject: unsigned/unnotarized, as documented)"
           VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
-          echo "version: $VER"; [ "$VER" = "1.0.6" ] || { echo "FAIL: version $VER != 1.0.6"; exit 1; }
+          echo "version: $VER"; [ "$VER" = "1.0.7" ] || { echo "FAIL: version $VER != 1.0.7"; exit 1; }
 
           # --- sidecar smoke: the EXACT bundled node binary starts, responds and stops ---
           BD=$(find "$APP/Contents" -type f -name bitcoind | head -1)
@@ -253,7 +253,7 @@ jobs:
           echo "OK: macOS package opens and all sidecars run"
 
   migration-windows:
-    name: Windows - install 1.0.5, create wallet, install 1.0.6 over it, wallet survives
+    name: Windows - install 1.0.5, create wallet, install 1.0.7 over it, wallet survives
     needs: build-v105-windows
     runs-on: windows-2022
     steps:
@@ -321,12 +321,12 @@ jobs:
           "DATADIR=$dd"                 | Out-File $env:GITHUB_ENV -Append
           Write-Host "seed: $($seed.FullName)  SHA256=$h"
 
-      - name: Download the sealed 1.0.6 NSIS from the draft release
+      - name: Download the sealed 1.0.7 NSIS from the draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release download "${{ inputs.candidate_tag }}" --repo "${{ github.repository }}" --pattern 'Brisvia.Miner_1.0.6_x64-setup.exe' --dir . --clobber
+        run: gh release download "${{ inputs.candidate_tag }}" --repo "${{ github.repository }}" --pattern 'Brisvia.Miner_1.0.7_x64-setup.exe' --dir . --clobber
 
-      - name: Install 1.0.6 over 1.0.5 (clean update - the app was closed after onboarding)
+      - name: Install 1.0.7 over 1.0.5 (clean update - the app was closed after onboarding)
         shell: pwsh
         run: |
           # The realistic user path: the Tauri auto-updater quits the app (its node closes with it via
@@ -334,17 +334,17 @@ jobs:
           # live in it. We closed every process above; confirm none of ours is running, then install.
           $alive = @(Get-Process bitcoind,brisvia-worker,brisvia-miner -ErrorAction SilentlyContinue)
           if ($alive.Count -gt 0) { throw "FAIL: something of ours was still running before the update: $($alive.Name -join ', ')" }
-          $exe = Get-ChildItem . -Filter 'Brisvia.Miner_1.0.6_x64-setup.exe' | Select-Object -First 1
+          $exe = Get-ChildItem . -Filter 'Brisvia.Miner_1.0.7_x64-setup.exe' | Select-Object -First 1
           $p = Start-Process -FilePath $exe.FullName -ArgumentList "/S","/D=$env:INSTALL_DIR" -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw "1.0.6 install failed: $($p.ExitCode)" }
-          Write-Host "OK: 1.0.6 installed cleanly over 1.0.5"
+          if ($p.ExitCode -ne 0) { throw "1.0.7 install failed: $($p.ExitCode)" }
+          Write-Host "OK: 1.0.7 installed cleanly over 1.0.5"
 
-      - name: Version is 1.0.6, wallet survived byte-for-byte, no second wallet
+      - name: Version is 1.0.7, wallet survived byte-for-byte, no second wallet
         shell: pwsh
         run: |
           $app = Get-ChildItem $env:INSTALL_DIR -Recurse -Filter brisvia-miner.exe | Select-Object -First 1
           $v = (Get-Item $app.FullName).VersionInfo.ProductVersion
-          if ($v -notmatch "^1\.0\.6") { throw "FAIL: still $v, the update was not applied" }
+          if ($v -notmatch "^1\.0\.7") { throw "FAIL: still $v, the update was not applied" }
           "BRISVIA_E2E_APP=$($app.FullName)" | Out-File $env:GITHUB_ENV -Append
           if (-not (Test-Path $env:SEED_PATH)) { throw "FAIL: wallet_seed.enc DISAPPEARED with the update" }
           $h = (Get-FileHash $env:SEED_PATH -Algorithm SHA256).Hash.ToLower()
@@ -353,7 +353,7 @@ jobs:
           if ($cnt -ne 1) { throw "FAIL: $cnt seed files exist (a second wallet was created)" }
           Write-Host "OK: 1.0.5 -> $v, seed byte-identical, single wallet"
 
-      - name: Open 1.0.6 and unlock with the same password (tauri-driver over the real app)
+      - name: Open 1.0.7 and unlock with the same password (tauri-driver over the real app)
         run: npx wdio run wdio.conf.js --spec tests/e2e-real/migration/verify.spec.js
 
       - name: No orphan processes
