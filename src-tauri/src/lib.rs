@@ -1330,9 +1330,7 @@ fn wallet_create_bip39(state: State<AppState>, name: String, password: String) -
     let _ops = state.wallet_ops.lock().map_err(|_| "ERR:WALLET_EXISTS".to_string())?;
     // Fail closed BEFORE touching Core. Until now the only thing standing between a second create and a
     // destroyed phrase was Core refusing a duplicate wallet name — an assumption this function does not own.
-    if enc_seed_path(&state.datadir).exists() {
-        return Err("ERR:WALLET_EXISTS".to_string());
-    }
+    refuse_if_wallet_exists(&state.datadir)?;
     validate_password(&password)?;
     let mnemonic = Mnemonic::generate(12).map_err(|e| e.to_string())?;
     let (fp, ext, int) = descriptors_from_mnemonic(&mnemonic)?;
@@ -1383,9 +1381,7 @@ fn wallet_verify_backup(state: State<AppState>, words: Vec<String>) -> Value {
 fn wallet_restore_bip39(state: State<AppState>, phrase: String, name: String, password: String) -> Result<Value, String> {
     let _ops = state.wallet_ops.lock().map_err(|_| "ERR:WALLET_EXISTS".to_string())?;
     // Restoring over an existing wallet would overwrite its phrase: same guard as create.
-    if enc_seed_path(&state.datadir).exists() {
-        return Err("ERR:WALLET_EXISTS".to_string());
-    }
+    refuse_if_wallet_exists(&state.datadir)?;
     let phrase = zeroize::Zeroizing::new(phrase); // wiped from memory on every return path
     validate_password(&password)?;
     let mnemonic = Mnemonic::parse(phrase.trim())
@@ -1548,6 +1544,17 @@ fn load_seed_phrase(datadir: &std::path::Path) -> Vec<String> {
 // `encryptwallet`. Losing the password is recovered ONLY from the 12 words (there is no backdoor).
 fn enc_seed_path(datadir: &std::path::Path) -> std::path::PathBuf { datadir.join("wallet_seed.enc") }
 
+/// The single guard that keeps create/restore from EVER overwriting an existing wallet. Both
+/// `wallet_create_bip39` and `wallet_restore_bip39` MUST call this before touching any file: a wallet on disk
+/// is the one irreplaceable asset, and silently writing a new seed over it would destroy the user's coins (and
+/// re-prompt for 12 words a user may never have written down). Tested by `an_existing_wallet_is_never_overwritten`.
+fn refuse_if_wallet_exists(datadir: &std::path::Path) -> Result<(), String> {
+    if enc_seed_path(datadir).exists() {
+        return Err("ERR:WALLET_EXISTS".to_string());
+    }
+    Ok(())
+}
+
 fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32], String> {
     use argon2::{Argon2, Algorithm, Version, Params};
     // 64 MiB, 3 passes, 1 lane: strong for desktop without choking modest PCs (well above OWASP minimums).
@@ -1650,7 +1657,7 @@ fn validate_password(password: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod seed_crypto_tests {
-    use super::{decrypt_phrase_file, encrypt_phrase_file};
+    use super::{decrypt_phrase_file, encrypt_phrase_file, refuse_if_wallet_exists, enc_seed_path};
     #[test]
     fn seed_roundtrip_and_wrong_password() {
         let dir = std::env::temp_dir().join("brisvia_seed_crypto_test");
@@ -1665,6 +1672,24 @@ mod seed_crypto_tests {
         assert_eq!(decrypt_phrase_file(&dir, "correct-key-123").unwrap(), phrase);
         // Wrong password fails (AES-GCM auth tag mismatch).
         assert!(decrypt_phrase_file(&dir, "wrong-key").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // GUARD: create/restore must NEVER overwrite an existing wallet. Both commands funnel through
+    // refuse_if_wallet_exists; if a future change drops that call, this test fails first. A wallet on disk is
+    // the one asset that cannot be regenerated — overwriting it re-prompts for 12 words (which a user may not
+    // have written down) or destroys their coins.
+    #[test]
+    fn an_existing_wallet_is_never_overwritten() {
+        let dir = std::env::temp_dir().join("brisvia_wallet_guard_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // No seed yet -> a fresh create/restore is allowed.
+        assert!(refuse_if_wallet_exists(&dir).is_ok(), "with no wallet on disk, create/restore must be allowed");
+        // A seed on disk -> create/restore must be refused with ERR:WALLET_EXISTS.
+        std::fs::write(enc_seed_path(&dir), b"existing wallet bytes").unwrap();
+        assert_eq!(refuse_if_wallet_exists(&dir), Err("ERR:WALLET_EXISTS".to_string()),
+                   "an existing wallet must never be overwritten by create/restore");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
