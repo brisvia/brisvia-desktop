@@ -101,6 +101,14 @@ struct AppState {
     // In pool/custom mode miner_start hands the worker a BRISVIA_POOL_URL; the solo path is unchanged.
     mining_mode: Arc<Mutex<String>>,
     pool_address: Arc<Mutex<String>>,
+    // Pool-mode live status, so the UI can be HONEST: connection state, and shares SENT vs ACCEPTED vs REJECTED
+    // (a sent share is not a paid share). A contribution counts only on ShareAccepted. Reset on each miner_start.
+    pool_connected: Arc<AtomicBool>,
+    pool_shares_sent: Arc<AtomicU64>,
+    pool_shares_accepted: Arc<AtomicU64>,
+    pool_shares_rejected: Arc<AtomicU64>,
+    pool_last_error: Arc<Mutex<String>>,
+    pool_last_accepted_ts: Arc<AtomicU64>, // unix seconds of the last accepted share (0 = none yet)
     // Freshly generated mnemonic, kept ONLY in memory to verify the backup; wiped after confirmation. Never persisted.
     pending_mnemonic: Arc<Mutex<Option<String>>>,
     // Current language (es/en) and tray handle to rebuild its menu when the language changes.
@@ -2247,6 +2255,13 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
         *state.mine_start.lock().unwrap() = Some(Instant::now());
         *state.hashrate.lock().unwrap() = 0.0;
         state.miner_ready.store(false, Ordering::SeqCst); // starts "preparing" until the engine's first event
+        // Fresh pool status for the new session (the event follower will refill it from the new log).
+        state.pool_connected.store(false, Ordering::SeqCst);
+        state.pool_shares_sent.store(0, Ordering::SeqCst);
+        state.pool_shares_accepted.store(0, Ordering::SeqCst);
+        state.pool_shares_rejected.store(0, Ordering::SeqCst);
+        state.pool_last_accepted_ts.store(0, Ordering::SeqCst);
+        *state.pool_last_error.lock().unwrap() = String::new();
     }
 
     // How many cores to use. `intensity` is a percentage "1".."100" of the machine's cores (fallback 50%).
@@ -2354,9 +2369,16 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
         let total_mined = state.total_mined_secs.clone();
         let mine_start_ref = state.mine_start.clone();
         let datadir_ref = state.datadir.clone();
+        let pool_connected = state.pool_connected.clone();
+        let pool_sent = state.pool_shares_sent.clone();
+        let pool_accepted = state.pool_shares_accepted.clone();
+        let pool_rejected = state.pool_shares_rejected.clone();
+        let pool_last_error = state.pool_last_error.clone();
+        let pool_last_accepted_ts = state.pool_last_accepted_ts.clone();
         std::thread::spawn(move || {
             use std::io::BufRead;
             let mut prev_total: u64 = 0;
+            let mut prev_pool_ok: u64 = 0;
             let mut last_flush = Instant::now();
             loop {
                 if !mining.load(Ordering::SeqCst) { break; }
@@ -2373,6 +2395,13 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
                 let mut total = 0u64;
                 let mut total_stale = 0u64;
                 let mut last_hs: Option<f64> = None;
+                // Pool-mode state, recomputed from the full session log each pass (idempotent): connection, and
+                // shares SENT vs ACCEPTED vs REJECTED. A contribution counts only on share_accepted.
+                let mut p_sent = 0u64;
+                let mut p_ok = 0u64;
+                let mut p_rej = 0u64;
+                let mut p_conn = false;
+                let mut p_err: Option<String> = None;
                 for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
                     if let Ok(evt) = serde_json::from_str::<Value>(&line) {
                         match evt["event"].as_str() {
@@ -2392,6 +2421,25 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
                             // Circuit breaker tripped in the miner (repeated hard errors): stop cleanly so the UI
                             // doesn't keep showing "Mining" forever.
                             Some("fatal") => { mining.store(false, Ordering::SeqCst); ready.store(false, Ordering::SeqCst); }
+                            // ---- pool-mode events (honest and DISTINCT: sent != accepted != block) ----
+                            // "connected" means the pool ACCEPTED the login (we can actually mine), not just that a
+                            // TCP socket opened. So pool_connected (socket) does NOT flip it; pool_login does.
+                            Some("pool_connected") => {}
+                            Some("pool_login") => { p_conn = true; ready.store(true, Ordering::SeqCst); }
+                            Some("share_submitted") => { p_sent += 1; }
+                            Some("share_accepted") => { p_ok += 1; ready.store(true, Ordering::SeqCst); }
+                            Some("share_rejected") => {
+                                p_rej += 1;
+                                p_err = Some(match evt["reason"].as_str() {
+                                    Some(r) => format!("share rechazada: {r}"), None => "share rechazada".into() });
+                            }
+                            // A share met the NETWORK target: a real block found via the pool. Counts as a block.
+                            Some("pool_block") => { total += 1; ready.store(true, Ordering::SeqCst); }
+                            Some("pool_disconnected") => {
+                                p_conn = false;
+                                p_err = Some(match evt["reason"].as_str() {
+                                    Some(r) => format!("desconectado: {r}"), None => "desconectado".into() });
+                            }
                             _ => {}
                         }
                     }
@@ -2403,6 +2451,18 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
                 // Update the shown speed on every pass (from accepted OR periodic hashrate events), not only on new blocks.
                 if let Some(hs) = last_hs { *hashrate.lock().unwrap() = hs; }
                 stale.store(total_stale, Ordering::SeqCst); // recomputed each pass from the current session's log
+                // Pool status: publish the recomputed counters. Stamp the last-accepted time only when it grows.
+                pool_connected.store(p_conn, Ordering::SeqCst);
+                pool_sent.store(p_sent, Ordering::SeqCst);
+                pool_accepted.store(p_ok, Ordering::SeqCst);
+                pool_rejected.store(p_rej, Ordering::SeqCst);
+                if p_ok > prev_pool_ok {
+                    prev_pool_ok = p_ok;
+                    pool_last_accepted_ts.store(
+                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs()).unwrap_or(0), Ordering::SeqCst);
+                }
+                if let Some(e) = p_err { *pool_last_error.lock().unwrap() = e; }
             }
         });
     }
@@ -2485,6 +2545,19 @@ fn miner_status(state: State<AppState>) -> Value {
         // core count, shown alongside it so "24 cores / 32 threads" reads honestly (mining runs on threads).
         "cores": state.cores as u64,
         "physicalCores": physical_cores() as u64,
+        // Which mode the app is ACTUALLY running (normalised: never "pool" while POOL_ENABLED is off).
+        "mode": state.mining_mode.lock().unwrap().clone(),
+        // Pool-mode live status for the honest UI. `sharesSent` is what left the miner; `sharesAccepted` is what
+        // the pool CONFIRMED (a contribution counts only here). A sent share is not a paid share.
+        "pool": {
+            "enabled": POOL_ENABLED,
+            "connected": state.pool_connected.load(Ordering::SeqCst),
+            "sharesSent": state.pool_shares_sent.load(Ordering::SeqCst),
+            "sharesAccepted": state.pool_shares_accepted.load(Ordering::SeqCst),
+            "sharesRejected": state.pool_shares_rejected.load(Ordering::SeqCst),
+            "lastAcceptedTs": state.pool_last_accepted_ts.load(Ordering::SeqCst),
+            "lastError": state.pool_last_error.lock().unwrap().clone(),
+        },
         "totalSeconds": total
     })
 }
@@ -2925,6 +2998,12 @@ pub fn run() {
         tray_enabled: Arc::new(AtomicBool::new(true)),
         mining_mode: Arc::new(Mutex::new(init_mode)),
         pool_address: Arc::new(Mutex::new(init_pool)),
+        pool_connected: Arc::new(AtomicBool::new(false)),
+        pool_shares_sent: Arc::new(AtomicU64::new(0)),
+        pool_shares_accepted: Arc::new(AtomicU64::new(0)),
+        pool_shares_rejected: Arc::new(AtomicU64::new(0)),
+        pool_last_error: Arc::new(Mutex::new(String::new())),
+        pool_last_accepted_ts: Arc::new(AtomicU64::new(0)),
         pending_mnemonic: Arc::new(Mutex::new(None)),
         lang: Arc::new(Mutex::new("es".to_string())),
         tray: Arc::new(Mutex::new(None)),
