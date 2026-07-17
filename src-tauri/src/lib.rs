@@ -650,7 +650,13 @@ fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
     };
     let seeds = if isolated { "" } else { seeds };
     let conf = node_conf(&chain, net_lines, rpc_port(), seeds);
-    std::fs::write(state.datadir.join("bitcoin.conf"), conf).map_err(|e| e.to_string())?;
+    // Write atomically (temp file + rename). The app fully owns this file — it rewrites the whole thing on every
+    // start and there are no user-set options to preserve — but a crash MID-WRITE must never leave the node a
+    // half-written conf to read. rename() over the target is atomic on the same filesystem (Windows included).
+    let conf_path = state.datadir.join("bitcoin.conf");
+    let conf_tmp = state.datadir.join("bitcoin.conf.new");
+    std::fs::write(&conf_tmp, &conf).map_err(|e| e.to_string())?;
+    std::fs::rename(&conf_tmp, &conf_path).map_err(|e| e.to_string())?;
     // Remember how big the log is BEFORE launching, so we only ever read what THIS attempt writes.
     let mark = log_size(&state.datadir);
     let mut child = spawn_node(&bitcoind, &state.datadir, None)?;
