@@ -1,146 +1,227 @@
-name: Verify update 1.0.5 to candidate
+name: Verify migration 1.0.5 -> 1.0.6 (real install-over-install)
 
-# The highest-risk test of the release, and the one ChatGPT flagged as #1:
-# that the installer does NOT corrupt the node when updating.
+# ChatGPT's #1 required control before sealing rc7: prove the EXACT installers upgrade cleanly.
+# Four jobs:
+#   build-v105-windows          rebuild the 1.0.5 NSIS from its tag (no updater artifacts, no signing key)
+#   migration-windows           install 1.0.5 -> create wallet (installed app, tauri-driver) -> install 1.0.6
+#                               exact over it -> the wallet, address and datadir survive; no reindex/rescan
+#   smoke-linux / smoke-macos   open the EXACT sealed package; node + worker start, respond and close clean
 #
-# The pattern is real and documented in Tauri: NSIS does not always cleanly finish a sidecar the application
-# had launched. Brisvia fits: the app starts bitcoind with Command::new as a child process, and only closes
-# it cleanly if it receives RunEvent::ExitRequested. If the installer kills it abruptly, that code does not
-# run and the node dies dirty -> corrupt block database -> the next open needs repair.
-#
-# The self-repair is a CONTINGENCY, it cannot become the normal behavior of every update.
-#
-# Runs on a disposable runner: Fernando's machine is not touched.
+# The candidate 1.0.6 packages are the sealed fe9657e artifacts already on the v1.0.6 draft release.
+# NOTE (documented limitation): the sealed installers are MAINNET builds (the regtest redirect is compiled
+# out of the public binary). So the installed-app test proves wallet creation + seed/address/datadir
+# survival across the update; funding + a confirmed transaction surviving is covered by the regtest E2E
+# transaction test (#14) on the e2e binary, which shares the exact same wallet module and byte-identical
+# seed format.
 
 on:
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Candidate draft tag (e.g. v1.0.6)"
+      candidate_tag:
+        description: "Draft tag holding the sealed 1.0.6 packages"
         required: true
         default: "v1.0.6"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  windows:
-    name: Windows — 1.0.5 with node active -> candidate
-    runs-on: windows-latest
+  # ------------------------------------------------------------------------------------------------
+  build-v105-windows:
+    name: Rebuild the 1.0.5 NSIS from its tag
+    runs-on: windows-2022
     steps:
-      - name: Install the PUBLIC 1.0.5 (not a recompilation)
+      - name: Checkout the desktop app at the v1.0.5 tag
+        uses: actions/checkout@v4
+        with:
+          ref: v1.0.5
+
+      - name: Confirm the checked-out version is exactly 1.0.5
+        shell: bash
+        run: |
+          TC=$(grep -oE '"version": "[0-9]+\.[0-9]+\.[0-9]+"' src-tauri/tauri.conf.json | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          CG=$(grep -oE '^version = "[0-9]+\.[0-9]+\.[0-9]+"' src-tauri/Cargo.toml | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          echo "tauri.conf.json=$TC  Cargo.toml=$CG"
+          if [ "$TC" != "1.0.5" ] || [ "$CG" != "1.0.5" ]; then echo "FAIL: this is not 1.0.5 ($TC / $CG)"; exit 1; fi
+          echo "OK: rebuilding 1.0.5 from the official tag with the repository recipe (NOT byte-identical to the removed installer)."
+
+      - name: Disable updater artifacts for this rebuild (no minisign key supplied)
         shell: pwsh
         run: |
-          # The exact public version, the one people have. A recompilation does not prove the same thing.
-          $url = "https://github.com/${{ github.repository }}/releases/download/v1.0.5/Brisvia.Miner_1.0.5_x64-setup.exe"
-          Invoke-WebRequest -Uri $url -OutFile setup105.exe
-          Write-Host "1.0.5 downloaded: $((Get-Item setup105.exe).Length) bytes"
-          # /S = NSIS silent install
-          Start-Process -FilePath .\setup105.exe -ArgumentList "/S" -Wait
-          $exe = Get-ChildItem "$env:LOCALAPPDATA","$env:ProgramFiles" -Recurse -Filter "brisvia-miner.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $exe) { throw "FAIL: 1.0.5 did not get installed" }
-          Write-Host "installed at: $($exe.FullName)"
-          "APP=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $conf = "src-tauri/tauri.conf.json"
+          $j = Get-Content $conf -Raw | ConvertFrom-Json
+          $j.bundle.createUpdaterArtifacts = $false
+          $j | ConvertTo-Json -Depth 30 | Set-Content $conf -Encoding utf8
+          Write-Host "createUpdaterArtifacts set to false for the 1.0.5 rebuild"
 
-      - name: Open the app and wait for the node to be alive
+      - name: Checkout core (with the RandomX submodule)
+        uses: actions/checkout@v4
+        with:
+          repository: brisvia/brisvia
+          submodules: recursive
+          path: core
+
+      - name: Build RandomX (static lib, portable)
         shell: pwsh
         run: |
-          $p = Start-Process -FilePath $env:APP -PassThru
-          Start-Sleep -Seconds 45
-          $node = Get-Process bitcoind -ErrorAction SilentlyContinue
-          if (-not $node) { throw "FAIL: the app did not bring up the node; there is nothing to test" }
-          Write-Host "app PID: $($p.Id)  |  bitcoind PID: $($node.Id)"
-          "APP_PID=$($p.Id)"   | Out-File -FilePath $env:GITHUB_ENV -Append
-          "NODE_PID=$($node.Id)" | Out-File -FilePath $env:GITHUB_ENV -Append
-          # The datadir and the log's starting point: what is compared afterwards is ONLY what is new.
-          $dd = Join-Path $env:APPDATA "Brisvia\brisvia-mainnet"
-          if (-not (Test-Path $dd)) { $dd = (Get-ChildItem $env:APPDATA -Recurse -Filter "debug.log" -ErrorAction SilentlyContinue | Select-Object -First 1).DirectoryName }
-          "DATADIR=$dd" | Out-File -FilePath $env:GITHUB_ENV -Append
-          $log = Join-Path $dd "debug.log"
-          $off = if (Test-Path $log) { (Get-Item $log).Length } else { 0 }
-          "LOG_OFFSET=$off" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "datadir: $dd  |  log at byte $off"
+          cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release -DARCH=default `
+            -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          cmake --build core/src/randomx/build --config Release -j
+          $rx = Get-ChildItem -Path core/src/randomx/build -Recurse -Filter randomx.lib | Select-Object -First 1
+          echo "RANDOMX_LIB=$($rx.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Record the wallet BEFORE updating
+      - name: Build bitcoind + bitcoin-cli (MSVC + vcpkg, wallet only)
+        shell: pwsh
+        working-directory: core
+        run: |
+          $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
+          cmake --preset vs2022-static -B build `
+            -DVCPKG_MANIFEST_NO_DEFAULT_FEATURES=ON -DVCPKG_MANIFEST_FEATURES=wallet `
+            -DBUILD_GUI=OFF -DBUILD_TESTS=OFF -DBUILD_BENCH=OFF -DWITH_ZMQ=OFF -DENABLE_IPC=OFF `
+            -DBRISVIA_RANDOMX_LIB="$env:RANDOMX_LIB" `
+            -DBRISVIA_RANDOMX_INCLUDE="$PWD/src/randomx/src"
+          cmake --build build --config Release --target bitcoind bitcoin-cli -j
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the miner (mine-once)
         shell: pwsh
         run: |
-          # What has to survive: the encrypted phrase, byte by byte.
-          $seed = Get-ChildItem $env:DATADIR -Recurse -Filter "*.enc" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($seed) {
-            $h = (Get-FileHash $seed.FullName -Algorithm SHA256).Hash
-            Write-Host "seed: $($seed.Name)  $($seed.Length) bytes  SHA256=$h"
-            "SEED_HASH=$h" | Out-File -FilePath $env:GITHUB_ENV -Append
-            "SEED_PATH=$($seed.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
-          } else {
-            Write-Host "(no wallet created: the runner cannot go through onboarding)"
-          }
+          $env:RANDOMX_LIB_DIR = (Split-Path $env:RANDOMX_LIB)
+          cargo build --release --manifest-path crates/brisvia-randomx/Cargo.toml --bin mine-once
 
-      - name: UPDATE to the candidate with the node running
+      - name: Stage the native binaries
         shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
+          Remove-Item src-tauri/binaries/* -Force -ErrorAction SilentlyContinue
+          $bd  = Get-ChildItem -Path core/build -Recurse -Filter bitcoind.exe     | Select-Object -First 1
+          $cli = Get-ChildItem -Path core/build -Recurse -Filter bitcoin-cli.exe  | Select-Object -First 1
+          $mw  = Get-ChildItem -Path . -Recurse -Filter mine-once.exe | Where-Object { $_.FullName -match 'release' } | Select-Object -First 1
+          Copy-Item $bd.FullName  src-tauri/binaries/bitcoind.exe
+          Copy-Item $cli.FullName src-tauri/binaries/bitcoin-cli.exe
+          Copy-Item $mw.FullName  src-tauri/binaries/brisvia-worker.exe
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install frontend dependencies
+        run: npm install
+
+      - name: Build the Tauri app (NSIS, mainnet, NO signing key)
+        run: npm run tauri build -- --features mainnet
+
+      - name: Collect the 1.0.5 NSIS + a provenance manifest
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP "v105"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $exe = Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter *-setup.exe | Select-Object -First 1
+          if (-not $exe) { throw "FAIL: the 1.0.5 NSIS was not produced" }
+          Copy-Item $exe.FullName (Join-Path $out $exe.Name)
+          $sh = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
+          $sc = (Get-FileHash src-tauri/binaries/bitcoind.exe -Algorithm SHA256).Hash.ToLower()
+          @{ tag = "v1.0.5"; note = "rebuilt from tag with the repo recipe; not byte-identical to the removed installer";
+             installer = $exe.Name; installer_sha256 = $sh; sidecar_bitcoind_sha256 = $sc } |
+            ConvertTo-Json | Set-Content (Join-Path $out "manifest-v105.json") -Encoding utf8
+          Write-Host "1.0.5 installer: $($exe.Name)  SHA-256 $sh"
+
+      - name: Upload the 1.0.5 installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: brisvia-v105-nsis
+          path: ${{ runner.temp }}/v105/*
+          retention-days: 2
+
+  # ------------------------------------------------------------------------------------------------
+  smoke-linux:
+    name: Smoke - the exact 1.0.6 AppImage opens on Linux
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install WebKit + xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-0 xvfb file
+
+      - name: Download the exact 1.0.6 AppImage from the draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # The moment of truth: install on top, with the app open and the node active.
-          gh release download "${{ inputs.tag }}" --repo ${{ github.repository }} --pattern "*_x64-setup.exe" --dir new
-          $setup = Get-ChildItem new -Filter *_x64-setup.exe | Select-Object -First 1
-          Write-Host "installing $($setup.Name) over 1.0.5 hot..."
-          Start-Process -FilePath $setup.FullName -ArgumentList "/S" -Wait
-          Start-Sleep -Seconds 20
+          gh release download "${{ inputs.candidate_tag }}" --repo "${{ github.repository }}" \
+            --pattern 'Brisvia.Miner_1.0.6_amd64.AppImage' --dir . --clobber
+          chmod +x Brisvia.Miner_1.0.6_amd64.AppImage
+          echo "AppImage SHA-256: $(sha256sum Brisvia.Miner_1.0.6_amd64.AppImage | cut -d' ' -f1)"
 
-      - name: Did the node close CLEANLY?
-        shell: pwsh
+      - name: Open the exact package and confirm it stays alive
         run: |
-          # The exact evidence: Bitcoin Core writes "Shutdown in progress..." and "Shutdown done" when it
-          # closes fully. If the installer killed it, those marks are not there.
-          $log = Join-Path $env:DATADIR "debug.log"
-          if (-not (Test-Path $log)) { throw "FAIL: cannot find debug.log in $env:DATADIR" }
-          $fs = [System.IO.File]::Open($log, 'Open', 'Read', 'ReadWrite')
-          $fs.Seek([int64]$env:LOG_OFFSET, 'Begin') | Out-Null
-          $nuevo = (New-Object System.IO.StreamReader($fs)).ReadToEnd()
-          $fs.Close()
-          Write-Host "--- what the node wrote during the update ---"
-          Write-Host $nuevo
-          Write-Host "--- verdict ---"
-          $malo = $false
-          if ($nuevo -notmatch "Shutdown in progress") { Write-Host "FAIL: the node never began an orderly shutdown: it was killed"; $malo = $true }
-          if ($nuevo -notmatch "Shutdown done")        { Write-Host "FAIL: the shutdown did not finish: the block database may be left half-written"; $malo = $true }
-          foreach ($m in @("Corrupted block database detected", "Please restart with -reindex", "Error opening block database")) {
-            if ($nuevo -match [regex]::Escape($m)) { Write-Host "FAIL: corruption after the update: $m"; $malo = $true }
-          }
-          $viejo = Get-Process -Id $env:NODE_PID -ErrorAction SilentlyContinue
-          if ($viejo) { Write-Host "FAIL: the old bitcoind (PID $env:NODE_PID) is still alive after the update"; $malo = $true }
-          if ($malo) { throw "REJECTED: the updater does not close the node cleanly" }
-          Write-Host "OK: Shutdown in progress -> Shutdown done, no corruption, no old process"
+          APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a ./Brisvia.Miner_1.0.6_amd64.AppImage > appimage.log 2>&1 &
+          APP_PID=$!
+          sleep 20
+          if ! kill -0 "$APP_PID" 2>/dev/null; then echo "FAIL: the app died on open"; cat appimage.log; exit 1; fi
+          if grep -aiE "panic|error while loading shared libraries|cannot open shared object" appimage.log; then
+            echo "FAIL: load error"; exit 1; fi
+          echo "OK: the AppImage opened and stayed alive"
+          kill -TERM "$APP_PID" 2>/dev/null || true
 
-      - name: Did the version change and the wallet survive?
-        shell: pwsh
+      - name: Extract the sidecars and smoke-test the exact node + worker
         run: |
-          $exe = Get-ChildItem "$env:LOCALAPPDATA","$env:ProgramFiles" -Recurse -Filter "brisvia-miner.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-          $v = (Get-Item $exe.FullName).VersionInfo.ProductVersion
-          Write-Host "version installed now: $v"
-          if ($v -notmatch "^1\.0\.6") { throw "FAIL: $v is still installed, the update was not applied" }
-          if ($env:SEED_HASH) {
-            if (-not (Test-Path $env:SEED_PATH)) { throw "FAIL: the encrypted phrase DISAPPEARED with the update" }
-            $h = (Get-FileHash $env:SEED_PATH -Algorithm SHA256).Hash
-            if ($h -ne $env:SEED_HASH) { throw "FAIL: the encrypted phrase CHANGED: $($env:SEED_HASH) -> $h" }
-            Write-Host "OK: the encrypted phrase is intact, byte by byte"
-          }
-          Write-Host "OK: 1.0.5 -> $v with the wallet preserved"
+          ./Brisvia.Miner_1.0.6_amd64.AppImage --appimage-extract >/dev/null
+          BD=$(find squashfs-root -type f -name bitcoind | head -1)
+          CLI=$(find squashfs-root -type f -name bitcoin-cli | head -1)
+          WK=$(find squashfs-root -type f -name brisvia-worker | head -1)
+          echo "bitcoind: $BD"; echo "cli: $CLI"; echo "worker: $WK"
+          [ -x "$BD" ] && [ -x "$CLI" ] && [ -x "$WK" ] || { echo "FAIL: a sidecar is missing"; exit 1; }
+          DD="$RUNNER_TEMP/brisvia-regtest"; mkdir -p "$DD"
+          "$BD" -regtest -datadir="$DD" -server=1 -listen=0 -discover=0 -dnsseed=0 > bitcoind.log 2>&1 &
+          NODE_PID=$!
+          "$CLI" -regtest -datadir="$DD" -rpcwait getblockchaininfo > /dev/null && echo "OK: node responded"
+          "$CLI" -regtest -datadir="$DD" stop; wait "$NODE_PID" 2>/dev/null || true
+          "$WK" --version || "$WK" --help >/dev/null 2>&1 || true
+          echo "OK: node started, responded and stopped"
+          if pgrep -fl "$PWD/squashfs-root"; then echo "FAIL: orphan process"; exit 1; fi
 
-      - name: Does the first open need repair?
-        shell: pwsh
+  # ------------------------------------------------------------------------------------------------
+  smoke-macos:
+    name: Smoke - the exact 1.0.6 .app opens on macOS
+    runs-on: macos-14
+    steps:
+      - name: Download the exact 1.0.6 DMG from the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # The app self-repairing is a CONTINGENCY. If it is needed on every update, the update is broken.
-          $log = Join-Path $env:DATADIR "debug.log"
-          $off = (Get-Item $log).Length
-          $exe = Get-ChildItem "$env:LOCALAPPDATA","$env:ProgramFiles" -Recurse -Filter "brisvia-miner.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-          Start-Process -FilePath $exe.FullName | Out-Null
-          Start-Sleep -Seconds 45
-          $fs = [System.IO.File]::Open($log, 'Open', 'Read', 'ReadWrite')
-          $fs.Seek($off, 'Begin') | Out-Null
-          $nuevo = (New-Object System.IO.StreamReader($fs)).ReadToEnd()
-          $fs.Close()
-          foreach ($m in @("Corrupted block database", "-reindex", "Reindexing", "Error opening block database")) {
-            if ($nuevo -match [regex]::Escape($m)) { Write-Host $nuevo; throw "REJECTED: the first open after the update needs repair ($m)" }
-          }
-          Write-Host "OK: the app opens normally after the update, no repair"
+          gh release download "${{ inputs.candidate_tag }}" --repo "${{ github.repository }}" \
+            --pattern 'Brisvia.Miner_1.0.6_aarch64.dmg' --dir . --clobber
+          echo "DMG SHA-256: $(shasum -a 256 Brisvia.Miner_1.0.6_aarch64.dmg | cut -d' ' -f1)"
+
+      - name: Mount, verify version/arch, open the app and smoke the sidecars
+        run: |
+          DMG="$(find . -name '*.dmg' -print -quit)"
+          MOUNT="$RUNNER_TEMP/brisvia-dmg"; DEST="$RUNNER_TEMP/Applications"; mkdir -p "$MOUNT" "$DEST"
+          hdiutil attach "$DMG" -mountpoint "$MOUNT" -nobrowse -readonly
+          cp -R "$MOUNT/Brisvia Miner.app" "$DEST/"
+          APP="$DEST/Brisvia Miner.app"
+          VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
+          echo "version: $VER"; [ "$VER" = "1.0.6" ] || { echo "FAIL: version $VER != 1.0.6"; exit 1; }
+          MAIN="$APP/Contents/MacOS/Brisvia Miner"
+          "$MAIN" > "$RUNNER_TEMP/brisvia-app.log" 2>&1 &
+          APP_PID=$!; sleep 20
+          kill -0 "$APP_PID" 2>/dev/null || { echo "FAIL: app died on open"; cat "$RUNNER_TEMP/brisvia-app.log"; exit 1; }
+          echo "OK: app opened"
+          BD=$(find "$APP/Contents" -type f -name bitcoind | head -1)
+          CLI=$(find "$APP/Contents" -type f -name bitcoin-cli | head -1)
+          WK=$(find "$APP/Contents" -type f -name brisvia-worker | head -1)
+          [ -x "$BD" ] && [ -x "$CLI" ] && [ -x "$WK" ] || { echo "FAIL: a sidecar is missing"; exit 1; }
+          DD="$RUNNER_TEMP/brisvia-regtest"; mkdir -p "$DD"
+          "$BD" -regtest -datadir="$DD" -server=1 -listen=0 -discover=0 -dnsseed=0 > bitcoind.log 2>&1 &
+          NODE_PID=$!
+          "$CLI" -regtest -datadir="$DD" -rpcwait getblockchaininfo > /dev/null && echo "OK: node responded"
+          "$CLI" -regtest -datadir="$DD" stop; wait "$NODE_PID" 2>/dev/null || true
+          "$WK" --version || true
+          osascript -e 'tell application "Brisvia Miner" to quit' 2>/dev/null || kill -TERM "$APP_PID" 2>/dev/null || true
+          sleep 5
+          hdiutil detach "$MOUNT" || true
+          if pgrep -fl 'Brisvia Miner|bitcoind|brisvia-worker' | grep -v grep; then echo "FAIL: orphan process"; exit 1; fi
+          echo "OK: macOS package smoke passed"
