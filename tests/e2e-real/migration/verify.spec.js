@@ -1,14 +1,15 @@
-// Migration test, step 2 (runs on the INSTALLED 1.0.6 after installing it over 1.0.5, same datadir).
+// Migration test, step 2 (runs on the INSTALLED 1.0.8 after installing it over 1.0.7, same datadir).
 // Proves the update kept the wallet: the app opens STRAIGHT to the wallet (no onboarding, so no new
 // wallet was silently created), and the SAME password decrypts the seed (revealing the phrase returns
 // twelve words). The byte-for-byte survival of wallet_seed.enc and the no-reindex check are asserted by
 // the workflow around this spec; here we prove the wallet is functionally the same one, unlocked by the
-// same password, through the real installed app.
+// same password, through the real installed app. We also confirm the shipped binary runs with pool mining
+// OFF (POOL_ENABLED=false) at RUNTIME, not just in source.
 'use strict';
 
 const PASSWORD = 'brisvia-e2e-1234';
 
-describe('Migration verify — the wallet survived the update (installed 1.0.6)', () => {
+describe('Migration verify — the wallet survived the update (installed 1.0.8)', () => {
   it('opens straight to the wallet (no new wallet) and unlocks with the same password', async () => {
     const walletView = await $('[data-testid="view-wallet"]');
     const welcome = await $('[data-testid="onb-welcome"]');
@@ -18,6 +19,11 @@ describe('Migration verify — the wallet survived the update (installed 1.0.6)'
     // If onboarding reappears, the update lost the wallet (or created a new one): a hard fail.
     expect(await welcome.isDisplayed()).toBe(false);
     await walletView.waitForDisplayed({ timeout: 15000 });
+
+    // The shipped 1.0.8 binary must run with pool mining OFF. Read it from the REAL app's status (not the
+    // source): POOL_ENABLED is a hardcoded const, so the running binary reports poolEnabled=false.
+    const status = await browser.execute(async () => await window.brisvia.getStatus());
+    expect(status && status.poolEnabled).toBe(false);
 
     // The same password must decrypt the seed. Reveal shows twelve words only if wallet_seed.enc opened
     // with this password — proving the encrypted seed survived and stays readable by 1.0.6.
