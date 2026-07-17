@@ -9,6 +9,13 @@ edition = "2021"
 name = "brisvia_miner_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# Test-only helper binary for the macOS/Linux migration jobs. `required-features` keeps it OUT of every normal
+# build (the whole thing, and its seed crypto entry point, compile only with --features e2e; never shipped).
+[[bin]]
+name = "e2e-wallet-helper"
+path = "src/bin/e2e_wallet_helper.rs"
+required-features = ["e2e"]
+
 [features]
 # Build the app against the real network (mainnet). Without this flag the app targets
 # the shared test network (testnet). Only three network constants differ between builds.
