@@ -250,6 +250,7 @@ fn main() {
                 PoolEvent::ShareStale => println!("{}", json!({"event":"stale"})),
                 PoolEvent::BlockFound => println!("{}", json!({"event":"pool_block"})),
                 PoolEvent::TargetChangeIgnored => {}
+                PoolEvent::Suspended { retry_after } => println!("{}", json!({"event":"pool_suspended","retry_after":retry_after})),
                 PoolEvent::Disconnected(msg) => println!("{}", json!({"event":"pool_disconnected","reason":msg})),
             }
         });

@@ -349,8 +349,13 @@ async function refreshMine() {
       $('#pool-accepted').textContent = window.I18N.fmtNum(p.sharesAccepted || 0);
       $('#pool-sent').textContent = window.I18N.fmtNum(p.sharesSent || 0);
       const connected = !!p.connected;
-      $('#pool-conn-dot').className = 'conn-dot ' + (connected ? 'on' : (mining ? 'wait' : 'off'));
-      $('#pool-conn-text').textContent = connected ? T('pool.connected') : (mining ? T('pool.connecting') : T('pool.disconnected'));
+      // Maintenance is a distinct, honest state: the pool told us it is paused. Not an error, not a disconnect,
+      // and the miner is NOT falling to solo — it keeps reconnecting. Show it plainly, never as a failure.
+      const suspended = !!p.suspended;
+      $('#pool-conn-dot').className = 'conn-dot ' + (connected ? 'on' : ((suspended || mining) ? 'wait' : 'off'));
+      $('#pool-conn-text').textContent = suspended
+        ? T('pool.maintenance')
+        : (connected ? T('pool.connected') : (mining ? T('pool.connecting') : T('pool.disconnected')));
       const la = $('#pool-last-accepted');
       if (p.lastAcceptedTs > 0) {
         la.hidden = false;
@@ -361,7 +366,8 @@ async function refreshMine() {
       // Speed in pool mode: the pool worker does not emit a per-second hashrate yet, so avoid a misleading
       // "0 H/s" — say "measuring" while connected. The honest work signal here is accepted shares (above).
       // Emitting the real pool hashrate is a tracked follow-up, validated against the live pool.
-      if (mining && connected && (s.hashrate || 0) === 0) $('#m-speed').textContent = T('pool.measuring');
+      if (suspended) $('#m-speed').textContent = T('pool.maintenance');
+      else if (mining && connected && (s.hashrate || 0) === 0) $('#m-speed').textContent = T('pool.measuring');
     }
   }
   // Real core count -> power label ("50% · 16 of 32 cores").

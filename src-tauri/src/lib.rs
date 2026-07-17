@@ -108,6 +108,7 @@ struct AppState {
     pool_shares_accepted: Arc<AtomicU64>,
     pool_shares_rejected: Arc<AtomicU64>,
     pool_last_error: Arc<Mutex<String>>,
+    pool_suspended: Arc<AtomicBool>, // the pool told us it is under maintenance (distinct from an error/disconnect)
     pool_last_accepted_ts: Arc<AtomicU64>, // unix seconds of the last accepted share (0 = none yet)
     // Freshly generated mnemonic, kept ONLY in memory to verify the backup; wiped after confirmation. Never persisted.
     pending_mnemonic: Arc<Mutex<Option<String>>>,
@@ -2286,6 +2287,7 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
         state.pool_shares_accepted.store(0, Ordering::SeqCst);
         state.pool_shares_rejected.store(0, Ordering::SeqCst);
         state.pool_last_accepted_ts.store(0, Ordering::SeqCst);
+        state.pool_suspended.store(false, Ordering::SeqCst);
         *state.pool_last_error.lock().unwrap() = String::new();
     }
 
@@ -2399,6 +2401,7 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
         let pool_accepted = state.pool_shares_accepted.clone();
         let pool_rejected = state.pool_shares_rejected.clone();
         let pool_last_error = state.pool_last_error.clone();
+        let pool_suspended = state.pool_suspended.clone();
         let pool_last_accepted_ts = state.pool_last_accepted_ts.clone();
         std::thread::spawn(move || {
             use std::io::BufRead;
@@ -2426,6 +2429,7 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
                 let mut p_ok = 0u64;
                 let mut p_rej = 0u64;
                 let mut p_conn = false;
+                let mut p_susp = false;
                 let mut p_err: Option<String> = None;
                 for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
                     if let Ok(evt) = serde_json::from_str::<Value>(&line) {
@@ -2450,7 +2454,7 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
                             // "connected" means the pool ACCEPTED the login (we can actually mine), not just that a
                             // TCP socket opened. So pool_connected (socket) does NOT flip it; pool_login does.
                             Some("pool_connected") => {}
-                            Some("pool_login") => { p_conn = true; ready.store(true, Ordering::SeqCst); }
+                            Some("pool_login") => { p_conn = true; p_susp = false; ready.store(true, Ordering::SeqCst); }
                             Some("share_submitted") => { p_sent += 1; }
                             Some("share_accepted") => { p_ok += 1; ready.store(true, Ordering::SeqCst); }
                             Some("share_rejected") => {
@@ -2465,6 +2469,10 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
                                 p_err = Some(match evt["reason"].as_str() {
                                     Some(r) => format!("desconectado: {r}"), None => "desconectado".into() });
                             }
+                            // The pool is under MAINTENANCE (explicit), not a crash or an error. Not connected
+                            // for mining, but the UI must say "en mantenimiento", never "error" or "solo". The
+                            // miner keeps reconnecting on its own; clear any stale error so nothing scary lingers.
+                            Some("pool_suspended") => { p_conn = false; p_susp = true; p_err = None; }
                             _ => {}
                         }
                     }
@@ -2478,6 +2486,7 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
                 stale.store(total_stale, Ordering::SeqCst); // recomputed each pass from the current session's log
                 // Pool status: publish the recomputed counters. Stamp the last-accepted time only when it grows.
                 pool_connected.store(p_conn, Ordering::SeqCst);
+                pool_suspended.store(p_susp, Ordering::SeqCst);
                 pool_sent.store(p_sent, Ordering::SeqCst);
                 pool_accepted.store(p_ok, Ordering::SeqCst);
                 pool_rejected.store(p_rej, Ordering::SeqCst);
@@ -2577,6 +2586,7 @@ fn miner_status(state: State<AppState>) -> Value {
         "pool": {
             "enabled": POOL_ENABLED,
             "connected": state.pool_connected.load(Ordering::SeqCst),
+            "suspended": state.pool_suspended.load(Ordering::SeqCst),
             "sharesSent": state.pool_shares_sent.load(Ordering::SeqCst),
             "sharesAccepted": state.pool_shares_accepted.load(Ordering::SeqCst),
             "sharesRejected": state.pool_shares_rejected.load(Ordering::SeqCst),
@@ -3024,6 +3034,7 @@ pub fn run() {
         mining_mode: Arc::new(Mutex::new(init_mode)),
         pool_address: Arc::new(Mutex::new(init_pool)),
         pool_connected: Arc::new(AtomicBool::new(false)),
+        pool_suspended: Arc::new(AtomicBool::new(false)),
         pool_shares_sent: Arc::new(AtomicU64::new(0)),
         pool_shares_accepted: Arc::new(AtomicU64::new(0)),
         pool_shares_rejected: Arc::new(AtomicU64::new(0)),

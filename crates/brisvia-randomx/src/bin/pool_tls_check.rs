@@ -91,6 +91,9 @@ fn main() {
             eprintln!("   FAIL: the pool did not give a clear answer -> {m}");
             std::process::exit(1);
         }
+        Err(LoginError::Suspended { message, retry_after }) => {
+            println!("   OK: the pool is under maintenance -> {message} (retry_after={retry_after:?})");
+        }
     }
     c.shutdown();
     println!("\nOK: the encrypted miner -> pool path works end to end.");
