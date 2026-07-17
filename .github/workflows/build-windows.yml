@@ -47,6 +47,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: brisvia/brisvia
+          # Pin the node source to the commit with the mainnet port move (P2P 9342, RPC 9338). Core `main` still
+          # has Litecoin's old 9333/9332; the fix lives on mainnet-ports-9342 (one commit ahead, same genesis).
+          # Without this pin the packaged node shipped on 9333. TODO: merge that branch into main, then drop the pin.
+          ref: 69c48b2dfcf20fba70f6b5aef6958786e61ab7ed
           submodules: recursive
           path: core
 
