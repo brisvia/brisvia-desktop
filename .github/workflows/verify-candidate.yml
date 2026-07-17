@@ -64,6 +64,7 @@ jobs:
           "CLI=$($cli.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Does the DISTRIBUTED node open on a user's machine?
+        shell: bash # bash script (python3, 2>/dev/null, ||); on Windows the default shell is pwsh and breaks it
         run: |
           # On the sidecar taken from the FINAL DOWNLOADED PACKAGE, not on the compiler's binary.
           # Compiling does not prove portability; packaging does not either. The only thing that counts is
@@ -145,6 +146,7 @@ jobs:
           ldd "$NODE" | grep -i "not found" && { echo "FAIL: the installed node is missing libraries"; exit 1; } || echo "  all libraries resolved"
 
       - name: Does the DISTRIBUTED node open on a user's machine?
+        shell: bash # bash script (python3, 2>/dev/null, ||); on Windows the default shell is pwsh and breaks it
         run: |
           # On the sidecar taken from the FINAL DOWNLOADED PACKAGE, not on the compiler's binary.
           # Compiling does not prove portability; packaging does not either. The only thing that counts is
@@ -214,6 +216,7 @@ jobs:
           echo "sidecar: $NODE  ($(shasum -a 256 "$NODE" | cut -d' ' -f1))"
 
       - name: Does the DISTRIBUTED node open on a user's machine?
+        shell: bash # bash script (python3, 2>/dev/null, ||); on Windows the default shell is pwsh and breaks it
         run: |
           # On the sidecar taken from the FINAL DOWNLOADED PACKAGE, not on the compiler's binary.
           # Compiling does not prove portability; packaging does not either. The only thing that counts is
