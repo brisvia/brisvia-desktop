@@ -22,7 +22,13 @@ Ready-to-run installers for each release are on the
 [Releases page](https://github.com/brisvia/brisvia-desktop/releases/latest):
 
 - **Windows** — `Brisvia-Miner-Windows.exe` (installer)
-- **macOS** — `Brisvia-Miner-macOS.dmg`
+- **macOS** — `Brisvia-Miner-macOS.dmg` (Apple Silicon)
+- **Linux** — `Brisvia-Miner-Linux.AppImage` or the `.deb` package
+
+On Windows, SmartScreen may warn that the publisher is new — choose **More info → Run anyway**. On macOS,
+the app is not notarized yet — right-click the app and choose **Open**. Every download can be verified
+against the SHA-256 hashes published in the
+[release notes](https://github.com/brisvia/brisvia-desktop/releases/latest).
 
 After installing, open Brisvia Miner, create or restore a wallet from your 12 words, and press **Start** to
 mine — no configuration and no command line required. The app updates itself when a new signed version is
@@ -36,8 +42,11 @@ and the RandomX mining engine. The RandomX worker lives in `crates/brisvia-rando
 
 ## Status
 
-This is early, experimental software running against the Brisvia **test network**. Test coins have no
-monetary value. Always keep your 12 backup words safe and never share your private keys.
+Brisvia Miner 1.0.7 is the first public release, built for the Brisvia **main network**. Mining opens at the
+network launch on **August 1, 2026 at 15:00 UTC**; until then you can already create or restore your wallet
+and get everything ready. Solo mining is available from launch, and the official 0%-fee pool follows through
+an automatic signed update. From this version on, new releases are delivered automatically. Always keep your
+12 backup words safe and never share your private keys.
 
 ## Building from source
 
