@@ -1,11 +1,13 @@
 name: Verify migration 1.0.7 -> 1.0.8 (real install-over-install)
 
-# ChatGPT's #1 required control before sealing rc7: prove the EXACT installers upgrade cleanly.
-# Four jobs:
-#   build-v107-windows          rebuild the 1.0.7 NSIS from its tag (no updater artifacts, no signing key)
-#   migration-windows           install 1.0.7 -> create wallet (installed app, tauri-driver) -> install 1.0.8
-#                               exact over it -> the wallet, address and datadir survive; no reindex/rescan
-#   smoke-linux / smoke-macos   open the EXACT sealed package; node + worker start, respond and close clean
+# Required control before publishing: prove the EXACT installers upgrade cleanly. Jobs:
+#   migration-windows           download the PUBLISHED, SHA-256-pinned 1.0.7 (the real base users have) -> create
+#                               wallet (installed app, tauri-driver) -> install 1.0.8 exact over it -> the wallet,
+#                               address and datadir survive; no reindex/rescan
+#   migration-linux / -macos    headless: a feature-gated helper writes a throwaway wallet with the REAL crypto,
+#                               run the exact 1.0.7 then 1.0.8 packages over it, assert byte-identical survival +
+#                               the packaged node binds P2P 9342 / RPC 9338 and never 9332/9333
+#   smoke-linux / smoke-macos   open the EXACT sealed 1.0.8 package; node + worker start, respond and close clean
 #
 # The candidate 1.0.8 packages are the sealed artifacts already on the v1.0.8 draft release.
 # NOTE (documented limitation): the sealed installers are MAINNET builds (the regtest redirect is compiled
@@ -26,116 +28,6 @@ permissions:
   contents: write # draft releases are only visible to write-level tokens
 
 jobs:
-  # ------------------------------------------------------------------------------------------------
-  build-v107-windows:
-    name: Rebuild the 1.0.7 NSIS from its tag
-    runs-on: windows-2022
-    steps:
-      - name: Checkout the desktop app at the v1.0.7 tag
-        uses: actions/checkout@v4
-        with:
-          ref: v1.0.7
-
-      - name: Confirm the checked-out version is exactly 1.0.7
-        shell: bash
-        run: |
-          TC=$(grep -oE '"version": "[0-9]+\.[0-9]+\.[0-9]+"' src-tauri/tauri.conf.json | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-          CG=$(grep -oE '^version = "[0-9]+\.[0-9]+\.[0-9]+"' src-tauri/Cargo.toml | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-          echo "tauri.conf.json=$TC  Cargo.toml=$CG"
-          if [ "$TC" != "1.0.7" ] || [ "$CG" != "1.0.7" ]; then echo "FAIL: this is not 1.0.7 ($TC / $CG)"; exit 1; fi
-          echo "OK: rebuilding 1.0.7 from the official tag with the repository recipe (NOT byte-identical to the removed installer)."
-
-      - name: Disable updater artifacts for this rebuild (no minisign key supplied)
-        shell: pwsh
-        run: |
-          $conf = "src-tauri/tauri.conf.json"
-          $j = Get-Content $conf -Raw | ConvertFrom-Json
-          $j.bundle.createUpdaterArtifacts = $false
-          $j | ConvertTo-Json -Depth 30 | Set-Content $conf -Encoding utf8
-          Write-Host "createUpdaterArtifacts set to false for the 1.0.7 rebuild"
-
-      - name: Checkout core (with the RandomX submodule)
-        uses: actions/checkout@v4
-        with:
-          repository: brisvia/brisvia
-          submodules: recursive
-          path: core
-
-      - name: Build RandomX (static lib, portable)
-        shell: pwsh
-        run: |
-          cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release -DARCH=default `
-            -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
-          cmake --build core/src/randomx/build --config Release -j
-          $rx = Get-ChildItem -Path core/src/randomx/build -Recurse -Filter randomx.lib | Select-Object -First 1
-          echo "RANDOMX_LIB=$($rx.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      - name: Build bitcoind + bitcoin-cli (MSVC + vcpkg, wallet only)
-        shell: pwsh
-        working-directory: core
-        run: |
-          $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
-          cmake --preset vs2022-static -B build `
-            -DVCPKG_MANIFEST_NO_DEFAULT_FEATURES=ON -DVCPKG_MANIFEST_FEATURES=wallet `
-            -DBUILD_GUI=OFF -DBUILD_TESTS=OFF -DBUILD_BENCH=OFF -DWITH_ZMQ=OFF -DENABLE_IPC=OFF `
-            -DBRISVIA_RANDOMX_LIB="$env:RANDOMX_LIB" `
-            -DBRISVIA_RANDOMX_INCLUDE="$PWD/src/randomx/src"
-          cmake --build build --config Release --target bitcoind bitcoin-cli -j
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build the miner (mine-once)
-        shell: pwsh
-        run: |
-          $env:RANDOMX_LIB_DIR = (Split-Path $env:RANDOMX_LIB)
-          cargo build --release --manifest-path crates/brisvia-randomx/Cargo.toml --bin mine-once
-
-      - name: Stage the native binaries
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
-          Remove-Item src-tauri/binaries/* -Force -ErrorAction SilentlyContinue
-          $bd  = Get-ChildItem -Path core/build -Recurse -Filter bitcoind.exe     | Select-Object -First 1
-          $cli = Get-ChildItem -Path core/build -Recurse -Filter bitcoin-cli.exe  | Select-Object -First 1
-          $mw  = Get-ChildItem -Path . -Recurse -Filter mine-once.exe | Where-Object { $_.FullName -match 'release' } | Select-Object -First 1
-          Copy-Item $bd.FullName  src-tauri/binaries/bitcoind.exe
-          Copy-Item $cli.FullName src-tauri/binaries/bitcoin-cli.exe
-          Copy-Item $mw.FullName  src-tauri/binaries/brisvia-worker.exe
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install frontend dependencies
-        run: npm install
-
-      - name: Build the Tauri app (NSIS, mainnet, NO signing key)
-        run: npm run tauri build -- --features mainnet
-
-      - name: Collect the 1.0.7 NSIS + a provenance manifest
-        shell: pwsh
-        run: |
-          $out = Join-Path $env:RUNNER_TEMP "v107"
-          New-Item -ItemType Directory -Force -Path $out | Out-Null
-          $exe = Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter *-setup.exe | Select-Object -First 1
-          if (-not $exe) { throw "FAIL: the 1.0.7 NSIS was not produced" }
-          Copy-Item $exe.FullName (Join-Path $out $exe.Name)
-          $sh = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
-          $sc = (Get-FileHash src-tauri/binaries/bitcoind.exe -Algorithm SHA256).Hash.ToLower()
-          @{ tag = "v1.0.7"; note = "rebuilt from tag with the repo recipe; not byte-identical to the removed installer";
-             installer = $exe.Name; installer_sha256 = $sh; sidecar_bitcoind_sha256 = $sc } |
-            ConvertTo-Json | Set-Content (Join-Path $out "manifest-v107.json") -Encoding utf8
-          Write-Host "1.0.7 installer: $($exe.Name)  SHA-256 $sh"
-
-      - name: Upload the 1.0.7 installer artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: brisvia-v107-nsis
-          path: ${{ runner.temp }}/v107/*
-          retention-days: 2
-
   # ------------------------------------------------------------------------------------------------
   smoke-linux:
     name: Smoke - the exact 1.0.8 AppImage opens on Linux
@@ -254,7 +146,6 @@ jobs:
 
   migration-windows:
     name: Windows - install 1.0.7, create wallet, install 1.0.8 over it, wallet survives
-    needs: build-v107-windows
     runs-on: windows-2022
     steps:
       - name: Checkout desktop app (specs + wdio config)
@@ -284,11 +175,20 @@ jobs:
           "TMP=$temp"               | Out-File $env:GITHUB_ENV -Append
           "INSTALL_DIR=$installDir" | Out-File $env:GITHUB_ENV -Append
 
-      - name: Download the rebuilt 1.0.7 NSIS
-        uses: actions/download-artifact@v4
-        with:
-          name: brisvia-v107-nsis
-          path: v107
+      - name: Download + verify the PUBLISHED 1.0.7 installer (the real base users update from — no rebuild)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          gh release download v1.0.7 --repo "${{ github.repository }}" --pattern 'Brisvia.Miner_1.0.7_x64-setup.exe' --dir v107 --clobber
+          # Pin the exact published asset by its known, minisign-verified SHA-256, and fail if it ever changes or
+          # disappears — so the migration always installs the authentic 1.0.7 users actually have, never a swap.
+          EXPECTED=fcf81eb6212db98f440505abc5a711e48ac9659c193114897487640431776a55
+          GOT=$(sha256sum "v107/Brisvia.Miner_1.0.7_x64-setup.exe" | cut -d' ' -f1)
+          echo "1.0.7 setup.exe sha256: $GOT"
+          [ "$GOT" = "$EXPECTED" ] || { echo "FAIL: the published 1.0.7 installer changed or is missing ($GOT != $EXPECTED)"; exit 1; }
+          echo "OK: the published 1.0.7 installer matches its known signed SHA-256"
 
       - name: Install 1.0.7
         shell: pwsh
