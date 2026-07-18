@@ -266,9 +266,11 @@ jobs:
           $cli = Get-ChildItem $env:INSTALL_DIR -Recurse -Filter bitcoin-cli.exe  | Select-Object -First 1
           if (-not $bd -or -not $cli) { throw "FAIL: the packaged node was not found in the install" }
           $ddp = Join-Path $env:RUNNER_TEMP "ports"; New-Item -ItemType Directory -Force $ddp | Out-Null
-          "chain=brisvia`nserver=1`nlisten=1`ndiscover=0`ndnsseed=0`n[brisvia]`nrpcport=9338`nrpcbind=127.0.0.1`nrpcallowip=127.0.0.1" | Set-Content (Join-Path $ddp "bitcoin.conf") -Encoding ascii
+          # Explicit rpcuser/rpcpassword (not the cookie): bitcoin-cli was not reading the chain and could not
+          # locate the cookie under the brisvia-mainnet subdir on Windows. A fixed user/pass removes that dependency.
+          "chain=brisvia`nserver=1`nlisten=1`ndiscover=0`ndnsseed=0`nrpcuser=e2e`nrpcpassword=e2e`n[brisvia]`nrpcport=9338`nrpcbind=127.0.0.1`nrpcallowip=127.0.0.1" | Set-Content (Join-Path $ddp "bitcoin.conf") -Encoding ascii
           $node = Start-Process -FilePath $bd.FullName -ArgumentList "-datadir=$ddp","-conf=$ddp\bitcoin.conf" -PassThru -WindowStyle Hidden
-          & $cli.FullName "-datadir=$ddp" "-rpcport=9338" "-rpcwait" "-rpcwaittimeout=90" getblockchaininfo | Out-Null
+          & $cli.FullName "-datadir=$ddp" "-rpcport=9338" "-rpcuser=e2e" "-rpcpassword=e2e" "-rpcwait" "-rpcwaittimeout=90" getblockchaininfo | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "FAIL: RPC did not respond on 9338" }
           Write-Host "OK: RPC responds on 9338"
           Start-Sleep 3
@@ -280,7 +282,7 @@ jobs:
             if (($ports -contains 9333) -or ($ports -contains 9332)) { throw "FAIL: still listening on an old Litecoin port (9333/9332)" }
             Write-Host "OK: not on 9332/9333"
           } finally {
-            & $cli.FullName "-datadir=$ddp" "-rpcport=9338" stop 2>$null
+            & $cli.FullName "-datadir=$ddp" "-rpcport=9338" "-rpcuser=e2e" "-rpcpassword=e2e" stop 2>$null
             Start-Sleep 2
             if ($node -and -not $node.HasExited) { Stop-Process -Id $node.Id -Force -ErrorAction SilentlyContinue }
           }
