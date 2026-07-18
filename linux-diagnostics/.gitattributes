@@ -1,0 +1,2 @@
+# These scripts run on the user's Linux machine: keep LF endings so bash never sees a stray \r.
+*.sh text eol=lf

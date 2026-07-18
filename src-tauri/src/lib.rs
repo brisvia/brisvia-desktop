@@ -2710,6 +2710,25 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Linux (Intel/Wayland/Mesa): WebKitGTK can fail to initialize EGL ("Could not create default EGL
+    // display: EGL_BAD_PARAMETER. Aborting...") on Intel HD graphics under a Wayland session, so the window
+    // never opens (reported on a ThinkPad T430 / Intel HD 4000 / Ubuntu 26.04). Disabling the DMABUF renderer
+    // and the accelerated compositor makes WebKitGTK fall back to a path that initializes there. These are set
+    // as DEFAULTS, before the webview is created, and only when the user has not set them, so power users can
+    // still override (e.g. WEBKIT_DISABLE_COMPOSITING_MODE=0). This covers both the .AppImage and the .deb.
+    // GDK_BACKEND is deliberately NOT forced: pinning everyone to XWayland would regress working Wayland setups.
+    #[cfg(target_os = "linux")]
+    {
+        for (k, v) in [
+            ("WEBKIT_DISABLE_DMABUF_RENDERER", "1"),
+            ("WEBKIT_DISABLE_COMPOSITING_MODE", "1"),
+        ] {
+            if std::env::var_os(k).is_none() {
+                std::env::set_var(k, v);
+            }
+        }
+    }
+
     // data directory next to the user's app data (override with BRISVIA_DATADIR, e.g. for isolated tests)
     let datadir = std::env::var("BRISVIA_DATADIR")
         .map(PathBuf::from)
