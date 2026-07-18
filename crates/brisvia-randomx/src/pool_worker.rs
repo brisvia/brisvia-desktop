@@ -2,7 +2,7 @@
 //! Ties together `stratum` (protocol), `pool_miner` (the RandomX search) and `worksource` (the job type).
 //! Approach D: the pool sends a ready header; the worker only varies the nonce and submits {job_id, nonce}.
 //!
-//! Cancellation (per ChatGPT's SECURITY review, P0): a reader loop receives jobs and raises a `cancel` flag on
+//! Cancellation (per the SECURITY review, P0): a reader loop receives jobs and raises a `cancel` flag on
 //! every new job (or disconnect); the miner checks that flag (mine_job polls it every 256 hashes), so it drops a
 //! dead job within milliseconds instead of scanning up to 50M nonces. Only the current generation's share is
 //! submitted; a solution for a superseded job is discarded. The audited solo path is untouched.
@@ -20,7 +20,7 @@ use crate::worksource::{MiningJob, Solution};
 const PERMANENT_PREFIX: &str = "PERMANENT:";
 
 /// One event the worker reports (the Tauri backend turns these into UI updates, like the solo worker).
-/// Per ChatGPT: found-locally, submitted, and accepted are DISTINCT — the UI counts a contribution only on
+/// Per the review: found-locally, submitted, and accepted are DISTINCT — the UI counts a contribution only on
 /// `ShareAccepted` (the pool's explicit confirmation), never on submit.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PoolEvent {
@@ -87,9 +87,9 @@ where
             let (job, cur_gen, cancel, done, tx) =
                 (job.clone(), cur_gen.clone(), cancel.clone(), done.clone(), tx.clone());
             s.spawn(move || {
-                // Barrido progresivo de nonces por job: `start` avanza tras cada share para NO re-enviar el
-                // mismo nonce (evita "duplicate") y para producir varias shares por job (clave en PPLNS).
-                // Se reinicia a 0 cuando llega un job nuevo (cambia la generación).
+                // Progressive nonce scan per job: `start` advances after each share so as NOT to re-send the
+                // same nonce (avoids "duplicate") and to produce several shares per job (key in PPLNS).
+                // It resets to 0 when a new job arrives (the generation changes).
                 let mut start: u64 = 0;
                 let mut last_gen: u64 = 0;
                 while !done.load(Ordering::Relaxed) && !should_stop.load(Ordering::Relaxed) {
@@ -107,11 +107,11 @@ where
                                     if cur_gen.load(Ordering::SeqCst) == g && !should_stop.load(Ordering::Relaxed) {
                                         let _ = tx.try_send((sol.job_id, sol.nonce, g)); // drop if the queue is full
                                     }
-                                    start = sol.nonce as u64 + 1; // seguir DESPUÉS del nonce hallado
+                                    start = sol.nonce as u64 + 1; // continue AFTER the found nonce
                                 }
                                 None => {
-                                    // Rango agotado o cancelado. Si el job sigue vigente, esperar el próximo
-                                    // (no re-barrer desde 0, que re-enviaría nonces ya probados).
+                                    // Range exhausted or cancelled. If the job is still current, wait for the next one
+                                    // (do not re-scan from 0, which would re-send already-tried nonces).
                                     if cur_gen.load(Ordering::SeqCst) == g {
                                         std::thread::sleep(Duration::from_millis(100));
                                     }
@@ -164,7 +164,7 @@ where
                             on_event(PoolEvent::ShareRejected { reason: reason.unwrap_or_default() });
                         }
                     }
-                    // Contract (avoids the block+ack double count ChatGPT flagged): the pool sends EXACTLY ONE
+                    // Contract (avoids the block+ack double count flagged in review): the pool sends EXACTLY ONE
                     // verdict per share. A share that turns out to be a block arrives as a `block`, NOT as an
                     // `ack{accepted}` as well — so counting the block as an accepted share here is not a double
                     // count. `accepted:false` (e.g. a stale block on a reorg) marks the block without crediting it.

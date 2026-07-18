@@ -1,23 +1,23 @@
-// Recorrido P0 #6 — Cierre y recuperación.
-// Sobre la app COMPILADA real: se crea una billetera, se abre una OPERACIÓN (el modal de enviar con datos
-// a medio cargar) y se CIERRA/REABRE la app en ese momento (reloadSession relanza el binario con la misma
-// carpeta de datos). Verifica que:
-//   - reabrir no corrompe la billetera: al revelar la frase con la contraseña son las MISMAS 12 palabras;
-//   - la app reabre limpia y directo a la billetera (no reaparece el alta ni queda el modal a medias).
-// La ausencia de procesos huérfanos tras cerrar la valida el runner (teardown -> countProcs, ver run.js).
+// P0 flow #6 — Shutdown and recovery.
+// On the real COMPILED app: a wallet is created, an OPERATION is opened (the send modal with data
+// half filled in) and the app is CLOSED/REOPENED at that moment (reloadSession relaunches the binary with the
+// same data folder). Verifies that:
+//   - reopening does not corrupt the wallet: revealing the phrase with the password gives the SAME 12 words;
+//   - the app reopens clean and straight to the wallet (onboarding does not reappear and no half-open modal remains).
+// The absence of orphan processes after closing is validated by the runner (teardown -> countProcs, see run.js).
 'use strict';
 
 const harness = require('../helpers/harness');
 
 const PASSWORD = 'brisvia-e2e-1234';
 
-describe('Recorrido 6 — cierre y recuperación', () => {
-  it('cierra durante una operación y reabre sin corromper la billetera', async () => {
+describe('Flow 6 — shutdown and recovery', () => {
+  it('closes during an operation and reopens without corrupting the wallet', async () => {
     harness.fromEnv();
 
     const seed = await harness.onboardCreate(PASSWORD);
 
-    // 1) Abrir una operación a medio hacer: el modal de enviar con datos parciales, sin confirmar.
+    // 1) Open a half-done operation: the send modal with partial data, unconfirmed.
     await (await $('.nav-btn[data-view="wallet"]')).click();
     await (await $('#act-send')).click();
     const sendModal = await $('#modal-send');
@@ -25,20 +25,20 @@ describe('Recorrido 6 — cierre y recuperación', () => {
     await (await $('#send-addr')).setValue('brv1qexampleexampleexampleexample00');
     await (await $('#send-amount')).setValue('5');
 
-    // 2) Cerrar y reabrir la app EN MEDIO de la operación.
+    // 2) Close and reopen the app IN THE MIDDLE of the operation.
     await browser.reloadSession();
 
-    // 3) Reabre limpia y directo a la billetera (no reaparece el alta, no queda el modal a medias).
+    // 3) It reopens clean and straight to the wallet (onboarding does not reappear, no half-open modal remains).
     const walletView = await $('[data-testid="view-wallet"]');
     const welcome = await $('[data-testid="onb-welcome"]');
     await browser.waitUntil(async () => (await walletView.isDisplayed()) || (await welcome.isDisplayed()), {
-      timeout: 60000, timeoutMsg: 'la app no volvió tras cerrar durante la operación',
+      timeout: 60000, timeoutMsg: 'the app did not come back after closing during the operation',
     });
     expect(await welcome.isDisplayed()).toBe(false);
     await walletView.waitForDisplayed({ timeout: 15000 });
-    expect(await (await $('#modal-send')).isDisplayed()).toBe(false); // la operación a medias no quedó abierta
+    expect(await (await $('#modal-send')).isDisplayed()).toBe(false); // the half-done operation did not stay open
 
-    // 4) La billetera NO se corrompió: revelar la frase da las mismas 12 palabras.
+    // 4) The wallet was NOT corrupted: revealing the phrase gives the same 12 words.
     await (await $('.nav-btn[data-view="settings"]')).click();
     await (await $('#set-security')).click();
     await (await $('#modal-security')).waitForDisplayed({ timeout: 10000 });
@@ -50,7 +50,7 @@ describe('Recorrido 6 — cierre y recuperación', () => {
     await seedModal.waitForDisplayed({ timeout: 15000 });
     const grid = await $('#seed-grid-view');
     await browser.waitUntil(async () => (await grid.$$('li')).length === 12, {
-      timeout: 10000, timeoutMsg: 'la frase revelada tras reabrir no mostró 12 palabras',
+      timeout: 10000, timeoutMsg: 'the revealed phrase after reopening did not show 12 words',
     });
     const revealed = [];
     for (const li of await grid.$$('li')) revealed.push((await li.getText()).trim().replace(/^\d+[.)]?\s*/, ''));

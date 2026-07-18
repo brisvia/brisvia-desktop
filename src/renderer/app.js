@@ -1200,7 +1200,7 @@ async function init() {
     // Decide the first screen WITHOUT waiting for the node: the welcome/onboarding does not need a
     // connected node, so if there is no wallet on disk yet we show it immediately instead of waiting
     // for the node-status loop below (which can take a while before the seed nodes are reachable).
-    // Fail CLOSED (ChatGPT, absolute priority): if we cannot tell whether a wallet exists, assume it DOES,
+    // Fail CLOSED (absolute priority): if we cannot tell whether a wallet exists, assume it DOES,
     // so a read glitch never shows the welcome/onboarding on top of an existing wallet. Default true; only a
     // definitive "no seed on disk" (false) opens the first-run flow.
     let walletExists = true;

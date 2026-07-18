@@ -2,18 +2,16 @@
 
 WHY
 ---
-I told ChatGPT "no symbol is missing" from the rc6 test executable, and it refused the claim:
+The claim "no symbol is missing" from the rc6 test executable does not hold up. To be complete, "all
+symbols exist" has to be widened to: every name, every ordinal, and every final target of forwarded
+exports. Until all three are covered, the contradiction is not complete.
 
-    "Tu afirmacion 'todos los simbolos existen' debe ampliarse a: todos los nombres, todos los ordinales
-     y todos los destinos finales de exportaciones reenviadas. Hasta entonces, la contradiccion todavia
-     no es completa."
+The original comparison took names out of dumpbin's text output. An import by ORDINAL has no name to
+compare, so a name-only diff reports it as absent rather than as unmatched -- it disappears instead of
+failing. And an export can be a FORWARDER: the name is present in the first DLL and merely points
+somewhere else, which a name check reads as satisfied.
 
-It is right. I compared names out of dumpbin's text output. An import by ORDINAL has no name to compare,
-so a name-only diff reports it as absent rather than as unmatched -- it disappears instead of failing.
-And an export can be a FORWARDER: the name is present in the first DLL and merely points somewhere else,
-which a name check reads as satisfied.
-
-It also brought a precedent: windows-rs hit exactly this 0xC0000139 because GetWindowSubclass got linked
+There is a precedent: windows-rs hit exactly this 0xC0000139 because GetWindowSubclass got linked
 by ordinal against COMCTL32 instead of by name.
 
 This reads the PE structures directly rather than parsing dumpbin's prose, because the text output does
@@ -123,26 +121,26 @@ def self_test():
         try:
             imp = PE(p.read_bytes()).imports()
         except Exception as e:
-            print(f"  FAIL  no pude leer {p.name}: {e}")
+            print(f"  FAIL  could not read {p.name}: {e}")
             fallos += 1
             continue
         total = sum(len(s) for _, s in imp)
         if not imp or total < 5:
-            print(f"  FAIL  {p.name}: {len(imp)} dlls / {total} simbolos -- demasiado poco para ser real")
+            print(f"  FAIL  {p.name}: {len(imp)} dlls / {total} symbols -- too few to be real")
             fallos += 1
         else:
-            print(f"  PASS  lee-un-PE-real  ({p.name}: {len(imp)} dlls, {total} simbolos)")
+            print(f"  PASS  reads-a-real-PE  ({p.name}: {len(imp)} dlls, {total} symbols)")
         break
     else:
-        print("  FAIL  no encontre ningun binario de Windows para probar")
+        print("  FAIL  found no Windows binary to test against")
         fallos += 1
 
     try:
-        PE(b"no soy un PE" + b"\0" * 200)
-        print("  FAIL  acepto algo que no es un PE")
+        PE(b"not a PE" + b"\0" * 200)
+        print("  FAIL  accepted something that is not a PE")
         fallos += 1
     except ValueError:
-        print("  PASS  rechaza-lo-que-no-es-un-PE")
+        print("  PASS  rejects-what-is-not-a-PE")
 
     print()
     if fallos:
@@ -160,7 +158,7 @@ def main():
     if a.self_test:
         return self_test()
     if not a.exe:
-        return ap.error("hace falta un .exe")
+        return ap.error("an .exe is required")
 
     imp = PE(pathlib.Path(a.exe).read_bytes()).imports()
     print(f"{a.exe}")
@@ -170,20 +168,20 @@ def main():
     por_ordinal = []
     for dll, simbolos in imp:
         ords = [v for k, v in simbolos if k == "ordinal"]
-        marca = f"  <-- {len(ords)} POR ORDINAL: {ords}" if ords else ""
+        marca = f"  <-- {len(ords)} BY ORDINAL: {ords}" if ords else ""
         print(f"  {dll:<22} {len(simbolos):>4} imports{marca}")
         if ords:
             por_ordinal.append((dll, ords))
 
     print()
     if por_ordinal:
-        print("  IMPORTS POR ORDINAL ENCONTRADOS. Un diff por nombre NO los ve:")
+        print("  IMPORTS BY ORDINAL FOUND. A name-only diff does NOT see them:")
         for dll, ords in por_ordinal:
             print(f"    {dll}: {ords}")
-        print("  Cada uno hay que resolverlo contra los /EXPORTS de la DLL que Windows carga de verdad.")
+        print("  Each one must be resolved against the /EXPORTS of the DLL that Windows actually loads.")
     else:
-        print("  Cero imports por ordinal. Esa via queda descartada por lectura directa del PE,")
-        print("  no por no haberla mirado.")
+        print("  Zero imports by ordinal. That route is ruled out by reading the PE directly,")
+        print("  not by never having looked at it.")
     return 0
 
 

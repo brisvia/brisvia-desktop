@@ -245,7 +245,7 @@ def clasificar(mitades):
     b, c = mitades["BASELINE"], mitades["CANDIDATE"]
     if b[0] is None or c[0] is None:
         falta = "BASELINE" if b[0] is None else "CANDIDATE"
-        return "SIN CLASIFICAR", f"the {falta} half never reported an exit code"
+        return "UNCLASSIFIED", f"the {falta} half never reported an exit code"
     if b[0] != 0:
         return "B", (f"the baseline does not load either (exit {b[0]} / {b[1]}). The diagnostic is still "
                      f"invalid: the environment differs from the real job. Fix the tool, not the product.")
@@ -256,7 +256,7 @@ def clasificar(mitades):
     if c[0] == 0:
         return "C", ("both halves load. The rc5-rc6 change set does not reproduce it here. Compare against "
                      "the real failing job 29448577901 before attributing anything.")
-    return "SIN CLASIFICAR", (f"the candidate exits {c[0]} / {c[1]}, which is neither 0 nor 0xC0000139. "
+    return "UNCLASSIFIED", (f"the candidate exits {c[0]} / {c[1]}, which is neither 0 nor 0xC0000139. "
                               f"This is a different failure and none of A, B or C describes it.")
 
 
@@ -350,14 +350,14 @@ def self_test():
     # The classifier must not invent a case from a missing half.
     for nombre, mitades, espera in (
             ("no-case-when-a-half-is-missing", {"BASELINE": (0, "0x0"), "CANDIDATE": (None, None)},
-             "SIN CLASIFICAR"),
+             "UNCLASSIFIED"),
             ("case-A-is-the-real-signature", {"BASELINE": (0, "0x00000000"),
                                               "CANDIDATE": (ENTRYPOINT_NOT_FOUND, "0xC0000139")}, "A"),
             ("case-B-when-the-baseline-fails", {"BASELINE": (ENTRYPOINT_NOT_FOUND, "0xC0000139"),
                                                 "CANDIDATE": (ENTRYPOINT_NOT_FOUND, "0xC0000139")}, "B"),
             ("case-C-when-both-load", {"BASELINE": (0, "0x0"), "CANDIDATE": (0, "0x0")}, "C"),
             ("no-case-for-an-unrelated-exit", {"BASELINE": (0, "0x0"), "CANDIDATE": (101, "0x65")},
-             "SIN CLASIFICAR")):
+             "UNCLASSIFIED")):
         caso, _ = clasificar(mitades)
         if caso != espera:
             print(f"  FAIL  {nombre}: said {caso}, expected {espera}")
@@ -391,7 +391,7 @@ def main():
 
     ident = identidad(a.run_id)
     print("=" * 78)
-    print("IDENTIDAD DE LA EVIDENCIA")
+    print("EVIDENCE IDENTITY")
     print("=" * 78)
     for k in ("run_id", "attempt", "url", "workflow_commit", "branch", "status", "conclusion"):
         print(f"  {k:<16} {ident[k]}")
@@ -402,8 +402,8 @@ def main():
         registro = bajar_por_artifact_id(ident, destino)
         for r in registro:
             print(f"  artifact_id      {r['artifact_id']}  '{r['name']}'")
-            print(f"    creado         {r['created_at']}")
-            print(f"    tamano         {r['size_reported']} informado / {r['size_downloaded']} bajado")
+            print(f"    created        {r['created_at']}")
+            print(f"    size           {r['size_reported']} reported / {r['size_downloaded']} downloaded")
             print(f"    zip sha256     {r['zip_sha256']}")
             for f in r["files"]:
                 print(f"    {f['sha256'][:16]}...  {f['path']}")
@@ -412,7 +412,7 @@ def main():
         notas = cruzar_manifiesto(man, ident, a.require_stamp)
     except EvidenciaRechazada as e:
         print("=" * 78)
-        print("EVIDENCIA RECHAZADA -- no se emite Caso A, B, C ni UNCLASSIFIED")
+        print("EVIDENCE REJECTED -- no Case A, B, C or UNCLASSIFIED is emitted")
         print("=" * 78)
         print(f"  {e}")
         return 2
@@ -431,21 +431,21 @@ def main():
 
     mitades = leer_mitades(a.run_id)
     print("=" * 78)
-    print("LAS DOS MITADES")
+    print("THE TWO HALVES")
     print("=" * 78)
     for k, (code, hexa) in mitades.items():
-        print(f"  {k:<10} exit={code if code is not None else 'sin reportar'}  hex={hexa or '-'}")
+        print(f"  {k:<10} exit={code if code is not None else 'not reported'}  hex={hexa or '-'}")
     print()
 
     caso, razon = clasificar(mitades)
     print("=" * 78)
-    print(f"CASO {caso}" + ("  (provisional)" if not sellado else ""))
+    print(f"CASE {caso}" + ("  (provisional)" if not sellado else ""))
     print("=" * 78)
     print(f"  {razon}")
 
     if caso == "A" and not sellado:
         print()
-        print("  NO AUTORIZA UNA CORRECCION DEL PRODUCTO POR SI SOLA.")
+        print("  DOES NOT AUTHORIZE A PRODUCT FIX ON ITS OWN.")
         print("  Next: design the three ablations from this evidence and run them stamped -- run_id,")
         print("  commit, source SHA, tool hashes and manifest inside each artifact. The product changes")
         print("  only after a stamped ablation is conclusive.")

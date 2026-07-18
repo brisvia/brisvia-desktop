@@ -1,6 +1,6 @@
 //! Stratum client for pool mining — the protocol layer of PoolWorkSource (Brisvia 1.0, "approach D").
 //!
-//! Per ChatGPT's SECURITY review (2026-07-11) the pool does ALL the sensitive work: it builds the coinbase,
+//! Per the SECURITY review (2026-07-11) the pool does ALL the sensitive work: it builds the coinbase,
 //! chooses its own extranonce, computes the merkle root over the full transaction set, and serializes the
 //! 80-byte header with the nonce set to zero. The miner receives that exact header and only rewrites the 4
 //! nonce bytes (offset 76, little-endian) before hashing with RandomX. The submit carries ONLY {job_id, nonce}.
@@ -146,8 +146,8 @@ impl PoolJob {
         }
         let mut seed_key = [0u8; 32];
         seed_key.copy_from_slice(&seed);
-        // seed_hash viene en orden de visualización (como getblocktemplate); RandomX usa la clave INTERNA
-        // (invertida). Igual que el modo solo (mine_once) y el verificador de la pool (rx_verifier).
+        // seed_hash comes in display order (like getblocktemplate); RandomX uses the INTERNAL key
+        // (reversed). Same as solo mode (mine_once) and the pool's verifier (rx_verifier).
         seed_key.reverse();
         let mut target_be = [0u8; 32];
         target_be.copy_from_slice(&tgt);

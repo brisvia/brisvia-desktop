@@ -1,105 +1,109 @@
-# INCIDENT_PATTERNS.md — cada error, una defensa permanente
+# INCIDENT_PATTERNS.md — every error becomes a permanent defense
 
-Una entrada por incidente. Sin narraciones. La pregunta que importa es **"por qué los controles que ya existían
-no lo vieron"**, porque esa respuesta es la defensa nueva.
+One entry per incident. No storytelling. The question that matters is **"why the controls that already
+existed did not catch it"**, because that answer is the new defense.
 
-Regla: un incidente sin defensa automática asociada **no está cerrado**. "Acordarse de revisar X" no es una
-defensa.
-
----
-
-### 1. La pantalla decía 8 caracteres, el backend exigía 12
-- **Invariante violada:** el cartel y el backend tienen que aplicar la MISMA regla.
-- **Por qué no se detectó:** cada mitad era correcta por separado. El bug vive en la costura. Nadie ejecutó
-  "crear una billetera" de punta a punta.
-- **Agravante:** diagnostiqué sin reproducir ("es un cartel residual, apretá Continue"). Fernando perdió tiempo
-  confirmando mi hipótesis equivocada.
-- **Defensa:** `product_first_contact` escenario A paso 3 (probar con un carácter MENOS que el mínimo).
-- **Riesgo que queda:** la rutina es manual hasta que el E2E la cubra.
-
-### 2. Texto en español con el idioma en inglés
-- **Invariante violada:** todo texto visible sale del sistema de idiomas.
-- **Por qué no se detectó:** lo escribí a mano en el HTML ese mismo día. El i18n sólo ve lo marcado con
-  `data-i18n`: lo escrito a mano es invisible para él.
-- **Defensa:** `tools/check_textos.py` en el CI (falla si hay texto fijo sin traducir; lista blanca corta y
-  explícita).
-- **Control negativo:** probado reintroduciendo el placeholder en español → falla.
-
-### 3. "Podés crear tu billetera" en una pantalla que sólo ve quien ya la tiene
-- **Invariante violada:** el texto tiene que ser verdad PARA ESE ESTADO.
-- **Por qué no se detectó:** ningún barrido mecánico lo ve. Las claves estaban completas, sin mezcla de
-  idiomas. Requiere saber quién ve esa pantalla y cuándo.
-- **Defensa:** `PRODUCT_CONTRACTS.md` (textos PROHIBIDOS por estado) + `product_first_contact` escenario B.
-- **Riesgo que queda:** la primera vez que un texto es absurdo lo tiene que ver una persona; una vez escrito
-  como prohibido, no vuelve.
-
-### 4. La app mostraba v0.4.0 corriendo 1.0.2
-- **Invariante violada:** la versión sale de UNA fuente: el propio build.
-- **Por qué no se detectó:** tres causas a la vez — `tauri.conf.json` y `Cargo.toml` desincronizados
-  (`app_version()` lee `CARGO_PKG_VERSION`), un `<span>v0.4.0</span>` a mano como respaldo, y `checkForUpdate`
-  leyendo la versión DEL DOM.
-- **Defensa:** candado en el CI (tauri.conf == Cargo.toml == tag del release) + cero versiones a mano +
-  `runningVersion` como única fuente.
-- **Control negativo:** probado con un tag falso (v1.0.9) → falla.
-
-### 5. Publiqué la 1.0.3 y rompí el actualizador de TODOS
-- **Invariante violada:** toda versión pública tiene que ser detectable por la versión anterior.
-- **Por qué no se detectó:** el `latest.json` lo generaba yo A MANO. Nada se veía mal: la página perfecta, los
-  instaladores bajaban, la API decía "uploaded". Sólo la URL real mostraba el 404. **Leer los metadatos de
-  GitHub fue lo que me engañó.**
-- **Defensa:** `.github/workflows/publish-manifest.yml` (se genera solo al publicar) + `tools/check_updater.py`
-  (consulta la URL pública, como la app).
-- **Control negativo:** probado pidiendo una versión que no existe → falla.
-
-### 6. La batería de 10.000 billeteras llevaba HORAS en rojo
-- **Invariante violada:** una suite tiene que demostrar que ejecutó algo.
-- **Por qué no se detectó:** ni siquiera arrancaba (moría en el build script). Nadie miraba un workflow que se
-  había puesto rojo en silencio, y "los tests pasan" era algo **creído, no chequeado**. Estuvo roto en 3
-  versiones ya publicadas.
-- **Defensa:** `tools/run_tests_verified.py` (mínimo de tests + cero fallidos + no sospechosamente rápido).
-- **Control negativo:** reproducido — `cargo test` con un filtro que no matchea sale **VERDE habiendo probado
-  nada**.
-
-### 7. Rompí la base del nodo en la máquina de Fernando, DOS veces
-- **Invariante violada:** usar el entorno más barato disponible; cierre ordenado antes de forzar.
-- **Por qué no se detectó:** no había nada que lo impidiera. Maté el proceso con `Stop-Process -Force`.
-- **Defensa:** la auto-reparación (`classify_failure` + causalidad por log del intento actual) + Regla 5.
-- **Efecto lateral bueno:** el bug me obligó a escribir la reparación, que después funcionó en la vida real.
-
-### 8. La marca anti-bucle no se borraba tras una reparación exitosa
-- **Invariante violada:** un mecanismo de protección no puede dejar peor al usuario que no tenerlo.
-- **Por qué no se detectó:** la reparación FUNCIONÓ. El bug sólo aparecía la **segunda** vez (cada
-  actualización cierra la app a la fuerza, que es lo que corrompe la base). Los tests estaban verdes.
-- **Cómo se encontró:** fui a mirar la máquina de Fernando después de que actualizara, en vez de asumir.
-- **Defensa:** marca con fecha (reciente = bucle, vieja = incidente cerrado) + 4 tests con esa secuencia.
-
-### 9. Le abrí ventanas de prueba encima de una partida
-- **Invariante violada:** jerarquía de entornos (runner > temporal > desarrollo > máquina de Fernando).
-- **Por qué no se detectó:** ninguna regla lo prohibía. Y **el mismo probador ya corría en la nube**, donde
-  había pasado esa misma mañana.
-- **Defensa:** Regla 5. El E2E corre en el runner de Windows, nunca local.
-
-### 10. Intenté copiar un archivo de credenciales a un repo PÚBLICO
-- **Invariante violada:** los secretos jamás entran a un árbol Git público, ni temporalmente.
-- **Por qué no se detectó:** lo frenó un clasificador externo, no yo. **La operación nunca debió llegar ahí.**
-- **Defensa:** Regla 5 + `.gitignore` estricto (client_secret, token, gsc_auth, *.pem, *.key) + apuntar los
-  scripts a `C:\secure\fernando-secrets` en vez de copiar.
-- **Riesgo que queda:** la separación depende del .gitignore. Un archivo con nombre nuevo se colaría.
+Rule: an incident with no automated defense attached is **not closed**. "Remember to check X" is not a
+defense.
 
 ---
 
-## El patrón detrás de los 10
+### 1. The screen said 8 characters, the backend required 12
+- **Invariant violated:** the message and the backend must apply the SAME rule.
+- **Why it was not caught:** each half was correct on its own. The bug lives in the seam. Nobody ran
+  "create a wallet" end to end.
+- **Aggravating factor:** I diagnosed without reproducing ("it's a leftover message, just press Continue").
+  Fernando wasted time confirming my wrong hypothesis.
+- **Defense:** `product_first_contact` scenario A step 3 (test with one character LESS than the minimum).
+- **Remaining risk:** the routine is manual until the E2E covers it.
 
-ChatGPT los agrupó en **5 causas, no 10 problemas** (ROOT_CAUSE 2026-07-14):
+### 2. Spanish text while the language was set to English
+- **Invariant violated:** every visible text comes from the language system.
+- **Why it was not caught:** I hand-wrote it into the HTML that same day. The i18n only sees what is marked
+  with `data-i18n`: anything hand-written is invisible to it.
+- **Defense:** `tools/check_textos.py` in CI (fails if there is hard-coded untranslated text; short, explicit
+  allowlist).
+- **Negative control:** tested by reintroducing the Spanish placeholder → it fails.
 
-- **A. Nadie era dueño del producto completo** → incidentes 1, 2, 3, 4. Los agentes revisaron piezas; ninguno
-  recorrió "soy una persona que abre Brisvia por primera vez".
-- **B. Evidencia no observada ni exigida** → 5, 6. Verde/publicado aceptado sin exigir prueba del efecto.
-- **C. Destructivo sin aislamiento** → 7, 9. Actué sobre el entorno más valioso teniendo entornos más baratos.
-- **D. Límites de seguridad fuera del flujo normal** → 10.
-- **E. Diagnóstico por intuición antes de reproducir** → 1.
+### 3. "You can create your wallet" on a screen only seen by someone who already has one
+- **Invariant violated:** the text must be true FOR THAT STATE.
+- **Why it was not caught:** no mechanical sweep sees it. The keys were complete, with no language mixing.
+  It requires knowing who sees that screen and when.
+- **Defense:** `PRODUCT_CONTRACTS.md` (FORBIDDEN texts per state) + `product_first_contact` scenario B.
+- **Remaining risk:** the first time a text is absurd, a person has to see it; once written down as
+  forbidden, it does not come back.
 
-> *"Convertís ausencia de error visible en evidencia de éxito."*
+### 4. The app showed v0.4.0 while running 1.0.2
+- **Invariant violated:** the version comes from ONE source: the build itself.
+- **Why it was not caught:** three causes at once — `tauri.conf.json` and `Cargo.toml` out of sync
+  (`app_version()` reads `CARGO_PKG_VERSION`), a hand-written `<span>v0.4.0</span>` as a fallback, and
+  `checkForUpdate` reading the version FROM THE DOM.
+- **Defense:** a lock in CI (tauri.conf == Cargo.toml == release tag) + zero hand-written versions +
+  `runningVersion` as the only source.
+- **Negative control:** tested with a fake tag (v1.0.9) → it fails.
+
+### 5. I published 1.0.3 and broke the updater for EVERYONE
+- **Invariant violated:** every public version must be detectable by the previous version.
+- **Why it was not caught:** I generated the `latest.json` BY HAND. Nothing looked wrong: the page perfect,
+  the installers downloading, the API saying "uploaded". Only the real URL showed the 404. **Reading
+  GitHub's metadata is what fooled me.**
+- **Defense:** `.github/workflows/publish-manifest.yml` (generated automatically on publish) +
+  `tools/check_updater.py` (queries the public URL, just like the app).
+- **Negative control:** tested by requesting a version that does not exist → it fails.
+
+### 6. The 10,000-wallet battery had been red for HOURS
+- **Invariant violated:** a suite must prove that it actually ran something.
+- **Why it was not caught:** it did not even start (it died in the build script). Nobody was watching a
+  workflow that had gone red silently, and "the tests pass" was something **believed, not checked**. It was
+  broken across 3 already-published versions.
+- **Defense:** `tools/run_tests_verified.py` (minimum number of tests + zero failures + not suspiciously
+  fast).
+- **Negative control:** reproduced — `cargo test` with a filter that matches nothing comes out **GREEN
+  having tested nothing**.
+
+### 7. I corrupted the node database on Fernando's machine, TWICE
+- **Invariant violated:** use the cheapest available environment; clean shutdown before forcing.
+- **Why it was not caught:** there was nothing to prevent it. I killed the process with `Stop-Process -Force`.
+- **Defense:** the self-repair (`classify_failure` + causality from the current attempt's log) + Rule 5.
+- **Good side effect:** the bug forced me to write the repair, which later worked in real life.
+
+### 8. The anti-loop marker was not cleared after a successful repair
+- **Invariant violated:** a protection mechanism cannot leave the user worse off than not having it.
+- **Why it was not caught:** the repair WORKED. The bug only appeared the **second** time (every update
+  force-closes the app, which is what corrupts the database). The tests were green.
+- **How it was found:** I went and looked at Fernando's machine after he updated, instead of assuming.
+- **Defense:** a dated marker (recent = loop, old = closed incident) + 4 tests covering that sequence.
+
+### 9. I opened test windows on top of a running game
+- **Invariant violated:** environment hierarchy (runner > temporary > development > Fernando's machine).
+- **Why it was not caught:** no rule forbade it. And **the same tester was already running in the cloud**,
+  where it had passed that very morning.
+- **Defense:** Rule 5. The E2E runs on the Windows runner, never locally.
+
+### 10. I tried to copy a credentials file into a PUBLIC repo
+- **Invariant violated:** secrets never enter a public Git tree, not even temporarily.
+- **Why it was not caught:** an external classifier stopped it, not me. **The operation should never have
+  gotten that far.**
+- **Defense:** Rule 5 + a strict `.gitignore` (client_secret, token, gsc_auth, *.pem, *.key) + pointing
+  scripts at `C:\secure\fernando-secrets` instead of copying.
+- **Remaining risk:** the separation depends on .gitignore. A file with a new name would slip through.
+
+---
+
+## The pattern behind the 10
+
+A root-cause analysis grouped them into **5 causes, not 10 problems** (ROOT_CAUSE 2026-07-14):
+
+- **A. Nobody owned the whole product** → incidents 1, 2, 3, 4. The reviewers checked pieces; none walked
+  through "I am a person opening Brisvia for the first time".
+- **B. Evidence neither observed nor demanded** → 5, 6. Green/published accepted without demanding proof of
+  the effect.
+- **C. Destructive without isolation** → 7, 9. I acted on the most valuable environment while cheaper ones
+  were available.
+- **D. Security boundaries outside the normal flow** → 10.
+- **E. Diagnosis by intuition before reproducing** → 1.
+
+> *"You turn the absence of a visible error into evidence of success."*
 >
-> El workflow existía → asumí que probaba. El release tenía archivos → asumí que actualizaba. El código
-> compilaba → asumí que mostraba la versión correcta. La reparación terminó → asumí que el estado quedó bien.
+> The workflow existed → I assumed it tested. The release had files → I assumed it updated. The code
+> compiled → I assumed it showed the correct version. The repair finished → I assumed the state was left fine.

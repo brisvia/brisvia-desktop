@@ -50,10 +50,10 @@ def _bloque(texto, cabecera):
     """
     i = texto.find(cabecera)
     if i < 0:
-        raise AblacionFallida(f"no encontre '{cabecera}'")
+        raise AblacionFallida(f"could not find '{cabecera}'")
     j = texto.find("{", i)
     if j < 0:
-        raise AblacionFallida(f"'{cabecera}' no abre llave")
+        raise AblacionFallida(f"'{cabecera}' does not open a brace")
     prof = 0
     for k in range(j, len(texto)):
         if texto[k] == "{":
@@ -62,7 +62,7 @@ def _bloque(texto, cabecera):
             prof -= 1
             if prof == 0:
                 return i, k + 1
-    raise AblacionFallida(f"'{cabecera}' no cierra")
+    raise AblacionFallida(f"'{cabecera}' does not close")
 
 
 def sin_modulo_de_cierre(texto):
@@ -138,7 +138,7 @@ def helper_minimo(texto):
         let c = std::process::Command::new("cmd").args(["/c", "ping -n 60 127.0.0.1 >nul"]).spawn();
         #[cfg(not(target_os = "windows"))]
         let c = std::process::Command::new("sleep").arg("60").spawn();
-        c.expect("no se pudo lanzar el proceso de prueba")
+        c.expect("could not launch the test process")
     }
 
     #[test]
@@ -153,8 +153,8 @@ def helper_minimo(texto):
         let ranura = Arc::new(Mutex::new(Some(terco)));
         assert!(!esperar_cierre(&ranura, Duration::from_millis(300)));
         let mut g = ranura.lock().unwrap();
-        let c = g.as_mut().expect("lo mato, y no debia");
-        assert!(matches!(c.try_wait(), Ok(None)), "sigue vivo: pid {}", pid);
+        let c = g.as_mut().expect("killed it, and it should not have");
+        assert!(matches!(c.try_wait(), Ok(None)), "still alive: pid {}", pid);
         let _ = c.kill();
     }
 
@@ -181,18 +181,18 @@ def aplicar(variante, ruta):
     antes = hashlib.sha256(texto.encode()).hexdigest()
     fn = PARCHES[variante]
     if fn is None:
-        print(f"  {variante}: sin parche, el fuente queda intacto")
+        print(f"  {variante}: no patch, the source stays intact")
         print(f"  sha256 {antes}")
         return antes
 
     nuevo = fn(texto)
     if nuevo == texto:
-        raise AblacionFallida(f"{variante}: el parche no cambio nada")
+        raise AblacionFallida(f"{variante}: the patch changed nothing")
     if "mod node_shutdown_tests" in nuevo and variante == "rc6-no-shutdown-tests":
-        raise AblacionFallida("rc6-no-shutdown-tests: el modulo sigue ahi")
+        raise AblacionFallida("rc6-no-shutdown-tests: the module is still there")
     ruta.write_text(nuevo, encoding="utf-8")
     despues = hashlib.sha256(nuevo.encode()).hexdigest()
-    print(f"  {variante}: aplicado")
+    print(f"  {variante}: applied")
     print(f"  sha256 {antes[:16]} -> {despues}")
     return despues
 
@@ -207,30 +207,30 @@ def self_test():
                        capture_output=True, text=True, encoding="utf-8")
     real = r.stdout
     if not real or "mod node_shutdown_tests" not in real:
-        print("  FAIL  no pude leer el lib.rs real de rc6 desde este repo")
+        print("  FAIL  could not read the real rc6 lib.rs from this repo")
         print(f"        cwd={pathlib.Path.cwd()}")
-        print(f"        git dijo: {(r.stderr or '').strip()[:160]}")
+        print(f"        git said: {(r.stderr or '').strip()[:160]}")
         return 1
-    print(f"  lib.rs de rc6: {len(real.splitlines())} lineas")
+    print(f"  rc6 lib.rs: {len(real.splitlines())} lines")
 
     ini, fin = _bloque(real, "mod node_shutdown_tests")
     modulo = real[ini:fin]
     if not modulo.startswith("mod node_shutdown_tests {") or not modulo.endswith("}"):
-        print("  FAIL  el extractor de bloques no agarro el modulo entero")
+        print("  FAIL  the block extractor did not grab the whole module")
         fallos += 1
     elif modulo.count("{") != modulo.count("}"):
-        print("  FAIL  el bloque extraido no esta balanceado")
+        print("  FAIL  the extracted block is not balanced")
         fallos += 1
     else:
-        print(f"  PASS  extrae-el-modulo-entero-balanceado  ({len(modulo.splitlines())} lineas)")
+        print(f"  PASS  extracts-the-whole-balanced-module  ({len(modulo.splitlines())} lines)")
 
     # The thing under suspicion is actually in there. If it is not, the whole hypothesis is wrong and the
     # ladder would be testing nothing.
     if "tray:" not in modulo or "AppState {" not in modulo:
-        print("  FAIL  el modulo no construye AppState: la hipotesis no se sostiene")
+        print("  FAIL  the module does not build AppState: the hypothesis does not hold")
         fallos += 1
     else:
-        print("  PASS  el-modulo-si-construye-AppState-con-tray")
+        print("  PASS  the-module-does-build-AppState-with-tray")
 
     for v, comprueba in (
             ("rc6-no-shutdown-tests",
@@ -248,34 +248,34 @@ def self_test():
             fallos += 1
             continue
         if salida == real:
-            print(f"  FAIL  {v}: no cambio nada")
+            print(f"  FAIL  {v}: changed nothing")
             fallos += 1
         elif not comprueba(salida):
-            print(f"  FAIL  {v}: no hizo lo que dice hacer")
+            print(f"  FAIL  {v}: did not do what it claims")
             fallos += 1
         elif salida.count("{") != salida.count("}"):
-            print(f"  FAIL  {v}: dejo las llaves desbalanceadas -- no compilaria")
+            print(f"  FAIL  {v}: left the braces unbalanced -- it would not compile")
             fallos += 1
         else:
             # Spelled out, not signed: "+92" reads as "added 92" when it means the opposite.
             quitadas = len(real.splitlines()) - len(salida.splitlines())
-            print(f"  PASS  {v}  (quita {quitadas} lineas)")
+            print(f"  PASS  {v}  (removes {quitadas} lines)")
 
     # Each variant must remove something DIFFERENT. Two identical variants are one variant and a wasted
     # build.
     hechas = {v: PARCHES[v](real) for v in ("rc6-no-shutdown-tests", "rc6-no-appstate",
                                             "rc6-minimal-helper")}
     if len(set(hechas.values())) != 3:
-        print("  FAIL  dos variantes producen el mismo fuente: una de las dos no prueba nada")
+        print("  FAIL  two variants produce the same source: one of them proves nothing")
         fallos += 1
     else:
-        print("  PASS  las-tres-variantes-son-distintas-entre-si")
+        print("  PASS  the-three-variants-are-distinct")
 
     print()
     if fallos:
         print(f"SELF-TEST FAILED ({fallos})")
         return 1
-    print("self-test OK: cada parche hace lo que dice, sobre el fuente real de rc6")
+    print("self-test OK: each patch does what it claims, on the real rc6 source")
     return 0
 
 
@@ -288,15 +288,15 @@ def main():
     if a.self_test:
         return self_test()
     if not a.variant:
-        return ap.error("--variant es obligatorio")
+        return ap.error("--variant is required")
     ruta = pathlib.Path(a.file)
     if not ruta.exists():
-        print(f"no existe: {ruta}")
+        print(f"does not exist: {ruta}")
         return 1
     try:
         aplicar(a.variant, ruta)
     except AblacionFallida as e:
-        print(f"ABLACION FALLIDA: {e}")
+        print(f"ABLATION FAILED: {e}")
         return 1
     return 0
 

@@ -1,23 +1,23 @@
-// Recorrido P0 #8 — Backup (ver de nuevo las 12 palabras) + Recibir (dirección).
-// Sobre la app COMPILADA real (backend Rust real, sin depender del nodo), verifica que:
-//   - se crea una billetera (backend genera 12 palabras reales) y se entra;
-//   - desde Ajustes -> Seguridad se pueden REVELAR las 12 palabras pidiendo la contraseña,
-//     y son EXACTAMENTE las mismas que se generaron al crearla (respaldo real, no cosmético);
-//   - Recibir muestra una dirección real de la billetera.
-// Es "backend real sin nodo": crear/revelar/dirección no dependen de que el nodo esté arriba.
+// P0 flow #8 — Backup (see the 12 words again) + Receive (address).
+// On the real COMPILED app (real Rust backend, without depending on the node), verifies that:
+//   - a wallet is created (backend generates 12 real words) and entered;
+//   - from Settings -> Security you can REVEAL the 12 words by entering the password,
+//     and they are EXACTLY the same ones generated when it was created (real backup, not cosmetic);
+//   - Receive shows a real wallet address.
+// This is "real backend without node": create/reveal/address do not depend on the node being up.
 'use strict';
 
 const harness = require('../helpers/harness');
 
 const PASSWORD = 'brisvia-e2e-1234';
 
-describe('Recorrido 8 — backup y recibir', () => {
-  it('revela las mismas 12 palabras con la contraseña y muestra una dirección para recibir', async () => {
+describe('Flow 8 — backup and receive', () => {
+  it('reveals the same 12 words with the password and shows an address to receive', async () => {
     harness.fromEnv();
 
     const seed = await harness.onboardCreate(PASSWORD);
 
-    // 1) Ir a Ajustes -> abrir Seguridad -> Revelar frase.
+    // 1) Go to Settings -> open Security -> Reveal phrase.
     await (await $('.nav-btn[data-view="settings"]')).click();
     const openSecurity = await $('#set-security');
     await openSecurity.waitForClickable({ timeout: 10000 });
@@ -25,27 +25,27 @@ describe('Recorrido 8 — backup y recibir', () => {
     await (await $('#modal-security')).waitForDisplayed({ timeout: 10000 });
     await (await $('#sec-reveal')).click();
 
-    // 2) Pedir la frase con la contraseña correcta.
+    // 2) Request the phrase with the correct password.
     const revealModal = await $('#modal-reveal');
     await revealModal.waitForDisplayed({ timeout: 10000 });
     await (await $('#reveal-pass')).setValue(PASSWORD);
     await (await $('#reveal-go')).click();
 
-    // 3) Se muestran las 12 palabras y coinciden EXACTAMENTE con las creadas.
+    // 3) The 12 words are shown and match EXACTLY the ones created.
     const seedModal = await $('#modal-seed');
     await seedModal.waitForDisplayed({ timeout: 15000 });
     const grid = await $('#seed-grid-view');
     await browser.waitUntil(async () => (await grid.$$('li')).length === 12, {
-      timeout: 10000, timeoutMsg: 'la frase revelada no mostró 12 palabras (¿contraseña rechazada?)',
+      timeout: 10000, timeoutMsg: 'the revealed phrase did not show 12 words (password rejected?)',
     });
     const revealed = [];
     for (const li of await grid.$$('li')) revealed.push((await li.getText()).trim().replace(/^\d+[.)]?\s*/, ''));
     expect(revealed.join(' ')).toBe(seed.join(' '));
 
-    // Cerrar el modal de la frase.
+    // Close the phrase modal.
     await (await seedModal.$('[data-close]')).click();
 
-    // 4) Recibir: se muestra una dirección real de la billetera.
+    // 4) Receive: a real wallet address is shown.
     const addr = await harness.readReceiveAddress();
     expect(addr.length).toBeGreaterThan(10);
   });

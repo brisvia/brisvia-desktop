@@ -1,28 +1,28 @@
-// Test E2E: la app arranca sin errores.
-// Verifica que, con una billetera existente en la red real, la app abre directo en la Billetera
-// y no tira errores de consola ni excepciones durante el arranque y el primer refresco.
+// E2E test: the app starts without errors.
+// Verifies that, with an existing wallet on the real network, the app opens straight to the Wallet
+// and throws no console errors or exceptions during startup and the first refresh.
 'use strict';
 
 const { test, expect } = require('@playwright/test');
 const { installMock, captureErrors } = require('./fixtures');
 
-test('la app levanta en la Billetera sin errores de consola', async ({ page }) => {
+test('the app boots into the Wallet with no console errors', async ({ page }) => {
   const errors = captureErrors(page);
 
-  // Escenario: red real (mainnet) + billetera ya creada -> arranca en la vista Billetera.
+  // Scenario: real network (mainnet) + wallet already created -> starts in the Wallet view.
   await installMock(page, { network: 'brisvia', walletReady: true, walletOnDisk: true });
 
   await page.goto('/');
 
-  // La vista Billetera queda visible (el onboarding permanece oculto).
+  // The Wallet view stays visible (onboarding remains hidden).
   await expect(page.locator('.view[data-view="wallet"]')).toBeVisible();
   await expect(page.locator('#setup')).toBeHidden();
 
-  // El chip de versión se llena desde app_version (arranque OK del puente con el backend).
+  // The version chip is filled from app_version (successful startup of the bridge with the backend).
   await expect(page.locator('#ver-chip')).toHaveText('v1.0.0');
 
-  // Damos unos segundos a los polls periódicos (nodo, minero, logros) para que no aparezcan errores tardíos.
+  // We give the periodic polls (node, miner, achievements) a few seconds so no late errors appear.
   await page.waitForTimeout(2500);
 
-  expect(errors, 'no debería haber errores de consola en el arranque:\n' + errors.join('\n')).toEqual([]);
+  expect(errors, 'there should be no console errors at startup:\n' + errors.join('\n')).toEqual([]);
 });

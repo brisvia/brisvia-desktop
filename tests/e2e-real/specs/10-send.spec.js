@@ -1,23 +1,23 @@
-// Recorrido P0 #10 — Enviar: modal, "usar máximo" y validaciones.
-// Sobre la app COMPILADA real, verifica el modal de enviar SIN llegar a mandar dinero:
-//   - abre el modal;
-//   - una dirección vacía/inválida da error ("dirección inválida");
-//   - con dirección válida pero monto 0/negativo da error ("monto inválido");
-//   - "usar máximo" completa el monto con el saldo disponible.
-// No ejecuta un envío real (la billetera nueva no tiene fondos): sólo valida la UX de entrada.
+// P0 flow #10 — Send: modal, "use max" and validations.
+// On the real COMPILED app, verifies the send modal WITHOUT actually sending money:
+//   - it opens the modal;
+//   - an empty/invalid address gives an error ("invalid address");
+//   - with a valid address but amount 0/negative it gives an error ("invalid amount");
+//   - "use max" fills the amount with the available balance.
+// It does not run a real send (the new wallet has no funds): it only validates the input UX.
 'use strict';
 
 const harness = require('../helpers/harness');
 
 const PASSWORD = 'brisvia-e2e-1234';
 
-describe('Recorrido 10 — enviar (validaciones)', () => {
-  it('valida dirección y monto y completa el máximo', async () => {
+describe('Flow 10 — send (validations)', () => {
+  it('validates address and amount and fills the max', async () => {
     harness.fromEnv();
 
     await harness.onboardCreate(PASSWORD);
 
-    // Abrir el modal de enviar desde la billetera.
+    // Open the send modal from the wallet.
     await (await $('.nav-btn[data-view="wallet"]')).click();
     await (await $('#act-send')).click();
     const sendModal = await $('#modal-send');
@@ -28,32 +28,32 @@ describe('Recorrido 10 — enviar (validaciones)', () => {
     const go = await $('#send-go');
     const msg = await $('#send-msg');
 
-    // 1) Dirección inválida -> error de dirección.
+    // 1) Invalid address -> address error.
     await addr.setValue('no-es-una-direccion');
     await amount.setValue('1');
     await go.click();
     await browser.waitUntil(async () => await msg.isDisplayed() && (await msg.getText()).trim().length > 0, {
-      timeout: 8000, timeoutMsg: 'no rechazó la dirección inválida',
+      timeout: 8000, timeoutMsg: 'did not reject the invalid address',
     });
     const errAddr = (await msg.getText()).trim();
     expect(errAddr.length).toBeGreaterThan(0);
 
-    // 2) Dirección con formato válido (contiene "brv" y suficiente largo) pero monto 0 -> error de monto.
+    // 2) Address with valid format (contains "brv" and long enough) but amount 0 -> amount error.
     await addr.setValue('brv1qexampleexampleexampleexample00');
     await amount.setValue('0');
     await go.click();
     await browser.waitUntil(async () => {
       const t = (await msg.getText()).trim();
       return await msg.isDisplayed() && t.length > 0 && t !== errAddr;
-    }, { timeout: 8000, timeoutMsg: 'no rechazó el monto inválido' });
+    }, { timeout: 8000, timeoutMsg: 'did not reject the invalid amount' });
 
-    // 3) "Usar máximo" completa el monto con el saldo disponible (0 en billetera nueva, pero completa el campo).
+    // 3) "Use max" fills the amount with the available balance (0 in a new wallet, but it fills the field).
     await (await $('#send-max')).click();
     await browser.waitUntil(async () => (await amount.getValue()).trim().length > 0, {
-      timeout: 5000, timeoutMsg: 'el botón usar máximo no completó el monto',
+      timeout: 5000, timeoutMsg: 'the use-max button did not fill the amount',
     });
 
-    // Cerrar el modal.
+    // Close the modal.
     await (await sendModal.$('[data-close]')).click();
   });
 });

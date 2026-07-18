@@ -1,16 +1,16 @@
-// Andamiaje de los tests E2E REALES (capas 3 y 4) del programa de escritorio Brisvia.
+// Scaffolding for the REAL E2E tests (layers 3 and 4) of the Brisvia desktop app.
 //
-// Arquitectura (importante): el binario de la app lo lanza tauri-driver, y tauri-driver lo arranca el
-// PROCESO PRINCIPAL de WebdriverIO (hook onPrepare), NO el worker del spec. Por eso el entorno que ve
-// la app es el del proceso principal. Para poder darle a cada recorrido su propia carpeta/puerto/cadena,
-// corremos WebdriverIO UNA VEZ POR SPEC desde un runner (run.js) que fija el entorno antes de invocar wdio.
-// Así, el env fluye: runner -> wdio (principal) -> tauri-driver -> msedgedriver -> app.
+// Architecture (important): the app binary is launched by tauri-driver, and tauri-driver is started by the
+// MAIN PROCESS of WebdriverIO (onPrepare hook), NOT the spec worker. That is why the environment the app
+// sees is the one of the main process. To give each walkthrough its own folder/port/chain,
+// we run WebdriverIO ONCE PER SPEC from a runner (run.js) that sets the environment before invoking wdio.
+// So the env flows: runner -> wdio (main) -> tauri-driver -> msedgedriver -> app.
 //
-// Este módulo reúne:
-//   - Cómo se arma el entorno de una corrida (envFor) y cómo se lee dentro del proceso wdio (fromEnv).
-//   - Helpers "anti-flaky": esperar CONDICIONES reales (RPC arriba, altura que sube), nunca sleeps fijos.
-//   - Cierre y limpieza: detener el nodo, matar huérfanos (bitcoind + minero) por su carpeta de datos, borrar temporales.
-//   - Captura de evidencia en cada fallo.
+// This module brings together:
+//   - How the environment for a run is assembled (envFor) and how it is read inside the wdio process (fromEnv).
+//   - "Anti-flaky" helpers: wait for real CONDITIONS (RPC up, height rising), never fixed sleeps.
+//   - Shutdown and cleanup: stop the node, kill orphans (bitcoind + miner) by their data folder, delete temporaries.
+//   - Evidence capture on every failure.
 'use strict';
 
 const fs = require('fs');
@@ -25,13 +25,13 @@ const CLI = path.join(BIN_DIR, 'bitcoin-cli.exe');
 const TARGET_DIR = path.join(ROOT, 'src-tauri', 'target', 'debug');
 const ARTIFACT_DIR = path.join(ROOT, 'test-results', 'e2e-real');
 
-// Binarios de prueba (compilados por build:e2e). NUNCA se publican.
-const APP_E2E = path.join(TARGET_DIR, 'brisvia-miner-e2e.exe'); // red de prueba (tprv) -> se redirige a regtest
-const APP_MAINNET_E2E = path.join(TARGET_DIR, 'brisvia-miner-mainnet-e2e.exe'); // build de red real (para modo espera)
+// Test binaries (built by build:e2e). They are NEVER published.
+const APP_E2E = path.join(TARGET_DIR, 'brisvia-miner-e2e.exe'); // test network (tprv) -> redirected to regtest
+const APP_MAINNET_E2E = path.join(TARGET_DIR, 'brisvia-miner-mainnet-e2e.exe'); // real-network build (for wait mode)
 
-// ----- utilidades base -----
+// ----- base utilities -----
 
-// Un puerto TCP libre en localhost (el SO asigna uno en el puerto 0). Ventana de carrera mínima; alcanza para pruebas en serie.
+// A free TCP port on localhost (the OS assigns one on port 0). Minimal race window; enough for serial tests.
 function freePort() {
   return new Promise((resolve, reject) => {
     const srv = net.createServer();
@@ -44,22 +44,22 @@ function freePort() {
   });
 }
 
-// Carpeta de datos temporal y vacía para una corrida.
+// A temporary, empty data folder for a run.
 function makeDatadir(tag) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `brisvia-e2e-${tag}-`));
 }
 
-// Arma el objeto de entorno que la app necesita para una corrida aislada.
-//   datadir/port   carpeta y puerto RPC propios (BRISVIA_DATADIR / BRISVIA_RPC_PORT)
-//   regtest        true  -> nodo regtest aislado (BRISVIA_E2E_CHAIN/SUBDIR); false -> build tal cual
-//   nowUnix        si se define, congela el reloj de la app (Date.now) a ese instante unix EN SEGUNDOS
-//   app            binario a lanzar (BRISVIA_E2E_APP, lo lee wdio.conf.js)
+// Builds the environment object the app needs for an isolated run.
+//   datadir/port   its own data folder and RPC port (BRISVIA_DATADIR / BRISVIA_RPC_PORT)
+//   regtest        true  -> isolated regtest node (BRISVIA_E2E_CHAIN/SUBDIR); false -> build as is
+//   nowUnix        if set, freezes the app's clock (Date.now) to that unix instant IN SECONDS
+//   app            binary to launch (BRISVIA_E2E_APP, read by wdio.conf.js)
 function envFor({ datadir, port, regtest = true, nowUnix = null, app = APP_E2E }) {
   const env = {
     BRISVIA_DATADIR: datadir,
     BRISVIA_RPC_PORT: String(port),
-    BRISVIA_SOLO: '1', // instancia aislada: sin "instancia única" (si no, una app previa mata a la nueva)
-    // Updater apagado: endpoint local muerto -> el chequeo falla rápido y la UI sigue igual (sin salir a la red).
+    BRISVIA_SOLO: '1', // isolated instance: no "single instance" (otherwise a previous app kills the new one)
+    // Updater off: dead local endpoint -> the check fails fast and the UI stays the same (without going online).
     BRISVIA_UPDATE_ENDPOINT: 'http://127.0.0.1:1/latest.json',
     BRISVIA_E2E_APP: app,
   };
@@ -71,7 +71,7 @@ function envFor({ datadir, port, regtest = true, nowUnix = null, app = APP_E2E }
   return env;
 }
 
-// Lee la corrida en curso desde el entorno (para usar DENTRO del proceso wdio: specs y hooks).
+// Reads the current run from the environment (to use INSIDE the wdio process: specs and hooks).
 function fromEnv() {
   const datadir = process.env.BRISVIA_DATADIR;
   const port = parseInt(process.env.BRISVIA_RPC_PORT || '0', 10);
@@ -79,7 +79,7 @@ function fromEnv() {
   return { datadir, port, subdir };
 }
 
-// Ejecuta bitcoin-cli contra el nodo de la corrida (auth por cookie via -datadir + -rpcport).
+// Runs bitcoin-cli against the run's node (cookie auth via -datadir + -rpcport).
 function rpc(datadir, port, args) {
   const r = spawnSync(CLI, [`-datadir=${datadir}`, `-rpcport=${port}`, ...args], {
     encoding: 'utf8', timeout: 30000, windowsHide: true,
@@ -87,8 +87,8 @@ function rpc(datadir, port, args) {
   return { status: r.status, stdout: (r.stdout || '').trim(), stderr: (r.stderr || '').trim() };
 }
 
-// Espera genérica por una CONDICIÓN (nunca sleeps fijos). fn (sync o async) debe devolver truthy al cumplirse.
-async function waitFor(fn, { timeout = 30000, interval = 300, msg = 'condición' } = {}) {
+// Generic wait for a CONDITION (never fixed sleeps). fn (sync or async) must return truthy when met.
+async function waitFor(fn, { timeout = 30000, interval = 300, msg = 'condition' } = {}) {
   const t0 = Date.now();
   let last;
   while (Date.now() - t0 < timeout) {
@@ -98,25 +98,25 @@ async function waitFor(fn, { timeout = 30000, interval = 300, msg = 'condición'
     } catch (e) { last = e; }
     await new Promise((r) => setTimeout(r, interval));
   }
-  throw new Error(`Timeout esperando: ${msg} (último valor: ${JSON.stringify(last)})`);
+  throw new Error(`Timeout waiting for: ${msg} (last value: ${JSON.stringify(last)})`);
 }
 
-// Espera activa a que el RPC del nodo responda (getblockcount OK).
+// Actively waits for the node's RPC to respond (getblockcount OK).
 async function waitRpcUp(datadir, port, timeout = 60000) {
   return waitFor(() => rpc(datadir, port, ['getblockcount']).status === 0, {
-    timeout, interval: 500, msg: `RPC del nodo arriba en :${port}`,
+    timeout, interval: 500, msg: `node RPC up on :${port}`,
   });
 }
 
-// Altura actual de la cadena (o -1 si el RPC no respondió).
+// Current chain height (or -1 if the RPC did not respond).
 function blockCount(datadir, port) {
   const r = rpc(datadir, port, ['getblockcount']);
   return r.status === 0 ? parseInt(r.stdout, 10) : -1;
 }
 
-// ----- limpieza y evidencia -----
+// ----- cleanup and evidence -----
 
-// Mata procesos hijos (bitcoind + minero) cuya línea de comando contenga la carpeta de datos de la corrida.
+// Kills child processes (bitcoind + miner) whose command line contains the run's data folder.
 function killByDatadir(datadir) {
   if (!datadir) return;
   const needle = datadir.replace(/\\/g, '\\\\');
@@ -132,7 +132,7 @@ function killByDatadir(datadir) {
   });
 }
 
-// Lista procesos bitcoind/brisvia vivos asociados a la corrida (para la evidencia de fallo).
+// Lists live bitcoind/brisvia processes tied to the run (for the failure evidence).
 function listProcs(datadir) {
   const needle = (datadir || '').replace(/\\/g, '\\\\');
   const ps = [
@@ -148,7 +148,7 @@ function listProcs(datadir) {
   return (r.stdout || '').trim();
 }
 
-// Cuenta procesos hijos vivos de la corrida (0 = cierre limpio).
+// Counts the run's live child processes (0 = clean shutdown).
 function countProcs(datadir) {
   if (!datadir) return 0;
   const needle = datadir.replace(/\\/g, '\\\\');
@@ -164,10 +164,10 @@ function countProcs(datadir) {
   return parseInt((r.stdout || '0').trim(), 10) || 0;
 }
 
-// Detiene el nodo con gracia y, si algo queda, lo mata. Después borra los temporales (con reintentos por
-// los bloqueos de archivo de Windows). No lanza: la limpieza nunca debe romper la corrida.
-// Devuelve { cleanExit, orphans }: cleanExit=true si los procesos hijos (nodo+minero) quedaron en 0 SOLOS,
-// sin necesidad de forzar (señal de "no dejó procesos huérfanos"). orphans = cuántos hubo que forzar.
+// Stops the node gracefully and, if anything is left, kills it. Then deletes the temporaries (with retries for
+// Windows file locks). It does not throw: cleanup must never break the run.
+// Returns { cleanExit, orphans }: cleanExit=true if the child processes (node+miner) reached 0 ON THEIR OWN,
+// without needing to force them (a sign of "left no orphan processes"). orphans = how many had to be forced.
 async function teardown(run) {
   if (!run || !run.datadir) return { cleanExit: true, orphans: 0 };
   const { datadir, port } = run;
@@ -186,13 +186,13 @@ async function teardown(run) {
   return { cleanExit, orphans };
 }
 
-// Guarda evidencia cuando un recorrido falla: pantalla + debug.log del nodo + eventos del minero +
-// procesos vivos + estado del RPC, bajo test-results/e2e-real/<tag>-<timestamp>/.
+// Saves evidence when a walkthrough fails: screenshot + node debug.log + miner events +
+// live processes + RPC state, under test-results/e2e-real/<tag>-<timestamp>/.
 async function captureFailure(browser, run, testName) {
   try {
     if (!run || !run.datadir) return;
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const safe = String(testName || 'fallo').replace(/[^\w.-]+/g, '_').slice(0, 80);
+    const safe = String(testName || 'failure').replace(/[^\w.-]+/g, '_').slice(0, 80);
     const dir = path.join(ARTIFACT_DIR, `${stamp}-${safe}`);
     fs.mkdirSync(dir, { recursive: true });
     try { await browser.saveScreenshot(path.join(dir, 'screenshot.png')); } catch {}
@@ -206,17 +206,17 @@ async function captureFailure(browser, run, testName) {
     } catch {}
     try {
       const info =
-        `procesos:\n${listProcs(run.datadir)}\n\n` +
+        `processes:\n${listProcs(run.datadir)}\n\n` +
         `getblockchaininfo:\n${rpc(run.datadir, run.port, ['getblockchaininfo']).stdout}\n`;
       fs.writeFileSync(path.join(dir, 'estado.txt'), info);
     } catch {}
     return dir;
-  } catch { /* la evidencia nunca debe tumbar la corrida */ }
+  } catch { /* evidence must never take down the run */ }
 }
 
-// ----- helpers de UI (se ejecutan DENTRO del proceso wdio: usan los globals $, $$, browser, expect) -----
+// ----- UI helpers (run INSIDE the wdio process: they use the globals $, $$, browser, expect) -----
 
-// Pasa las diapositivas de bienvenida hasta llegar al paso "crear o importar".
+// Steps through the welcome slides until reaching the "create or import" step.
 async function skipWelcome() {
   const welcome = await $('[data-testid="onb-welcome"]');
   await welcome.waitForDisplayed({ timeout: 60000 });
@@ -225,13 +225,13 @@ async function skipWelcome() {
   for (let i = 0; i < 5 && !(await choose.isDisplayed()); i++) {
     await next.waitForClickable({ timeout: 10000 });
     await next.click();
-    await browser.pause(150); // deja re-renderizar la diapositiva; el corte real es el isDisplayed()
+    await browser.pause(150); // lets the slide re-render; the real cutoff is isDisplayed()
   }
   await choose.waitForDisplayed({ timeout: 10000 });
 }
 
-// Crea una billetera nueva recorriendo el alta completa (contraseña -> semilla -> verificación de
-// respaldo) y devuelve las 12 palabras generadas. Reusa el mismo flujo que valida el recorrido 02.
+// Creates a new wallet by going through the full sign-up (password -> seed -> backup
+// verification) and returns the 12 generated words. Reuses the same flow that walkthrough 02 validates.
 async function onboardCreate(password) {
   await skipWelcome();
   await (await $('[data-testid="onb-create"]')).click();
@@ -246,7 +246,7 @@ async function onboardCreate(password) {
   await seedStep.waitForDisplayed({ timeout: 30000 });
   const seedGrid = await $('[data-testid="seed-grid"]');
   await browser.waitUntil(async () => (await seedGrid.$$('li')).length === 12, {
-    timeout: 30000, timeoutMsg: 'el backend no devolvió 12 palabras',
+    timeout: 30000, timeoutMsg: 'the backend did not return 12 words',
   });
   const seed = [];
   for (const li of await seedGrid.$$('li')) seed.push((await li.getText()).trim());
@@ -273,14 +273,14 @@ async function onboardCreate(password) {
 
   const setup = await $('#setup');
   await browser.waitUntil(async () => !(await setup.isDisplayed()), {
-    timeout: 20000, timeoutMsg: 'el alta no se cerró tras verificar el respaldo',
+    timeout: 20000, timeoutMsg: 'sign-up did not close after verifying the backup',
   });
   await (await $('[data-testid="view-wallet"]')).waitForDisplayed({ timeout: 15000 });
   return seed;
 }
 
-// Lee la dirección para recibir desde la billetera ya abierta (abre el modal, espera la dirección,
-// lo cierra y la devuelve). Sirve para comparar direcciones entre reaperturas/restauraciones.
+// Reads the receive address from the already-open wallet (opens the modal, waits for the address,
+// closes it and returns it). Useful to compare addresses across reopens/restores.
 async function readReceiveAddress() {
   await (await $('.nav-btn[data-view="wallet"]')).click();
   await (await $('[data-testid="act-receive"]')).click();
@@ -288,7 +288,7 @@ async function readReceiveAddress() {
   await recvModal.waitForDisplayed({ timeout: 10000 });
   const addrEl = await $('[data-testid="recv-addr"]');
   await browser.waitUntil(async () => (await addrEl.getText()).trim().length > 10, {
-    timeout: 10000, timeoutMsg: 'no apareció una dirección para recibir',
+    timeout: 10000, timeoutMsg: 'no receive address appeared',
   });
   const addr = (await addrEl.getText()).trim();
   await (await recvModal.$('[data-close]')).click();

@@ -1,90 +1,91 @@
-# PRODUCT_CONTRACTS.md — qué es verdad en cada pantalla
+# PRODUCT_CONTRACTS.md — what is true on each screen
 
-Lo que un test unitario no ve: **si el texto que aparece tiene sentido para quien lo está viendo**.
+What a unit test does not see: **whether the text that appears makes sense for whoever is seeing it**.
 
-Fernando encontró un cartel que ofrecía "crear tu billetera" en una pantalla que **sólo ve quien ya la tiene**.
-Ningún barrido mecánico lo detecta: las claves estaban completas, sin mezcla de idiomas, todo verde. Hace falta
-saber **quién ve esa pantalla y cuándo**. Eso es lo que este archivo escribe.
+Fernando found a message offering to "create your wallet" on a screen that **only someone who already has
+one ever sees**. No mechanical sweep detects it: the keys were complete, with no language mixing, all green.
+You need to know **who sees that screen and when**. That is what this file writes down.
 
-Cada contrato dice qué **debe** verse y qué está **prohibido** ver. Lo prohibido es la parte que importa: es lo
-que nadie revisa.
-
----
-
-## Estados y contratos
-
-### Sin billetera (primer arranque)
-- **Se ve:** el onboarding (bienvenida → crear/importar → contraseña → 12 palabras → verificación).
-- **PROHIBIDO:** la pantalla de espera, la de desbloqueo, cualquier saldo, la billetera principal.
-- **Nota:** el backend decide por el archivo en disco (`wallet_seed_on_disk`), no por si el nodo responde.
-  Si falla la consulta, asumir QUE SÍ HAY billetera (fail-closed): mostrar el onboarding a quien ya la tiene
-  invita a sobrescribirla.
-
-### Con billetera, antes del 1-ago-2026 15:00 UTC (modo espera)
-- **Se ve:** la pantalla de espera, la cuenta regresiva, la billetera usable.
-- **PROHIBIDO:** cualquier texto que invite a CREAR una billetera (ya la tiene). ← *el bug de Fernando*
-- **PROHIBIDO:** el estado "Sincronizando" (confunde: todavía no hay red). Va "En espera de lanzamiento".
-- **PROHIBIDO:** que el botón de minar esté activo.
-
-### Con billetera, después del lanzamiento
-- **Se ve:** la billetera, el minado habilitado, el estado de red real.
-- **PROHIBIDO:** "Conectada" con cero pares. ← estado imposible
-- **PROHIBIDO:** decir que mina si el worker no está corriendo.
-
-### Contraseña
-- **Regla única:** mínimo **6** caracteres. El cartel y el backend dicen EXACTAMENTE lo mismo.
-  ← *el bug de Fernando: la pantalla decía 8, el backend exigía 12*
-- **PROHIBIDO:** que la pantalla anuncie un mínimo distinto al que el backend aplica.
-- La barra de fuerza es **sugerencia**, nunca obligación.
-
-### Modo de minado (1.0)
-- **Se ve:** "En solo" activo. Pool y otra pool **deshabilitados**, con el motivo escrito.
-- **PROHIBIDO:** que los botones de pool reaccionen (`POOL_ENABLED = false` manda; la pantalla sólo lo refleja).
-- **PROHIBIDO:** que la pantalla ofrezca pool si el backend no lo permite. La config es un archivo editable:
-  la pantalla sola no alcanza como candado.
-
-### El nodo no arranca
-- **Se ve:** un mensaje que dice qué pasó y qué hacer, en el idioma del usuario.
-- **PROHIBIDO:** texto crudo del nodo en inglés. ← *le apareció "node is not ready yet"*
-- **PROHIBIDO:** quedarse para siempre en "Preparando billetera" (eso es lo que pasaba con la base dañada).
-- Disco lleno / datadir bloqueado / permisos: **se informan, NO se "reparan"** (reparar no los arregla y hace
-  un bucle).
+Each contract states what **must** be seen and what is **forbidden** to see. The forbidden part is the one
+that matters: it is what nobody reviews.
 
 ---
 
-## Términos oficiales (una sola palabra por concepto)
+## States and contracts
 
-| Concepto | ES | EN | NO usar |
+### No wallet (first launch)
+- **Shown:** the onboarding (welcome → create/import → password → 12 words → verification).
+- **FORBIDDEN:** the waiting screen, the unlock screen, any balance, the main wallet.
+- **Note:** the backend decides based on the file on disk (`wallet_seed_on_disk`), not on whether the node
+  responds. If the query fails, assume a wallet DOES exist (fail-closed): showing the onboarding to someone
+  who already has one invites overwriting it.
+
+### With a wallet, before 2026-08-01 15:00 UTC (waiting mode)
+- **Shown:** the waiting screen, the countdown, the usable wallet.
+- **FORBIDDEN:** any text inviting the user to CREATE a wallet (they already have one). ← *Fernando's bug*
+- **FORBIDDEN:** the "Syncing" state (it confuses: there is no network yet). Use "Waiting for launch".
+- **FORBIDDEN:** the mine button being active.
+
+### With a wallet, after launch
+- **Shown:** the wallet, mining enabled, the real network status.
+- **FORBIDDEN:** "Connected" with zero peers. ← impossible state
+- **FORBIDDEN:** saying it is mining if the worker is not running.
+
+### Password
+- **Single rule:** minimum **6** characters. The message and the backend say EXACTLY the same thing.
+  ← *Fernando's bug: the screen said 8, the backend required 12*
+- **FORBIDDEN:** the screen announcing a minimum different from what the backend enforces.
+- The strength bar is a **suggestion**, never a requirement.
+
+### Mining mode (1.0)
+- **Shown:** "Solo" active. Pool and other pool **disabled**, with the reason written out.
+- **FORBIDDEN:** the pool buttons reacting (`POOL_ENABLED = false` rules; the screen only reflects it).
+- **FORBIDDEN:** the screen offering pool if the backend does not allow it. The config is an editable file:
+  the screen alone is not enough as a lock.
+
+### The node does not start
+- **Shown:** a message stating what happened and what to do, in the user's language.
+- **FORBIDDEN:** raw node text in English. ← *the user saw "node is not ready yet"*
+- **FORBIDDEN:** getting stuck forever on "Preparing wallet" (that is what happened with the corrupted
+  database).
+- Full disk / locked datadir / permissions: **reported, NOT "repaired"** (repairing does not fix them and
+  causes a loop).
+
+---
+
+## Official terms (a single word per concept)
+
+| Concept | ES | EN | Do not use |
 |---|---|---|---|
-| Grupo de minado | **pool** | **pool** | ~~grupo~~, ~~group~~ ← *el bug de Fernando* |
-| Moneda | Brisvia / BRVA | Brisvia / BRVA | — |
-| Palabras de recuperación | 12 palabras | 12 words | ~~seed~~, ~~semilla~~ (al usuario) |
-| Red real | red real / mainnet | real network | — |
+| Mining group | **pool** | **pool** | ~~grupo~~, ~~group~~ ← *Fernando's bug* |
+| Coin | Brisvia / BRVA | Brisvia / BRVA | — |
+| Recovery words | 12 palabras | 12 words | ~~seed~~, ~~semilla~~ (to the user) |
+| Real network | red real / mainnet | real network | — |
 
 ---
 
-## Fuentes de verdad (de dónde sale cada dato)
+## Sources of truth (where each piece of data comes from)
 
-| Dato | Fuente ÚNICA | Nunca |
+| Data | SINGLE source | Never |
 |---|---|---|
-| **Versión** | `app_version()` → `CARGO_PKG_VERSION` → `runningVersion` | escrita a mano en HTML/JS, ni leída del DOM ← *bug real: se leía del cartel de pantalla* |
-| **Red** | el backend (`netcfg`) | inferida en el frontend |
-| **Modo de minado** | el backend (`POOL_ENABLED` + `mining_mode`) | lo que diga localStorage |
-| **Hay billetera** | el archivo en disco | que el nodo responda |
-| **Pares / altura / dificultad** | el nodo por RPC | cacheada en el frontend |
-| **Share aceptada** | la confirmación explícita de la pool | haberla enviado |
+| **Version** | `app_version()` → `CARGO_PKG_VERSION` → `runningVersion` | hand-written in HTML/JS, nor read from the DOM ← *real bug: it was read from the on-screen message* |
+| **Network** | the backend (`netcfg`) | inferred in the frontend |
+| **Mining mode** | the backend (`POOL_ENABLED` + `mining_mode`) | whatever localStorage says |
+| **Wallet exists** | the file on disk | whether the node responds |
+| **Peers / height / difficulty** | the node via RPC | cached in the frontend |
+| **Accepted share** | the pool's explicit confirmation | having sent it |
 
-**Regla general:** el DOM nunca es fuente de estado. La pantalla muestra lo que el backend dice; no lo decide.
+**General rule:** the DOM is never a source of state. The screen shows what the backend says; it does not
+decide it.
 
 ---
 
-## Reglas de formato
+## Formatting rules
 
 | | ES | EN |
 |---|---|---|
-| Decimales | coma (`0,00`) | punto (`0.00`) |
-| Fecha del lanzamiento | 1 de agosto de 2026, 15:00 UTC (12:00 en Argentina) | August 1, 2026 at 15:00 UTC |
-| Unidades (`H/s`) | igual en los dos | igual en los dos |
+| Decimals | comma (`0,00`) | dot (`0.00`) |
+| Launch date | 1 de agosto de 2026, 15:00 UTC (12:00 en Argentina) | August 1, 2026 at 15:00 UTC |
+| Units (`H/s`) | same in both | same in both |
 
-Los botones de idioma van **cada uno en su propio idioma** ("Español" / "English"): eso es correcto, no una
-mezcla.
+The language buttons each go **in their own language** ("Español" / "English"): that is correct, not a mix.

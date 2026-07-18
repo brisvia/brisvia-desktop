@@ -1,10 +1,10 @@
-// Compila los DOS binarios de prueba E2E y los deja con nombre estable dentro de target/debug
-// (donde están sus DLLs vecinas). NO se publican nunca: son sólo para el testing real.
+// Builds the TWO E2E test binaries and leaves them with a stable name inside target/debug
+// (where their neighboring DLLs are). They are NEVER published: they are only for the real testing.
 //
-//   brisvia-miner-e2e.exe          -> feature e2e (red de prueba / llaves tprv), se redirige a regtest por env.
-//   brisvia-miner-mainnet-e2e.exe  -> feature mainnet + e2e (para el recorrido de modo espera).
+//   brisvia-miner-e2e.exe          -> feature e2e (test network / tprv keys), redirected to regtest via env.
+//   brisvia-miner-mainnet-e2e.exe  -> feature mainnet + e2e (for the wait-mode walkthrough).
 //
-// Localiza cargo aunque no esté en el PATH (rustup en ~/.cargo/bin), igual que run-rust-tests.js.
+// Locates cargo even if it is not on the PATH (rustup in ~/.cargo/bin), same as run-rust-tests.js.
 'use strict';
 
 const { spawnSync } = require('child_process');
@@ -23,7 +23,7 @@ function findCargo() {
 
 const cargo = findCargo();
 if (!cargo) {
-  console.error('No se encontró cargo (Rust). Instalá Rust con rustup.');
+  console.error('cargo (Rust) not found. Install Rust with rustup.');
   process.exit(1);
 }
 
@@ -38,17 +38,17 @@ const builds = [
 ];
 
 for (const b of builds) {
-  console.log(`\n=== Compilando features: ${b.features} ===`);
+  console.log(`\n=== Building features: ${b.features} ===`);
   const r = spawnSync(cargo, ['build', '--manifest-path', manifest, '--features', b.features], {
     stdio: 'inherit',
     shell: false,
   });
   if (r.status !== 0) {
-    console.error(`Falló la compilación con features ${b.features}`);
+    console.error(`Build failed with features ${b.features}`);
     process.exit(1);
   }
   const dest = path.join(targetDir, b.out);
   fs.copyFileSync(base, dest);
   console.log(`OK -> ${dest}`);
 }
-console.log('\nBinarios E2E listos.');
+console.log('\nE2E binaries ready.');

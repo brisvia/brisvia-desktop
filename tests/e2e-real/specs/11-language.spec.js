@@ -1,15 +1,15 @@
-// Recorrido P0 #11 — Cambiar idioma (es/en) desde Ajustes.
-// Sobre la app COMPILADA real, verifica que al elegir inglés/español en Ajustes la interfaz cambia
-// de idioma de verdad: el botón de idioma elegido queda activo y un texto conocido de la UI
-// (la pestaña "Billetera"/"Wallet") cambia según el idioma. No asume el idioma inicial.
+// P0 flow #11 — Change language (es/en) from Settings.
+// On the real COMPILED app, verifies that choosing English/Spanish in Settings actually changes
+// the interface language: the chosen language button stays active and a known UI text
+// (the "Billetera"/"Wallet" tab) changes according to the language. It does not assume the initial language.
 'use strict';
 
 const harness = require('../helpers/harness');
 
 const PASSWORD = 'brisvia-e2e-1234';
 
-describe('Recorrido 11 — idioma', () => {
-  it('cambia entre inglés y español y la interfaz responde', async () => {
+describe('Flow 11 — language', () => {
+  it('switches between English and Spanish and the interface responds', async () => {
     harness.fromEnv();
 
     await harness.onboardCreate(PASSWORD);
@@ -19,19 +19,19 @@ describe('Recorrido 11 — idioma', () => {
     const langSeg = await $('#set-language');
     await langSeg.waitForDisplayed({ timeout: 10000 });
 
-    // Elegir inglés -> el botón EN queda activo y la pestaña dice "Wallet".
+    // Choose English -> the EN button stays active and the tab reads "Wallet".
     await (await $('#set-language .seg-btn[data-lang="en"]')).click();
     await browser.waitUntil(async () => (await navWallet.getText()).trim() === 'Wallet', {
-      timeout: 8000, timeoutMsg: 'la interfaz no pasó a inglés',
+      timeout: 8000, timeoutMsg: 'the interface did not switch to English',
     });
     expect((await $('#set-language .seg-btn[data-lang="en"]'))).toBeTruthy();
     const enActive = await (await $('#set-language .seg-btn[data-lang="en"]')).getAttribute('class');
     expect(enActive.includes('active')).toBe(true);
 
-    // Elegir español -> el botón ES queda activo y la pestaña dice "Billetera".
+    // Choose Spanish -> the ES button stays active and the tab reads "Billetera".
     await (await $('#set-language .seg-btn[data-lang="es"]')).click();
     await browser.waitUntil(async () => (await navWallet.getText()).trim() === 'Billetera', {
-      timeout: 8000, timeoutMsg: 'la interfaz no volvió a español',
+      timeout: 8000, timeoutMsg: 'the interface did not switch back to Spanish',
     });
     const esActive = await (await $('#set-language .seg-btn[data-lang="es"]')).getAttribute('class');
     expect(esActive.includes('active')).toBe(true);

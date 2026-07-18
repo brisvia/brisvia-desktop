@@ -1,35 +1,35 @@
-// Recorrido P0 #2 — Crear billetera (flujo real de alta).
-// Sobre la app COMPILADA real (backend Rust genera las 12 palabras y cifra la billetera), verifica que:
-//   - el alta (onboarding) recorre bienvenida -> elegir -> contraseña -> semilla -> verificación;
-//   - el backend genera 12 palabras reales y las muestra;
-//   - la verificación de respaldo (elegir las palabras pedidas en orden) confirma el respaldo real;
-//   - al terminar, la app sale del alta y muestra la billetera con la versión cargada desde el backend.
-// Es "backend real sin nodo": crear la billetera no depende de que el nodo esté arriba.
+// P0 flow #2 — Create wallet (real onboarding flow).
+// On the real COMPILED app (Rust backend generates the 12 words and encrypts the wallet), verifies that:
+//   - onboarding goes through welcome -> choose -> password -> seed -> verification;
+//   - the backend generates 12 real words and displays them;
+//   - the backup verification (choosing the requested words in order) confirms the real backup;
+//   - when finished, the app leaves onboarding and shows the wallet with the version loaded from the backend.
+// This is "real backend without node": creating the wallet does not depend on the node being up.
 'use strict';
 
 const harness = require('../helpers/harness');
 
-const PASSWORD = 'brisvia-e2e-1234'; // >= 8 caracteres, igual en las dos casillas
+const PASSWORD = 'brisvia-e2e-1234'; // >= 8 characters, same in both fields
 
-describe('Recorrido 2 — crear billetera', () => {
-  it('genera 12 palabras reales, verifica el respaldo y entra a la billetera', async () => {
+describe('Flow 2 — create wallet', () => {
+  it('generates 12 real words, verifies the backup and enters the wallet', async () => {
     harness.fromEnv();
 
-    // 1) Bienvenida: la app arranca sin billetera y muestra el alta.
+    // 1) Welcome: the app starts with no wallet and shows onboarding.
     const welcome = await $('[data-testid="onb-welcome"]');
     await welcome.waitForDisplayed({ timeout: 60000 });
 
-    // 2) Pasar las 3 diapositivas de bienvenida hasta llegar a "crear o importar".
+    // 2) Go through the 3 welcome slides until reaching "create or import".
     const choose = await $('[data-testid="onb-choose"]');
     const next = await $('[data-testid="onb-next"]');
     for (let i = 0; i < 5 && !(await choose.isDisplayed()); i++) {
       await next.waitForClickable({ timeout: 10000 });
       await next.click();
-      await browser.pause(150); // deja re-renderizar la diapositiva; el corte real es el isDisplayed()
+      await browser.pause(150); // lets the slide re-render; the real gate is isDisplayed()
     }
     await choose.waitForDisplayed({ timeout: 10000 });
 
-    // 3) Elegir "crear billetera" -> paso de contraseña.
+    // 3) Choose "create wallet" -> password step.
     const create = await $('[data-testid="onb-create"]');
     await create.waitForClickable({ timeout: 10000 });
     await create.click();
@@ -43,43 +43,43 @@ describe('Recorrido 2 — crear billetera', () => {
     const passNext = await $('[data-testid="pass-next"]');
     await passNext.click();
 
-    // 4) El backend generó las 12 palabras y las muestra. Las leemos para poder verificar el respaldo.
+    // 4) The backend generated the 12 words and displays them. We read them so we can verify the backup.
     const seedStep = await $('[data-testid="onb-seed"]');
     await seedStep.waitForDisplayed({ timeout: 30000 });
     const seedGrid = await $('[data-testid="seed-grid"]');
     await browser.waitUntil(async () => (await seedGrid.$$('li')).length === 12, {
       timeout: 30000,
-      timeoutMsg: 'el backend no devolvió 12 palabras (¿falló wallet.create?)',
+      timeoutMsg: 'the backend did not return 12 words (did wallet.create fail?)',
     });
     const seedItems = await seedGrid.$$('li');
     const seed = [];
     for (const li of seedItems) seed.push((await li.getText()).trim());
     expect(seed.filter(Boolean).length).toBe(12);
 
-    // 5) Confirmar que las anotó y avanzar a la verificación.
+    // 5) Confirm they wrote them down and move on to verification.
     const ack = await $('[data-testid="seed-ack"]');
     await ack.click();
     const seedNext = await $('[data-testid="seed-next"]');
     await browser.waitUntil(async () => await seedNext.isEnabled(), {
-      timeout: 5000, timeoutMsg: 'el botón de continuar de la semilla no se habilitó tras marcar el check',
+      timeout: 5000, timeoutMsg: 'the seed continue button did not become enabled after ticking the checkbox',
     });
     await seedNext.click();
 
-    // 6) Verificación de respaldo: la app pide 3 palabras por su posición. Leemos las posiciones pedidas
-    //    y elegimos del banco la palabra correcta, en el orden pedido (posiciones ascendentes).
+    // 6) Backup verification: the app asks for 3 words by their position. We read the requested positions
+    //    and pick the correct word from the bank, in the requested order (ascending positions).
     const verifyStep = await $('[data-testid="onb-verify"]');
     await verifyStep.waitForDisplayed({ timeout: 10000 });
     const slotEls = await $$('[data-testid="verify-slots"] .slot');
     const positions = [];
     for (const s of slotEls) {
       const n = parseInt((await s.$('.slot-n').getText()).trim(), 10);
-      positions.push(n); // 1-indexado, tal como lo muestra la UI
+      positions.push(n); // 1-indexed, exactly as the UI shows it
     }
     expect(positions.length).toBe(3);
 
     for (const pos of positions) {
       const word = seed[pos - 1];
-      // Elegir el chip del banco con esa palabra que todavía no fue usado.
+      // Choose the bank chip with that word that has not been used yet.
       const chips = await $$('[data-testid="verify-bank"] .chip');
       let clicked = false;
       for (const chip of chips) {
@@ -94,14 +94,14 @@ describe('Recorrido 2 — crear billetera', () => {
       expect(clicked).toBe(true);
     }
 
-    // 7) La verificación quedó OK (la app confirma el respaldo en el backend y sale del alta).
+    // 7) Verification passed (the app confirms the backup with the backend and leaves onboarding).
     const setup = await $('#setup');
     await browser.waitUntil(async () => !(await setup.isDisplayed()), {
       timeout: 20000,
-      timeoutMsg: 'el alta no se cerró tras verificar el respaldo (¿la verificación falló?)',
+      timeoutMsg: 'onboarding did not close after verifying the backup (did verification fail?)',
     });
 
-    // 8) Estamos en la billetera y el backend responde: la vista de billetera se ve y la versión está cargada.
+    // 8) We are in the wallet and the backend responds: the wallet view is visible and the version is loaded.
     const walletView = await $('[data-testid="view-wallet"]');
     await walletView.waitForDisplayed({ timeout: 15000 });
     const ver = await $('[data-testid="ver-chip"]');

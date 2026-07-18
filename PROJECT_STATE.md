@@ -22,15 +22,15 @@ Rewrite in place — this file is a snapshot, not a log.
 
 **One, and it is not code: 1.0.6 must ship.** The two wallet P0s below are fixed *in the working tree* and
 **not in the 1.0.5 the public has installed right now**. That version can still overwrite a phrase and can
-still pay twice on a double click. ChatGPT's framing, agreed: *"si las correcciones P0 de billetera todavía
-no están en la 1.0.5 pública, entonces 1.0.6 ya es obligatoria por billetera."*
+still pay twice on a double click. The agreed framing: *"if the wallet P0 fixes are not yet in the public
+1.0.5, then 1.0.6 is already mandatory on wallet grounds."*
 **Blocked on Fernando's explicit authorisation — the mandate's one legitimate stop.**
 
-Closed in the working tree after ChatGPT's cross-audit **overruled my decision to defer them**:
+Closed in the working tree after a cross-audit **overruled my decision to defer them**:
 
 - **Phrase could be overwritten** — I had proved a wallet cannot be overwritten today (real regtest node:
   second `createwallet brisvia` → `error -4 "Database already exists."`, the `?` cuts, `encrypt_phrase_file`
-  never runs) and filed the rest as an accepted risk. ChatGPT's counter was right and I was wrong: the
+  never runs) and filed the rest as an accepted risk. The cross-audit's counter was right and I was wrong: the
   irreplaceable asset was guarded by two assumptions *the overwriting function does not control*, and
   **"the frozen scope does not apply: this is not a new feature, it is reinforcing a critical invariant."**
   Fixed: `wallet_ops` exclusive guard + fail-closed check **before touching Core** + `encrypt_phrase_file_ex`
@@ -50,7 +50,7 @@ Closed this round:
 - **Money crossed the IPC boundary as `f64`.** Now the raw string the user typed travels, the backend parses
   it into integer base units (briv), and the node gets an exact decimal string built from that integer — its
   RPC layer reads it with `ParseFixedPoint` (verified in `rpc/util.cpp`: it accepts `isStr()`). **No float
-  touches an amount on the send path.** `amount_tests`: 11 tests on the boundaries ChatGPT listed —
+  touches an amount on the send path.** `amount_tests`: 11 tests on the boundaries the cross-audit listed —
   `0.1` is exactly 10,000,000 briv (not f64's 0.1000000000000000055 — this is the everyday reason, and it
   bites at ordinary amounts), 9 decimals **refused not rounded**, `1e-8` refused, cap at 100,000,000 BRVA.
   Precision note (an earlier version of this file got it wrong): 100,000,000 *is* exactly representable in
@@ -75,7 +75,7 @@ Closed this round:
 ## Accepted risks
 
 - **Ambiguous send timeout.** If Core broadcasts but the reply is lost, the app reports failure and a user
-  may send again. The guard prevents *concurrent* duplicates, not this. Policy for launch (ChatGPT's, agreed):
+  may send again. The guard prevents *concurrent* duplicates, not this. Policy for launch (agreed):
   **never auto-retry `sendtoaddress`**. Full idempotency would mean rewriting the send path on PSBT — too
   large before Aug 1. Open P1, tracked below.
 - **Amounts cross the boundary as `f64`** (`wallet_send(amount: f64)`). Not a launch blocker at current
@@ -103,10 +103,10 @@ Closed this round:
 - **Full battery: 37 tests, 0 failed, 103.3 s.** No regressions.
 - Test node stopped, throwaway datadir deleted, no orphan `bitcoind`.
 
-**ChatGPT's cross-audit** (12.760 chars, read in full from `output/raw/`) also claimed `walletlock` is
+**The cross-audit** (12,760 chars, read in full from `output/raw/`) also claimed `walletlock` is
 skipped when a send fails. **Disproved against the code**: `res` is captured without `?`, `walletlock` runs,
-and the `?` comes after — the finally semantics are already there. It said so itself: *"no tengo delante el
-archivo wallet_send completo"*. Read it all, verify each claim.
+and the `?` comes after — the finally semantics are already there. It said so itself: *"I do not have the
+full wallet_send file in front of me."* Read it all, verify each claim.
 
 **Caught while fixing:** unifying the password rule into `friendly_error` as
 `contains("passphrase") || contains("incorrect")` translated **both** of Core's passphrase messages —
@@ -145,12 +145,12 @@ nodes is unreachable by any new client. Fixed in the working tree (third seed ad
 **decodes the compiled list** and demands exactly those three on port 9333, no duplicates, nothing from
 testnet). Ships with 1.0.6.
 
-ChatGPT rated it P1, not P0 — two entry points on two different providers survive one failure — but
-**"no aceptaría llegar al 1 de agosto sabiendo que uno de los tres nodos preparados no puede ser usado
-directamente por un cliente nuevo."** It also correctly demolished my mitigation reasoning: my gossip
-theory (the other two propagate Oracle-2 via `addr`) is **"una hipótesis plausible, no evidencia"** — addr
-relay is selective and probabilistic. A DNS seed stood up now would **not** help 1.0.5 (`vSeeds` is empty
-*in the binary* — my reading, confirmed). Distributing a `peers.dat` is rejected.
+The cross-audit rated it P1, not P0 — two entry points on two different providers survive one failure — but
+**"I would not accept reaching August 1 knowing that one of the three prepared nodes cannot be used
+directly by a new client."** It also correctly demolished my mitigation reasoning: my gossip theory (the
+other two propagate Oracle-2 via `addr`) is **"a plausible hypothesis, not evidence"** — addr relay is
+selective and probabilistic. A DNS seed stood up now would **not** help 1.0.5 (`vSeeds` is empty *in the
+binary* — my reading, confirmed). Distributing a `peers.dat` is rejected.
 
 **Still open in Block 2:** prove or disprove the gossip path end to end · fresh-client bootstrap through
 each seed individually (firewalled) · client started *before* the seeds and connecting without a restart ·
