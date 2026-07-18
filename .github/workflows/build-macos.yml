@@ -47,8 +47,25 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: brisvia/brisvia
+          ref: 69c48b2dfcf20fba70f6b5aef6958786e61ab7ed  # PINNED launch core - never build from a mutable branch
           submodules: recursive
           path: core
+
+      - name: Guard - core network identity and ports (pinned source)
+        shell: bash
+        run: |
+          set -euo pipefail
+          CP=core/src/kernel/chainparams.cpp
+          CB=core/src/chainparamsbase.cpp
+          HEAD=$(git -C core rev-parse HEAD)
+          echo "pinned core HEAD: $HEAD"
+          [ "$HEAD" = "69c48b2dfcf20fba70f6b5aef6958786e61ab7ed" ] || { echo "FAILED: core is not the pinned launch commit"; exit 1; }
+          grep -Eq 'nDefaultPort[[:space:]]*=[[:space:]]*9342' "$CP" || { echo "FAILED: Brisvia mainnet P2P 9342 missing"; exit 1; }
+          if grep -En 'nDefaultPort[[:space:]]*=[[:space:]]*933[239];' "$CP"; then echo "FAILED: a forbidden listening port (9332/9333/9339) is set as nDefaultPort"; exit 1; fi
+          grep -Eq '"brisvia-mainnet",[[:space:]]*9338' "$CB" || { echo "FAILED: Brisvia mainnet RPC 9338 missing"; exit 1; }
+          if grep -Eq '"brisvia-mainnet",[[:space:]]*9332' "$CB"; then echo "FAILED: Brisvia mainnet RPC is 9332 (must be 9338)"; exit 1; fi
+          grep -q 'aa6bc268339aa9f4f2e39ae33aca7b7e48e395033d08d37c08f828890af7baf7' "$CP" || { echo "FAILED: expected mainnet genesis constant missing"; exit 1; }
+          echo "OK: core guard - P2P 9342 / RPC 9338 / genesis aa6bc268 / no forbidden port; coin_type 9339h allowed only as BIP44"
 
       - name: Install build dependencies
         run: |
@@ -123,21 +140,26 @@ jobs:
             echo "server=1"
             echo "rpcuser=t"
             echo "rpcpassword=t"
-            echo "listen=0"
+            echo "listen=1"
+            echo "bind=127.0.0.1"
             echo "[brisvia]"
             echo "rpcport=28461"
           } > "$DD/bitcoin.conf"
-          src-tauri/binaries/bitcoind -datadir="$DD" -chain=brisvia &
+          src-tauri/binaries/bitcoind -datadir="$DD" -chain=brisvia -debug=net &
           sleep 15
           CLI="src-tauri/binaries/bitcoin-cli -datadir=$DD -chain=brisvia -rpcport=28461 -rpcuser=t -rpcpassword=t"
           GEN=$($CLI getblockhash 0 2>&1 | tr -d '[:space:]')
           $CLI stop >/dev/null 2>&1 || true
           sleep 3
+          LOG=$(find "$DD" -name debug.log | head -1)
           echo "genesis of the node to be packaged: $GEN"
           if [ "$GEN" != "aa6bc268339aa9f4f2e39ae33aca7b7e48e395033d08d37c08f828890af7baf7" ]; then
             echo "FAILED: the node has genesis $GEN, not Brisvia's real network"; exit 1
           fi
-          echo "OK: the packaged node is Brisvia's real network (genesis aa6bc268...)"
+          # Binary port guard: the running packaged node must bind P2P 9342 and never 9333/9332.
+          if ! grep -qiE 'bound to .*:9342' "$LOG"; then echo "FAILED: packaged node did not bind P2P 9342"; grep -i 'bound to' "$LOG" || true; exit 1; fi
+          if grep -qiE 'bound to .*:(9333|9332)' "$LOG"; then echo "FAILED: packaged node bound a forbidden port (9333/9332)"; exit 1; fi
+          echo "OK: the packaged node is Brisvia's real network (genesis aa6bc268...) and binds P2P 9342 (not 9333/9332)"
           python3 - <<'PY'
           import json, os
           p = "src-tauri/tauri.conf.json"

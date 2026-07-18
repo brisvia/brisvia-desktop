@@ -47,8 +47,25 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: brisvia/brisvia
+          ref: 69c48b2dfcf20fba70f6b5aef6958786e61ab7ed  # PINNED launch core - never build from a mutable branch
           submodules: recursive
           path: core
+
+      - name: Guard - core network identity and ports (pinned source)
+        shell: bash
+        run: |
+          set -euo pipefail
+          CP=core/src/kernel/chainparams.cpp
+          CB=core/src/chainparamsbase.cpp
+          HEAD=$(git -C core rev-parse HEAD)
+          echo "pinned core HEAD: $HEAD"
+          [ "$HEAD" = "69c48b2dfcf20fba70f6b5aef6958786e61ab7ed" ] || { echo "FAILED: core is not the pinned launch commit"; exit 1; }
+          grep -Eq 'nDefaultPort[[:space:]]*=[[:space:]]*9342' "$CP" || { echo "FAILED: Brisvia mainnet P2P 9342 missing"; exit 1; }
+          if grep -En 'nDefaultPort[[:space:]]*=[[:space:]]*933[239];' "$CP"; then echo "FAILED: a forbidden listening port (9332/9333/9339) is set as nDefaultPort"; exit 1; fi
+          grep -Eq '"brisvia-mainnet",[[:space:]]*9338' "$CB" || { echo "FAILED: Brisvia mainnet RPC 9338 missing"; exit 1; }
+          if grep -Eq '"brisvia-mainnet",[[:space:]]*9332' "$CB"; then echo "FAILED: Brisvia mainnet RPC is 9332 (must be 9338)"; exit 1; fi
+          grep -q 'aa6bc268339aa9f4f2e39ae33aca7b7e48e395033d08d37c08f828890af7baf7' "$CP" || { echo "FAILED: expected mainnet genesis constant missing"; exit 1; }
+          echo "OK: core guard - P2P 9342 / RPC 9338 / genesis aa6bc268 / no forbidden port; coin_type 9339h allowed only as BIP44"
 
       - name: Build RandomX (static lib, portable)
         shell: pwsh
@@ -198,8 +215,8 @@ jobs:
           $dd  = Join-Path $env:RUNNER_TEMP 'chainprobe'
           Remove-Item $dd -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path $dd | Out-Null
-          "server=1`nrpcuser=t`nrpcpassword=t`nlisten=0`n[brisvia]`nrpcport=28455" | Out-File -Encoding ascii "$dd/bitcoin.conf"
-          $p = Start-Process -FilePath $bd -ArgumentList "-datadir=$dd","-chain=brisvia" -PassThru -WindowStyle Hidden
+          "server=1`nrpcuser=t`nrpcpassword=t`nlisten=1`nbind=127.0.0.1`n[brisvia]`nrpcport=28455" | Out-File -Encoding ascii "$dd/bitcoin.conf"
+          $p = Start-Process -FilePath $bd -ArgumentList "-datadir=$dd","-chain=brisvia","-debug=net" -PassThru -WindowStyle Hidden
           Start-Sleep -Seconds 15
           $args = @("-datadir=$dd","-chain=brisvia","-rpcport=28455","-rpcuser=t","-rpcpassword=t")
           $genesis = (& $cli @args getblockhash 0) 2>&1
@@ -212,7 +229,12 @@ jobs:
             throw "FAILED: the packaged node has genesis $genesis, not Brisvia's real network."
           }
           if ($chain -notmatch '"chain":\s*"brisvia"') { throw 'FAILED: the packaged node is not on the brisvia network' }
-          Write-Host 'OK: the packaged node is the real Brisvia network (genesis aa6bc268...)'
+          # Binary port guard: the running packaged node must bind P2P 9342 and never 9333/9332.
+          $log = (Get-ChildItem -Path $dd -Recurse -Filter debug.log | Select-Object -First 1).FullName
+          $logtext = if ($log) { Get-Content $log -Raw } else { '' }
+          if ($logtext -notmatch 'Bound to .*:9342') { throw 'FAILED: the packaged node did not bind P2P 9342' }
+          if ($logtext -match 'Bound to .*:(9333|9332)') { throw 'FAILED: the packaged node bound a forbidden port (9333/9332)' }
+          Write-Host 'OK: the packaged node is the real Brisvia network (genesis aa6bc268...) and binds P2P 9342 (not 9333/9332)'
 
       - name: Attach the installer and the signed updater artifact to the release
         uses: softprops/action-gh-release@v2
