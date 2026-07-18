@@ -64,16 +64,25 @@ jobs:
       - name: Record the wallet BEFORE updating
         shell: pwsh
         run: |
-          # What must survive: the encrypted phrase, byte by byte.
+          # What must survive an update: the encrypted phrase, byte by byte.
           $seed = Get-ChildItem $env:DATADIR -Recurse -Filter "*.enc" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($seed) {
-            $h = (Get-FileHash $seed.FullName -Algorithm SHA256).Hash
-            Write-Host "seed: $($seed.Name)  $($seed.Length) bytes  SHA256=$h"
-            "SEED_HASH=$h" | Out-File -FilePath $env:GITHUB_ENV -Append
-            "SEED_PATH=$($seed.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
-          } else {
-            Write-Host "(no wallet created: the runner cannot go through onboarding)"
+          if (-not $seed) {
+            # The runner cannot go through the real onboarding, so seed a DISPOSABLE encrypted-phrase file
+            # (random bytes, never published) at the exact path the app uses (%APPDATA%\BrisviaSim\wallet_seed.enc),
+            # to actually exercise the "an update never touches the wallet" guarantee instead of silently skipping it.
+            $walletDir = Join-Path $env:APPDATA "BrisviaSim"
+            New-Item -ItemType Directory -Force -Path $walletDir | Out-Null
+            $seedPath = Join-Path $walletDir "wallet_seed.enc"
+            $bytes = New-Object byte[] 256
+            [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+            [System.IO.File]::WriteAllBytes($seedPath, $bytes)
+            $seed = Get-Item $seedPath
+            Write-Host "seeded a disposable wallet_seed.enc for the preservation check (synthetic random bytes)"
           }
+          $h = (Get-FileHash $seed.FullName -Algorithm SHA256).Hash
+          Write-Host "seed: $($seed.Name)  $($seed.Length) bytes"
+          "SEED_HASH=$h" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "SEED_PATH=$($seed.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: UPDATE to the candidate with the node running
         shell: pwsh
