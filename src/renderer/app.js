@@ -299,6 +299,7 @@ async function refreshMine() {
   // Suppress the "Preparing…" flash for a few seconds after a live power change (the engine relaunches behind the scenes).
   const preparing = mining && s.preparing && Date.now() > suppressPreparingUntil;
   const toggle = $('#toggle');
+  { const hs = $('#hero-sub'); if (hs) hs.hidden = false; } // reset each render; the mining branch hides the subtitle
   // WAIT MODE (real-network build, before the Aug 1, 2026 15:00 UTC launch): the wallet works normally,
   // but the "Mine" button stays disabled until the network opens. Fully automatic by date; nothing to toggle.
   // This is a UX convenience only — the real guarantee is the network consensus.
@@ -342,7 +343,8 @@ async function refreshMine() {
     $('#state-badge').textContent = mining ? T('mine.participating') : T('mine.stopped');
     $('#state-badge').className = 'badge ' + (mining ? 'on' : 'off');
     $('#hero-title').textContent = mining ? T('mine.on_title') : T('mine.ready_title');
-    $('#hero-sub').textContent = mining ? T('mine.on_sub') : T('mine.ready_sub');
+    // No permanent subtitle while mining (the title already carries it); keep the "ready" hint before starting.
+    { const sub = $('#hero-sub'); if (sub) { sub.hidden = mining; sub.textContent = mining ? '' : T('mine.ready_sub'); } }
   }
   $('#toggle').textContent = mining ? T('mine.stop') : T('mine.start');
   $('#toggle').className = 'btn giant ' + (mining ? 'mineral' : 'primary');
@@ -898,8 +900,9 @@ function renderMineMode(s) {
   const active = (s && (s.mode === 'pool' || s.mode === 'custom')) ? 'pool' : 'solo';
   const activeEl = $('#mine-mode-active');
   if (activeEl) activeEl.textContent = T('settings.mode_' + active).toUpperCase();
+  // The per-mode explanation lives in Settings now; the Mining screen stays uncluttered (owner's call).
   const desc = $('#mine-mode-desc');
-  if (desc) desc.textContent = T('mine.mode_' + active + '_desc');
+  if (desc) desc.hidden = true;
   // Reflect the CONFIGURED mode on the switch (may differ from active if pool is not enabled yet).
   $$('#mine-mode-seg .seg-btn').forEach((b) => {
     b.classList.toggle('active', b.dataset.mode === currentMiningMode);
@@ -1083,6 +1086,31 @@ setInterval(() => {
 }
 // Social links live in the header now (visible from any view); open them in the system browser.
 $$('.hsocial').forEach((b) => b.addEventListener('click', () => window.brisvia.openUrl(b.dataset.url)));
+
+// Share Brisvia: opens the modal; each network opens the browser with a ready message + link. Only
+// networks with a native share URL are used. These are the UNIVERSAL share links: on a phone they open
+// the native app, on a computer the web/desktop client. No image is attached from here — the shared
+// link's Open Graph card (set on brisvia.com) is what shows the logo. Never shares balance/address/hashrate.
+const SHARE_BASE = 'https://brisvia.com/';
+function shareUrlFor(net) {
+  const link = SHARE_BASE + '?utm_source=app&utm_medium=share&utm_content=' + net;
+  const u = encodeURIComponent(link);
+  const text = encodeURIComponent(T('share.text'));
+  const textX = encodeURIComponent(T('share.text_x'));
+  if (net === 'x') return 'https://twitter.com/intent/tweet?text=' + textX + '&url=' + u;
+  if (net === 'telegram') return 'https://t.me/share/url?url=' + u + '&text=' + text;
+  if (net === 'whatsapp') return 'https://wa.me/?text=' + encodeURIComponent(T('share.text') + ' ' + link);
+  if (net === 'facebook') return 'https://www.facebook.com/sharer/sharer.php?u=' + u;
+  return link;
+}
+{ const so = $('#share-open'); if (so) so.addEventListener('click', () => openModal('modal-share')); }
+$$('.share-net').forEach((b) => b.addEventListener('click', () => window.brisvia.openUrl(shareUrlFor(b.dataset.net))));
+{
+  const sc = $('#share-copy');
+  if (sc) sc.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(SHARE_BASE); sc.textContent = T('share.copied'); setTimeout(() => (sc.textContent = T('share.copy_link')), 1500); } catch {}
+  });
+}
 
 // Security and backup
 $('#set-security').addEventListener('click', () => openModal('modal-security'));

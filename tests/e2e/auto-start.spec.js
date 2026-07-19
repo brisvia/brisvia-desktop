@@ -15,6 +15,8 @@ const { installMock } = require('./fixtures');
 // Open the Mine tab on a REAL-network (mainnet) build, where the auto-start option is meaningful.
 async function gotoMineMainnet(page, cfg) {
   await installMock(page, Object.assign({ network: 'brisvia', walletReady: true, seedOnDisk: true }, cfg));
+  // The repo is English-only: run these e2e in English so the assertions read in English (no bilingual regex).
+  await page.addInitScript(() => { try { localStorage.setItem('brv_lang', 'en'); } catch (e) {} });
   await page.goto('/');
   await expect(page.locator('.view[data-view="wallet"]')).toBeVisible();
   await page.locator('[data-testid="nav-mine"]').click();
@@ -53,27 +55,27 @@ test('WITHOUT authorisation, mining never starts on its own after launch', async
   await gotoMineMainnet(page, { mainnetInMs: -1000, autoStart: false });
   // Give the 1s loop several ticks; the button must stay on "start", never flip to mining by itself.
   await page.waitForTimeout(2500);
-  await expect(page.locator(mineBtn)).not.toHaveText(/detener|stop/i); // still on "start", not mining
+  await expect(page.locator(mineBtn)).not.toHaveText(/stop/i); // still on "start", not mining
 });
 
 test('WITH authorisation in SOLO, mining starts once when mainnet is live and the node is ready', async ({ page }) => {
   await gotoMineMainnet(page, { mainnetInMs: -1000, autoStart: true, miningMode: 'solo', ibd: false });
   // The armed one-shot fires: the mine button flips to "stop", meaning it started.
-  await expect(page.locator(mineBtn)).toHaveText(/detener|stop/i);
+  await expect(page.locator(mineBtn)).toHaveText(/stop/i);
 });
 
 test('arming BEFORE launch shows "ready at launch" and does NOT start yet', async ({ page }) => {
   await gotoMineMainnet(page, { mainnetInMs: 3600000, miningMode: 'solo' });
   await page.locator(toggle).check();
-  await expect(page.locator(status)).toContainText(/preparado para comenzar|ready to start/i);
+  await expect(page.locator(status)).toContainText(/ready to start/i);
   await expect(page.locator(mineBtn)).toBeDisabled();       // still before launch: blocked
-  await expect(page.locator(mineBtn)).not.toHaveText(/detener|stop/i); // still on "start", not mining
+  await expect(page.locator(mineBtn)).not.toHaveText(/stop/i); // still on "start", not mining
 });
 
 test('SOLO with a slow node: stays armed and waits for the node, does not start', async ({ page }) => {
   await gotoMineMainnet(page, { mainnetInMs: -1000, autoStart: true, miningMode: 'solo', ibd: true });
-  await expect(page.locator(status)).toContainText(/esperando que el nodo|waiting for the node/i);
-  await expect(page.locator(mineBtn)).not.toHaveText(/detener|stop/i); // did not start
+  await expect(page.locator(status)).toContainText(/waiting for the node/i);
+  await expect(page.locator(mineBtn)).not.toHaveText(/stop/i); // did not start
 });
 
 test('POOL unavailable: waits for the pool and NEVER falls to SOLO', async ({ page }) => {
@@ -81,15 +83,15 @@ test('POOL unavailable: waits for the pool and NEVER falls to SOLO', async ({ pa
     mainnetInMs: -1000, autoStart: true, miningMode: 'pool', poolEnabled: true, poolSuspended: true,
   });
   // Must show "waiting for the pool", must NOT be mining, and the active mode must remain POOL (never solo).
-  await expect(page.locator(status)).toContainText(/esperando disponibilidad de la pool|waiting for the pool/i);
-  await expect(page.locator(mineBtn)).not.toHaveText(/detener|stop/i);
-  await expect(page.locator('[data-testid="mine-mode-active"]')).toHaveText(/grupo|pool/i);
+  await expect(page.locator(status)).toContainText(/waiting for the pool/i);
+  await expect(page.locator(mineBtn)).not.toHaveText(/stop/i);
+  await expect(page.locator('[data-testid="mine-mode-active"]')).toHaveText(/pool/i);
 });
 
 test('cancelling before launch: the choice is cleared and nothing starts', async ({ page }) => {
   await gotoMineMainnet(page, { mainnetInMs: 3600000, miningMode: 'solo' });
   await page.locator(toggle).check();
-  await expect(page.locator(status)).toContainText(/preparado para comenzar|ready to start/i);
+  await expect(page.locator(status)).toContainText(/ready to start/i);
   await page.locator('[data-testid="auto-start-cancel"]').click();
   await expect(page.locator(toggle)).not.toBeChecked();
 });
