@@ -185,8 +185,29 @@
           <div class="state-line"><span id="state-badge" class="badge off" data-testid="state-badge"></span></div>
           <h1 id="hero-title" data-testid="hero-title"></h1>
           <p id="hero-sub" class="muted"></p>
+          <!-- Mining mode, visible IN the Mine tab (not hidden in Settings). Shows the REAL active mode and lets
+               the user switch it. 1.0.9 allows SOLO and the official Brisvia pool only (no custom pools). Changing
+               while mining stops and restarts the miner cleanly; it NEVER falls silently from POOL to SOLO. -->
+          <div id="mine-mode" class="mine-mode" data-testid="mine-mode">
+            <div class="mode-line">
+              <span class="muted small" data-i18n="mine.mode_active"></span>
+              <strong id="mine-mode-active" class="brand-fg" data-testid="mine-mode-active">SOLO</strong>
+            </div>
+            <p id="mine-mode-desc" class="muted small"></p>
+            <div class="seg small-seg" id="mine-mode-seg" role="group" data-i18n-attr="aria-label:mine.mode_active">
+              <button class="seg-btn active" data-mode="solo" data-testid="mode-solo" data-i18n="settings.mode_solo"></button>
+              <button class="seg-btn" data-mode="pool" data-testid="mode-pool" data-i18n="settings.mode_pool"></button>
+            </div>
+            <p id="mine-mode-soon" class="muted small pool-soon" data-i18n="settings.pool_soon" hidden></p>
+            <p id="mine-mode-status" class="mode-confirm small" data-testid="mode-confirm" hidden></p>
+            <details class="mode-tech">
+              <summary class="muted small" data-i18n="mine.mode_tech"></summary>
+              <p class="muted small" data-i18n="mine.mode_tech_note"></p>
+            </details>
+          </div>
           <button id="toggle" class="btn giant primary" data-testid="mine-toggle"></button>
           <p id="mine-msg" class="verify-msg err" data-testid="mine-msg" hidden></p>
+          <button id="mine-retry" class="btn ghost" data-testid="mine-retry" data-i18n="mine.retry_btn" hidden></button>
           <div class="intensity">
             <span class="muted small" data-tip-key="intensity" data-i18n="mine.how_much"></span>
             <div class="seg" role="group" data-i18n-attr="aria-label:mine.how_much">
@@ -221,6 +242,7 @@
             <div class="metric-row">
               <div class="metric"><div class="m-val" id="pool-accepted" data-testid="pool-accepted">0</div><div class="m-lbl muted" data-i18n="pool.shares_accepted"></div></div>
               <div class="metric"><div class="m-val" id="pool-sent" data-testid="pool-sent">0</div><div class="m-lbl muted" data-i18n="pool.shares_sent"></div></div>
+              <div class="metric"><div class="m-val" id="pool-rejected" data-testid="pool-rejected">0</div><div class="m-lbl muted" data-i18n="pool.shares_rejected"></div></div>
             </div>
             <p id="pool-last-accepted" class="muted small" hidden></p>
             <p id="pool-error" class="pool-err small" data-testid="pool-error" hidden></p>
@@ -261,7 +283,7 @@
         </div>
         <p id="pool-soon" class="muted small pool-soon" data-i18n="settings.pool_soon" hidden></p>
         <div class="set-row" id="pool-info-row" hidden>
-          <div><div class="set-title" data-i18n="settings.pool_name_title"></div><div class="muted small" id="pool-status" data-i18n="settings.pool_status_setup"></div></div>
+          <div><div class="set-title" data-i18n="settings.pool_name_title"></div><div class="muted small" id="pool-status-setup" data-i18n="settings.pool_status_setup"></div></div>
           <div class="muted small" id="pool-addr" data-i18n="settings.pool_addr_info"></div>
         </div>
         <div class="set-row" id="pool-custom-row" hidden>
@@ -339,6 +361,7 @@
         <p class="send-net muted small" data-i18n="send.testnet_note"></p>
         <label class="field" id="send-pass-field"><span class="muted small" data-i18n="send.password"></span>
           <input id="send-pass" type="password" autocomplete="current-password" placeholder="••••••••"></label>
+        <p id="send-crypto-unknown" class="verify-msg err small" data-i18n="send.crypto_unknown" hidden></p>
         <p id="send-msg" class="verify-msg" hidden></p>
         <div class="row-gap">
           <button data-close class="btn ghost" data-i18n="send.cancel"></button>

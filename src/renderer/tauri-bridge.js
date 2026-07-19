@@ -29,6 +29,7 @@
       wallet: {
         exists: () => call('wallet_exists'),
         seedOnDisk: () => call('wallet_seed_on_disk'),
+        legacyStatus: () => call('wallet_legacy_status'),
         validatePhrase: (words) => call('wallet_validate_phrase', { words }),
         create: (password) => callE('wallet_create_bip39', { name: 'brisvia', password }),
         verifyBackup: (words) => call('wallet_verify_backup', { words }),
@@ -115,6 +116,7 @@
       restore: async () => { const wallet = { seed: genSeed(), address: genAddress(), backed_up: true, created: Date.now() }; LS.set('brv_wallet', wallet); return { ok: true }; },
       getSeed: async () => (LS.get('brv_wallet', {}).seed || []),
       checkBackup: async (words) => { const seed = LS.get('brv_wallet', {}).seed || []; return { ok: JSON.stringify(seed) === JSON.stringify(words) }; },
+      legacyStatus: async () => ({ status: 'encrypted_present' }),
       revealSeed: async () => ({ words: LS.get('brv_wallet', {}).seed || [] }),
       migrateEncrypt: async () => ({ ok: true }),
       confirmBackup: async () => { const w = LS.get('brv_wallet', {}); w.backed_up = true; LS.set('brv_wallet', w); return { backed_up: true }; },

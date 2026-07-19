@@ -17,7 +17,12 @@ import re
 import sys
 
 RAIZ = pathlib.Path(__file__).resolve().parents[1]
-CORE = RAIZ.parent / "cripto-pow"
+# The core to verify must be the SAME network CI compiles (brisvia/brisvia pinned to the 9342 port move).
+# Locally there can be two checkouts side by side: the canonical one (…/dev/cripto-pow, already on 9342) and an
+# older sibling copy that still carries Litecoin's 9333. Prefer the first that actually has the chain sources,
+# looking at the canonical location first, so the pre-push guard never validates against a stale port.
+_CORE_CANDIDATES = [RAIZ.parents[1] / "cripto-pow", RAIZ.parent / "cripto-pow"]
+CORE = next((c for c in _CORE_CANDIDATES if (c / "src" / "kernel" / "chainparams.cpp").exists()), _CORE_CANDIDATES[-1])
 
 # The canonical values of the real network. If one changes on purpose, it changes HERE, in the same commit,
 # with the reason. This script going green on its own does not mean the change is correct.
@@ -27,6 +32,10 @@ MAINNET_START = "1_785_596_400"
 COIN_TYPE = "9339"
 HRP = "brv"
 P2P_PORT = "9342"
+# The exact frozen version this release ships the pool ON with. A future pool-enabled release must bump this
+# HERE, in the same commit, with the reason. It is NOT ">=": a future version does not silently inherit the
+# authorisation to enable the pool — that is the whole point of pinning it.
+POOL_RELEASE_VERSION = "1.0.9"
 SEEDS = ["187.77.240.145:9342", "129.80.250.36:9342", "129.159.108.102:9342"]
 
 
@@ -44,17 +53,23 @@ def main() -> int:
     def chequear(cond, ok_msg, fail_msg):
         (oks if cond else fallos).append(ok_msg if cond else fail_msg)
 
-    # ---- Version: the only two allowed sources ----
+    # ---- Version: the three manifests that must agree, exactly ----
+    # Cargo.toml drives the sidecar, tauri.conf.json drives the installer + updater, package.json drives the
+    # npm build. If any one disagrees, the updater offers a version the installer did not ship. All three, or fail.
     cargo = leer(RAIZ / "src-tauri/Cargo.toml")
     tauri = leer(RAIZ / "src-tauri/tauri.conf.json")
+    pkg = leer(RAIZ / "package.json")
     v_cargo = re.search(r'^version = "([0-9.]+)"', cargo, re.M)
     v_tauri = re.search(r'"version": "([0-9.]+)"', tauri)
-    chequear(v_cargo and v_tauri, "version readable in both sources", "could not read the version")
-    if v_cargo and v_tauri:
-        chequear(v_cargo.group(1) == v_tauri.group(1),
-                 f"version in sync ({v_cargo.group(1)})",
-                 f"VERSION OUT OF SYNC: Cargo.toml={v_cargo.group(1)} vs tauri.conf.json={v_tauri.group(1)} "
-                 f"-> the updater would offer a different version than the installer ships")
+    v_pkg = re.search(r'"version":\s*"([0-9.]+)"', pkg)
+    chequear(v_cargo and v_tauri and v_pkg, "version readable in the three manifests",
+             "could not read the version in Cargo.toml / tauri.conf.json / package.json")
+    rel = v_cargo.group(1) if v_cargo else None
+    if v_cargo and v_tauri and v_pkg:
+        chequear(v_cargo.group(1) == v_tauri.group(1) == v_pkg.group(1),
+                 f"version in sync across the three manifests ({v_cargo.group(1)})",
+                 f"VERSION OUT OF SYNC: Cargo.toml={v_cargo.group(1)} tauri.conf.json={v_tauri.group(1)} "
+                 f"package.json={v_pkg.group(1)} -> the updater would offer a different version than the installer ships")
         if args.version:
             chequear(v_cargo.group(1) == args.version,
                      f"version is the expected one ({args.version})",
@@ -68,9 +83,19 @@ def main() -> int:
     chequear(re.search(r'pub const NET_CHAIN: &str = "brisvia";', lib) is not None,
              "the real network is named brisvia",
              "NET_CHAIN=brisvia not found in the mainnet config")
-    chequear('const POOL_ENABLED: bool = false;' in lib,
-             "the pool is off in the code",
-             "POOL_ENABLED is not false: the pool could turn on and the UI cannot show whether you get paid")
+    # Pool: from 1.0.9 the candidate ships the pool ENABLED (honest share UI is in). The guard is not removed —
+    # it is INVERTED and pinned: POOL_ENABLED must be declared EXACTLY ONCE as true (never off, never ambiguous,
+    # never twice) AND the release version must be EXACTLY the pinned one. A build can never ship the pool
+    # half-wired: not with an old version, not with a future version that never went through this gate.
+    pool_on_n = lib.count('const POOL_ENABLED: bool = true;')
+    pool_off_n = lib.count('const POOL_ENABLED: bool = false;')
+    chequear(pool_on_n == 1 and pool_off_n == 0,
+             "POOL_ENABLED is declared exactly once and is true",
+             f"POOL_ENABLED must appear exactly once as 'true' (found true x{pool_on_n}, false x{pool_off_n})")
+    chequear(rel == POOL_RELEASE_VERSION,
+             f"pool-enabled build carries the pinned release version {POOL_RELEASE_VERSION}",
+             f"POOL_ENABLED=true is only authorised for exactly {POOL_RELEASE_VERSION}, but the version is {rel!r}: "
+             f"an old version cannot ship the pool, and a future version must bump POOL_RELEASE_VERSION here first")
     chequear(re.search(r'"84h/' + COIN_TYPE + r"h/0h\"|84h/9339h/0h", lib) is not None or "9339" in lib,
              f"coin type {COIN_TYPE} present",
              f"coin type {COIN_TYPE} not found: the wallet would derive on another branch")

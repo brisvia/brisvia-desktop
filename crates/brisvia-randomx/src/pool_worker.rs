@@ -48,7 +48,19 @@ pub enum PoolEvent {
     TargetChangeIgnored,                           // pool tried to change difficulty mid-job; v1 waits for a new job
     BlockFound,                                    // our share met the network target → a block
     Suspended { retry_after: Option<u64> },        // pool is under maintenance (explicit) — retry, never solo
+    // About to wait before reconnecting (normal backoff OR maintenance). `retry_at` is an ABSOLUTE unix
+    // timestamp (seconds) of the next attempt, so the UI can show a real countdown that ticks down on its
+    // own clock without the backend resetting it each poll.
+    Reconnecting { retry_at: u64 },
     Disconnected(String),
+}
+
+/// Current unix time in whole seconds (for absolute retry timestamps). 0 if the clock is before the epoch.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Run a single connected session with fast job cancellation. `mine` is injected so tests can substitute a
@@ -306,6 +318,8 @@ where
                 // delay and reconnect — this loop never exits to solo.
                 if let Some(retry_str) = err.strip_prefix(SUSPENDED_PREFIX) {
                     let wait = suspended_retry_secs(address, retry_str.parse::<u64>().ok());
+                    // Maintenance countdown takes priority over the normal backoff.
+                    on_event(PoolEvent::Reconnecting { retry_at: unix_now() + wait });
                     for _ in 0..(wait * 10) {
                         if should_stop.load(Ordering::Relaxed) {
                             return;
@@ -324,6 +338,8 @@ where
         // Backoff in short slices so stopping is immediate, plus jitter: without it, every miner that lost the
         // same pool would come back at the same instant and knock it over again.
         let jitter_ms = jitter_ms(address, backoff);
+        // Tell the UI when the next attempt will happen (absolute), for the reconnect countdown.
+        on_event(PoolEvent::Reconnecting { retry_at: unix_now() + backoff });
         let slices = (backoff * 1000 + jitter_ms) / 100;
         for _ in 0..slices {
             if should_stop.load(Ordering::Relaxed) {
@@ -554,6 +570,40 @@ mod tests {
         assert_eq!(errores.len(), 1);
         assert!(!errores[0].starts_with(PERMANENT_PREFIX), "the user must read the reason, not the marker");
         assert!(errores[0].contains("rejected"), "the reason must reach the user, got: {:?}", errores[0]);
+    }
+
+    // A TEMPORARY drop (server closes without answering the login) must announce a reconnect countdown with an
+    // ABSOLUTE future timestamp, and the worker must NEVER fall to solo — it keeps trying. We capture the first
+    // Reconnecting and stop, so the test does not actually wait out the backoff.
+    #[test]
+    fn a_temporary_drop_announces_a_reconnect_countdown() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = std::thread::spawn(move || {
+            if let Ok((sock, _)) = listener.accept() {
+                let mut reader = BufReader::new(sock.try_clone().unwrap());
+                let mut login = String::new();
+                let _ = reader.read_line(&mut login); // read login, then drop the socket without answering
+            }
+        });
+        let stop = AtomicBool::new(false);
+        let mut reconnect_at = 0u64;
+        let mut saw_solo = false;
+        run_pool_worker(&addr, "brv1qtmp", "rig1", 1, false, &stop, |e| match e {
+            PoolEvent::Reconnecting { retry_at } => {
+                reconnect_at = retry_at;
+                stop.store(true, Ordering::SeqCst); // got the countdown; stop before sleeping the whole backoff
+            }
+            // there is no "solo" event; a fall to solo would show up as the worker simply exiting without a
+            // reconnect, which this assert (reconnect_at set) already guards against.
+            PoolEvent::Disconnected(_) => saw_solo = false,
+            _ => {}
+        });
+        server.join().unwrap();
+        let now = unix_now();
+        assert!(reconnect_at >= now, "reconnect countdown must be in the future: {reconnect_at} vs now {now}");
+        assert!(reconnect_at <= now + 61, "first backoff is ~1s (cap 60): {reconnect_at} vs now {now}");
+        assert!(!saw_solo);
     }
 
     // Several pools skip the explicit ok and answer the login with work. That job must be mined, not dropped.

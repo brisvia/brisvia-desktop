@@ -26,34 +26,26 @@ describe('Journey 12 — settings', () => {
       timeout: 5000, timeoutMsg: '75% intensity did not become active',
     });
 
-    // 2) Pool mining is OFF in 1.0 (POOL_ENABLED=false in the backend). The stratum engine is finished
-    //    and tested against the real pool, but what a pool miner actually needs does not exist yet: seeing
-    //    the connection, and the difference between a share found, a share submitted, and a share
-    //    ACCEPTED. Shipping the engine with no honest way to see what it is doing is how someone ends up
-    //    believing they mined for hours and were never paid.
-    //
-    //    The button must be genuinely DISABLED, not hidden: someone who came looking for pool mining
-    //    deserves to know it is coming. And a control that still reacts would be worse -- it would promise
-    //    something that does not run.
+    // 2) Pool mining is ENABLED in 1.0.9 (POOL_ENABLED=true; the honest share UI — connection, and share
+    //    found vs submitted vs ACCEPTED — shipped). The pool button must be genuinely ENABLED and selectable.
     const modePool = await $('#set-mining-mode .seg-btn[data-mode="pool"]');
-    await browser.waitUntil(async () => !(await modePool.isEnabled()), {
+    await browser.waitUntil(async () => (await modePool.isEnabled()), {
       timeout: 5000,
-      timeoutMsg: 'the pool mining button is enabled: 1.0 ships with solo mining only',
+      timeoutMsg: 'the pool mining button is disabled: 1.0.9 ships with the pool enabled',
     });
 
-    // 3) The reason, on screen. Disabled without saying why is a broken screen, not a safe one.
-    await (await $('#pool-soon')).waitForDisplayed({ timeout: 5000 });
+    // 3) The "coming soon" note must be HIDDEN now that the pool is available.
+    await browser.waitUntil(async () => !(await (await $('#pool-soon')).isDisplayed().catch(() => false)), {
+      timeout: 5000, timeoutMsg: 'the pool "coming soon" note is still shown while the pool is enabled',
+    });
 
-    // 4) Clicking it must do nothing: not activate, not open the pool row.
-    await modePool.click().catch(() => {}); // a disabled button may refuse the click, which is fine
-    await browser.pause(300);
-    const activo = ((await modePool.getAttribute('class')) || '').includes('active');
-    if (activo) throw new Error('pool mode activated even though it is disabled');
-    if (await (await $('#pool-info-row')).isDisplayed()) {
-      throw new Error('the pool row opened while pool mode is disabled');
-    }
+    // 4) Clicking pool must select it (and reveal the pool row).
+    await modePool.click();
+    await browser.waitUntil(async () => ((await modePool.getAttribute('class')) || '').includes('active'), {
+      timeout: 5000, timeoutMsg: 'pool mode did not become active on click',
+    });
 
-    // 5) Solo mining: still selectable, and the only thing 1.0 promises.
+    // 5) Solo mining: still selectable.
     const modeSolo = await $('#set-mining-mode .seg-btn[data-mode="solo"]');
     if (!(await modeSolo.isEnabled())) throw new Error('solo mode ended up disabled');
     await modeSolo.click();
