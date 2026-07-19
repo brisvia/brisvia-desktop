@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
-# Brisvia — diagnóstico Ubuntu de UNA SOLA ACCIÓN (Intel/Wayland, 24.04/26.04).
-# Baja los instaladores OFICIALES (AppImage + .deb, verifica SHA), prueba abrir la interfaz bajo todas las
-# combinaciones, usa un datadir DESCARTABLE (NUNCA toca tu billetera), y SUBE la evidencia a un enlace que
-# le pasás a Claude. No instala nada en tu sistema. No pide tus 12 palabras. No necesita sudo.
-#
-# Correr con UN comando:
-#   curl -fsSL https://raw.githubusercontent.com/brisvia/brisvia-desktop/fix/ubuntu-2604-appimage/linux-diagnostics/diagnostico-ubuntu-completo.sh | bash
+# Brisvia — diagnóstico Ubuntu (Intel/Wayland, 24.04/26.04). Correr EN LA THINKPAD (Ubuntu), no en Windows.
+# Baja los instaladores OFICIALES (AppImage + .deb, verifica SHA), prueba abrir la interfaz bajo varias
+# combinaciones (cada intento con un datadir DESCARTABLE: NUNCA toca tu billetera), y GUARDA la evidencia en
+# un archivo local. La subida a un enlace es OPCIONAL y te la pregunta al final. No instala nada. No pide tu semilla.
 set -u
 SECS=8
 AI_SHA=bbc81069bea4c009bfad9a1272f1e5cb23ada419fecf327af0926bdd424b1eec
@@ -14,11 +11,12 @@ AI_URL="https://github.com/brisvia/brisvia-desktop/releases/latest/download/Bris
 DEB_URL="https://github.com/brisvia/brisvia-desktop/releases/latest/download/Brisvia.Miner_1.0.8_amd64.deb"
 
 WORK="$(mktemp -d)"; cd "$WORK"
+DEST="$HOME/brisvia-diagnostico-$(hostname 2>/dev/null || echo host).txt"
 OUT="$WORK/evidencia.txt"; : > "$OUT"
 log(){ echo "$@" | tee -a "$OUT"; }
 
 log "=================================================================="
-log " Brisvia — diagnóstico Ubuntu (una sola corrida)  $(date -u 2>/dev/null)"
+log " Brisvia — diagnóstico Ubuntu  $(date -u 2>/dev/null)"
 log "=================================================================="
 log "Sesión : ${XDG_SESSION_TYPE:-desconocida}"
 log "Distro : $( (. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME") )"
@@ -40,7 +38,7 @@ verdict(){
   grep -qi "EGL_BAD_PARAMETER" "$f" && { echo "FALLA: EGL_BAD_PARAMETER"; return; }
   grep -qi "g_task_set_static_name" "$f" && echo "AVISO: conflicto GLib/GVFS"
   grep -qiE "Could not create default EGL|Aborting|cannot open display|Segmentation fault|undefined symbol" "$f" && { echo "FALLA: no inició los gráficos"; return; }
-  echo "OK: parece haber ABIERTO la ventana (sin error fatal en ${SECS}s)"
+  echo "SIN ERROR FATAL en ${SECS}s (proceso vivo; confirmá VOS si se vio la ventana)"
 }
 run(){ # etiqueta binario env...
   local name="$1"; local bin="$2"; shift 2
@@ -59,7 +57,7 @@ if [ -x app.AppImage ]; then
   run "[AppImage] 2. DMABUF off" ./app.AppImage WEBKIT_DISABLE_DMABUF_RENDERER=1
   run "[AppImage] 3. DMABUF+compositor off (arreglo de la rama)" ./app.AppImage WEBKIT_DISABLE_DMABUF_RENDERER=1 WEBKIT_DISABLE_COMPOSITING_MODE=1
   run "[AppImage] 4. + X11 (XWayland)" ./app.AppImage GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 WEBKIT_DISABLE_COMPOSITING_MODE=1
-  run "[AppImage] 5. + software" ./app.AppImage LIBGL_ALWAYS_SOFTWARE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1 WEBKIT_DISABLE_COMPOSITING_MODE=1
+  run "[AppImage] 5. + software (llvmpipe)" ./app.AppImage LIBGL_ALWAYS_SOFTWARE=1 MESA_LOADER_DRIVER_OVERRIDE=llvmpipe WEBKIT_DISABLE_DMABUF_RENDERER=1 WEBKIT_DISABLE_COMPOSITING_MODE=1
   log ">> [AppImage] 6. sin GLib empaquetada (usa la del sistema)"
   ( ./app.AppImage --appimage-extract >/dev/null 2>&1 )
   if [ -d squashfs-root ]; then
@@ -68,41 +66,34 @@ if [ -x app.AppImage ]; then
   fi
 fi
 
-log ">> [.deb] extraigo (sin instalar, sin sudo) y corro su binario (usa libs del sistema)"
+log ">> [.deb] extraigo (sin instalar) y corro su binario (pista rápida; la prueba REAL del .deb es instalarlo)"
 if dpkg-deb -x app.deb debroot 2>/dev/null; then
   DEBBIN=$(find debroot -type f -name 'brisvia-miner' | head -1)
-  [ -n "$DEBBIN" ] && run "[.deb] binario (system libs)" "$DEBBIN" WEBKIT_DISABLE_DMABUF_RENDERER=1 WEBKIT_DISABLE_COMPOSITING_MODE=1 || log "   (no encontré el binario en el .deb)"
-  log "   Nota: si el .deb no encuentra sus recursos así, la prueba REAL del .deb es instalarlo (sudo dpkg -i app.deb; brisvia-miner)."
-else
-  log "   (no se pudo extraer el .deb)"
+  [ -n "$DEBBIN" ] && run "[.deb] binario extraído" "$DEBBIN" WEBKIT_DISABLE_DMABUF_RENDERER=1 WEBKIT_DISABLE_COMPOSITING_MODE=1 || log "   (no encontré el binario)"
 fi
+log "   NOTA .deb: para la validación FINAL del .deb, instalalo de verdad en esta máquina (o una descartable):"
+log "        sudo apt install ./app.deb   (resuelve dependencias del sistema)  y luego abrí:  brisvia-miner"
 
+# guardar la evidencia local
+cp "$OUT" "$DEST" 2>/dev/null
 log ""
 log "=================================================================="
-log " ANÁLISIS AUTOMÁTICO"
-WIN=$(grep -B1 "OK: parece haber ABIERTO" "$OUT" | grep -m1 "^>>" | sed 's/>> //')
-if [ -n "$WIN" ]; then
-  log " -> ABRIÓ con: $WIN"
-  log "    (variante 3 = el arreglo de la rama lo resuelve; .deb o variante 6 = el conflicto de GLib se evita)"
-else
-  log " -> NINGUNA variante abrió en ${SECS}s. Con la evidencia decidimos el siguiente paso."
-fi
-log " (Todas las pruebas usaron un datadir DESCARTABLE: NO se tocó la billetera real.)"
+log " Evidencia guardada en: $DEST"
 log "=================================================================="
 
 echo ""
-echo ">> Subiendo la evidencia..."
-URL=$(curl -fsSL -F "file=@$OUT" https://0x0.st 2>/dev/null)
-[ -z "$URL" ] && URL=$(curl -fsSL --upload-file "$OUT" https://transfer.sh/brisvia-diag.txt 2>/dev/null)
-cd /; # dejar copia local por las dudas
-cp "$OUT" "$HOME/brisvia-diagnostico-$(hostname 2>/dev/null || echo host).txt" 2>/dev/null
-echo "=================================================================="
-if [ -n "$URL" ]; then
-  echo " LISTO. Pasale ESTE ENLACE a Claude:"
-  echo "   $URL"
+echo "IMPORTANTE: 'SIN ERROR FATAL' no garantiza que la ventana se haya visto (podría estar negra)."
+echo "Durante las pruebas, ¿alguna abrió una ventana de Brisvia REAL y visible (no negra)?"
+read -r -p "  Escribí el número de variante que se vio bien (o 'ninguna'): " VIS
+echo "Respuesta del usuario (variante visible): $VIS" >> "$OUT"; cp "$OUT" "$DEST" 2>/dev/null
+
+echo ""
+read -r -p "¿Querés SUBIR la evidencia a un enlace para pasársela fácil a Claude? (s/n): " SUB
+if [ "$SUB" = "s" ] || [ "$SUB" = "S" ]; then
+  URL=$(curl -fsSL -F "file=@$DEST" https://0x0.st 2>/dev/null)
+  [ -z "$URL" ] && URL=$(curl -fsSL --upload-file "$DEST" https://transfer.sh/brisvia-diag.txt 2>/dev/null)
+  if [ -n "$URL" ]; then echo ">> Pasale ESTE ENLACE a Claude:  $URL"; else echo ">> No se pudo subir. Mandale el archivo: $DEST"; fi
 else
-  echo " No pude subir la evidencia (sin internet a los servicios de subida)."
-  echo " Está guardada en: $HOME/brisvia-diagnostico-*.txt — mandale ese archivo a Claude."
+  echo ">> Ok. Mandale a Claude el archivo:  $DEST  (o abrilo, copiá todo y pegalo)."
 fi
-echo "=================================================================="
-rm -rf "$WORK"
+cd /; rm -rf "$WORK"
