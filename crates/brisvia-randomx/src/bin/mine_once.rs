@@ -242,7 +242,9 @@ fn main() {
             match e {
                 PoolEvent::Connected => println!("{}", json!({"event":"pool_connected"})),
                 PoolEvent::LoggedIn => println!("{}", json!({"event":"pool_login"})),
-                PoolEvent::NewJob { .. } => println!("{}", json!({"event":"seed_ready"})),
+                // A real job from the pool: the miner is now WORKING (contributing), not just authenticated.
+                // Also clears "Preparing…" (like seed_ready did) and ends any reconnect countdown.
+                PoolEvent::NewJob { job_id, height } => println!("{}", json!({"event":"pool_job","job_id":job_id,"height":height})),
                 PoolEvent::Hashrate(hs) => println!("{}", json!({"event":"hashrate","hashrate":hs})),
                 PoolEvent::ShareSubmitted { .. } => println!("{}", json!({"event":"share_submitted"})),
                 PoolEvent::ShareAccepted => println!("{}", json!({"event":"share_accepted"})),
@@ -251,6 +253,7 @@ fn main() {
                 PoolEvent::BlockFound => println!("{}", json!({"event":"pool_block"})),
                 PoolEvent::TargetChangeIgnored => {}
                 PoolEvent::Suspended { retry_after } => println!("{}", json!({"event":"pool_suspended","retry_after":retry_after})),
+                PoolEvent::Reconnecting { retry_at } => println!("{}", json!({"event":"pool_reconnecting","retry_at":retry_at})),
                 PoolEvent::Disconnected(msg) => println!("{}", json!({"event":"pool_disconnected","reason":msg})),
             }
         });

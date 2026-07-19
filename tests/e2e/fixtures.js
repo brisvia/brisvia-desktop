@@ -38,6 +38,11 @@ async function installMock(page, config) {
   );
 
   await page.addInitScript((c) => {
+    // Minimal in-page state so mode switches and start/stop are OBSERVABLE across calls (the real backend is
+    // stateful; a stateless mock can't test a SOLO<->POOL switch). The reported mode is normalised exactly like
+    // the backend: never "pool" while the pool is not enabled.
+    const S = { mining: false, mode: (c.miningMode || 'solo'), poolEnabled: c.poolEnabled === true };
+    const reportedMode = () => (S.mode === 'pool' && S.poolEnabled ? 'pool' : 'solo');
     // Responses per command. Each mimics the real shape the Rust backend returns.
     const responders = {
       // --- Startup / system ---
@@ -49,7 +54,7 @@ async function installMock(page, config) {
 
       // --- Node state ---
       node_status: () => ({
-        connected: true,
+        connected: c.connected !== false, // default true; set connected:false to simulate a down/unreachable node
         walletReady: c.walletReady,
         walletOnDisk: c.walletOnDisk,
       }),
@@ -69,7 +74,19 @@ async function installMock(page, config) {
 
       // --- Miner ---
       miner_status: () => ({
-        mining: false,
+        mining: S.mining,
+        mode: reportedMode(), // REAL active mode, normalised (never "pool" while the pool is disabled)
+        pool: {
+          enabled: S.poolEnabled,
+          connected: false,
+          suspended: false,
+          phase: S.mining && reportedMode() === 'pool' ? 'working' : 'disconnected',
+          retrySecs: 0,
+          hasJob: false,
+          sharesSent: 0,
+          sharesAccepted: 0,
+          sharesRejected: 0,
+        },
         hashrate: 0,
         accepted: 0,
         secondsMining: 0,
@@ -78,11 +95,16 @@ async function installMock(page, config) {
         cores: 8,
         totalSeconds: 0,
       }),
-      miner_start: () => ({ mining: true }),
-      miner_stop: () => ({ mining: false }),
+      miner_start: () => { S.mining = true; return { mining: true }; },
+      miner_stop: () => { S.mining = false; return { mining: false }; },
       miner_set_intensity: (a) => ({ intensity: (a && a.intensity) || '50' }),
 
       // --- Wallet ---
+      // LOCAL existence check (reads wallet_seed.enc, independent of the node). Defaults to walletReady so the
+      // existing scenarios keep behaving the same; set seedOnDisk explicitly to test the wallet-vs-node cases.
+      wallet_seed_on_disk: () => (c.seedOnDisk !== undefined ? c.seedOnDisk : c.walletReady),
+      // Legacy classification (B). Default encrypted_present; set legacyStatus:'legacy_corrupt' to test recovery.
+      wallet_legacy_status: () => ({ status: c.legacyStatus || 'encrypted_present' }),
       wallet_exists: () => c.walletReady,
       wallet_create_bip39: () => {
         // Simulates the backend failure (e.g. the "wpkh(): key '...' is not valid" bug).
@@ -108,14 +130,14 @@ async function installMock(page, config) {
       wallet_new_address: () => ({ address: 'brv1qdemoaddress000000000000000000000000000' }),
       wallet_addresses: () => [{ address: 'brv1qdemoaddress000000000000000000000000000', balance: 0 }],
       wallet_send: () => ({ ok: false, error: 'ERR:INSUFFICIENT_FUNDS' }),
-      wallet_kind: () => ({ kind: 'bip39', encrypted: true, has_seed_phrase: true }),
+      wallet_kind: () => { if (c.kindFails) throw 'ERR:NODE_NOT_READY'; return { kind: 'bip39', encrypted: c.encrypted !== false, has_seed_phrase: true }; },
       tx_detail: () => ({ txid: 'demo', amount: 0, confirmations: 0, blockheight: 0, time: 0 }),
       wallet_backup: () => ({ ok: true, path: 'C:/demo/brisvia-wallet.dat' }),
 
       // --- Achievements / settings ---
       achievements: () => ({ list: [], justUnlocked: [] }),
-      settings_get: () => ({ autostart: false, tray: true, defaultIntensity: '50', miningMode: 'solo' }),
-      settings_set: (a) => ({ ok: true, key: a && a.key, value: a && a.value }),
+      settings_get: () => ({ autostart: false, tray: true, defaultIntensity: '50', miningMode: S.mode }),
+      settings_set: (a) => { if (a && a.key === 'miningMode') S.mode = a.value; return { ok: true, key: a && a.key, value: a && a.value }; },
     };
 
     const invoke = (cmd, args) => {

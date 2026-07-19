@@ -63,7 +63,7 @@ const OFFICIAL_POOL_URL: &str = "pool.brisvia.com:3333";
 ///
 /// Turning this to true is a deliberate decision, not a side effect: flip it, build the UI, and the pool
 /// becomes reachable again.
-const POOL_ENABLED: bool = false;
+const POOL_ENABLED: bool = true;
 
 struct AppState {
     child: Arc<Mutex<Option<Child>>>,
@@ -109,6 +109,9 @@ struct AppState {
     pool_shares_rejected: Arc<AtomicU64>,
     pool_last_error: Arc<Mutex<String>>,
     pool_suspended: Arc<AtomicBool>, // the pool told us it is under maintenance (distinct from an error/disconnect)
+    pool_retry_after: Arc<AtomicU64>, // ABSOLUTE unix ts of the next reconnect/maintenance attempt (0 = none)
+    pool_has_job: Arc<AtomicBool>,   // a pool job is active right now -> WORKING (not just authenticated)
+    pool_ever_job: Arc<AtomicBool>,  // had at least one job this session (distinguishes authenticated vs waiting)
     pool_last_accepted_ts: Arc<AtomicU64>, // unix seconds of the last accepted share (0 = none yet)
     // Freshly generated mnemonic, kept ONLY in memory to verify the backup; wiped after confirmation. Never persisted.
     pending_mnemonic: Arc<Mutex<Option<String>>>,
@@ -951,7 +954,12 @@ fn wallet_exists(state: State<AppState>) -> bool {
 // and to avoid the "create over an existing wallet" trap after the user closed the app on the seed screen.
 #[tauri::command]
 fn wallet_seed_on_disk(state: State<AppState>) -> bool {
-    enc_seed_path(&state.datadir).exists()
+    // A wallet EXISTS locally if EITHER the encrypted seed OR the legacy plaintext phrase file is present. A
+    // legacy wallet (only wallet_seed_phrase.txt, from before password support) must NOT read as "no wallet" and
+    // re-trigger the create/restore onboarding after an update — that is how a user gets asked for 12 words they
+    // may not have, or overwrites a real wallet. Presence alone is enough to block create-onboarding; whether the
+    // legacy file is USABLE (BIP39 valid) is a separate check handled in the migration flow.
+    enc_seed_path(&state.datadir).exists() || seed_phrase_path(&state.datadir).exists()
 }
 
 // Validate a 12-word phrase WITHOUT creating a wallet, so the import screen can flag bad words BEFORE
@@ -982,8 +990,10 @@ fn wallet_seed(state: State<AppState>) -> Value {
 }
 
 #[tauri::command]
-fn wallet_confirm_backup() -> Value {
-    json!({ "backed_up": true })
+fn wallet_confirm_backup(state: State<AppState>) -> Value {
+    // "I saved them" is NOT proof of a working backup: report the REAL persisted verification state, never a
+    // bare true. The badge only turns on after wallet_verify_backup matched the re-entered words.
+    json!({ "backed_up": read_backup_verified(&state.datadir) })
 }
 
 #[tauri::command]
@@ -998,7 +1008,7 @@ fn wallet_summary(state: State<AppState>) -> Value {
         "incoming": pending,
         "pending": pending + immature,
         "address": *state.receive_addr.lock().unwrap(),
-        "backed_up": true
+        "backed_up": read_backup_verified(&state.datadir)
     })
 }
 
@@ -1419,6 +1429,7 @@ fn wallet_create_bip39(state: State<AppState>, name: String, password: String) -
     *state.pending_mnemonic.lock().unwrap() = Some(words.clone());
     // Store the phrase ENCRYPTED (Argon2id + AES-256-GCM), never plaintext.
     encrypt_phrase_file_ex(&state.datadir, &words, &password, false)?;
+    clear_backup_verified(&state.datadir); // a fresh wallet starts NOT backup-verified until re-checked
     activate_wallet(&state, &name);
     let result = {
         let list: Vec<&str> = words.split(' ').collect();
@@ -1444,6 +1455,12 @@ fn wallet_verify_backup(state: State<AppState>, words: Vec<String>) -> Value {
         zeroize::Zeroize::zeroize(&mut p);
     }
     if ok {
+        // Persist REAL proof of backup (fingerprint) so the "backup verified" badge is never a default true.
+        if let Ok(m) = Mnemonic::parse(words.join(" ").trim()) {
+            if let Ok((fp, _e, _i)) = descriptors_from_mnemonic(&m) {
+                write_backup_verified(&state.datadir, &fp);
+            }
+        }
         // Take the stored value out and wipe it too, instead of just dropping the String.
         if let Some(mut stored) = state.pending_mnemonic.lock().unwrap().take() {
             zeroize::Zeroize::zeroize(&mut stored);
@@ -1473,6 +1490,7 @@ fn wallet_restore_bip39(state: State<AppState>, phrase: String, name: String, pa
     // Encrypt the restored wallet's keys and store the phrase encrypted with the new password.
     rpc(&state.datadir, Some(&name), "encryptwallet", json!([password])).map_err(|e| friendly_error(&e))?;
     encrypt_phrase_file_ex(&state.datadir, phrase.trim(), &password, false)?;
+    clear_backup_verified(&state.datadir); // a restored wallet starts NOT backup-verified until re-checked
     activate_wallet(&state, &name);
     Ok(json!({ "ok": true, "fingerprint": fp }))
 }
@@ -1493,7 +1511,17 @@ fn wallet_migrate_encrypt(state: State<AppState>, password: String) -> Result<Va
     rpc(&state.datadir, Some(WALLET_NAME), "encryptwallet", json!([password])).map_err(|e| friendly_error(&e))?;
     if !old.is_empty() {
         encrypt_phrase_file(&state.datadir, &old.join(" "), &password)?;
-        let _ = std::fs::remove_file(seed_phrase_path(&state.datadir)); // remove the plaintext file
+        // Verify the new encrypted file REOPENS and derives the SAME fingerprint BEFORE removing the plaintext.
+        // A bad write/crash must never leave the user with the plaintext gone and no usable encrypted wallet.
+        let reopened = decrypt_phrase_file(&state.datadir, &password).map_err(|_| "ERR:MIGRATE_VERIFY".to_string())?;
+        let want = Mnemonic::parse(old.join(" ").trim()).ok()
+            .and_then(|m| descriptors_from_mnemonic(&m).ok()).map(|(fp, _, _)| fp);
+        let got = Mnemonic::parse(reopened.trim()).ok()
+            .and_then(|m| descriptors_from_mnemonic(&m).ok()).map(|(fp, _, _)| fp);
+        if want.is_none() || want != got {
+            return Err("ERR:MIGRATE_VERIFY".to_string());
+        }
+        let _ = std::fs::remove_file(seed_phrase_path(&state.datadir)); // safe now: verified reopen + same fingerprint
     }
     Ok(json!({ "ok": true }))
 }
@@ -1531,6 +1559,44 @@ fn wallet_check_backup(state: State<AppState>, words: Vec<String>) -> Value {
     json!({ "ok": !wf.is_empty() && wf.eq_ignore_ascii_case(&derived) })
 }
 
+// Classify a LEGACY wallet (plaintext wallet_seed_phrase.txt, from before password support) WITHOUT the node,
+// so onboarding never re-appears for an existing wallet and a CORRUPT legacy file is never mistaken for "no
+// wallet" (which would offer create/restore over real funds). States:
+//   encrypted_present -> wallet_seed.enc already there, nothing legacy to migrate
+//   none              -> no legacy file
+//   legacy_valid      -> file present, BIP39 valid: offer migration to an encrypted wallet
+//   legacy_corrupt    -> file present but unreadable / wrong word count / BIP39 checksum fails: offer
+//                        recovery/repair, NEVER create-onboarding
+#[tauri::command]
+fn wallet_legacy_status(state: State<AppState>) -> Value {
+    let datadir = &state.datadir;
+    if enc_seed_path(datadir).exists() {
+        return json!({ "status": "encrypted_present" });
+    }
+    let path = seed_phrase_path(datadir);
+    if !path.exists() {
+        return json!({ "status": "none" });
+    }
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return json!({ "status": "legacy_corrupt", "reason": "unreadable" }),
+    };
+    json!({ "status": classify_legacy_phrase(&raw) })
+}
+
+// Pure classification of a legacy phrase (testable without a node): "legacy_valid" only if 12/24 words AND a
+// valid BIP39 checksum; "legacy_corrupt" otherwise. A corrupt file must never read as "no wallet".
+fn classify_legacy_phrase(raw: &str) -> &'static str {
+    let words: Vec<&str> = raw.split_whitespace().collect();
+    if words.len() != 12 && words.len() != 24 {
+        return "legacy_corrupt";
+    }
+    match Mnemonic::parse(words.join(" ").trim()) {
+        Ok(_) => "legacy_valid",
+        Err(_) => "legacy_corrupt",
+    }
+}
+
 // ---- mining: launch the engine sidecar and follow its accepted-block events ----
 // Lifetime mining time is persisted in a small text file in the data directory.
 fn total_mined_path(datadir: &std::path::Path) -> std::path::PathBuf { datadir.join("mined_total_secs.txt") }
@@ -1550,10 +1616,15 @@ fn load_mining_prefs(datadir: &std::path::Path) -> (String, String) {
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| json!({}));
     let modo = v["mode"].as_str().unwrap_or("solo");
-    // The last door: this file sits on disk and anyone can edit it. With pool mining off, a "pool" written
-    // by hand (or left over from an older version) is normalised to solo on the way in, so the mode the app
-    // BELIEVES it is in always matches the mode it actually runs. Anything else is a state that lies.
-    let modo = if POOL_ENABLED { modo } else { "solo" };
+    // The last door: this file is plain JSON on disk and anyone can edit it. Only "solo" and the official
+    // "pool" are valid in 1.0.9 -- there are NO custom pools. A hand-written "custom" (with an attacker's
+    // address) or any unknown mode is normalised to solo; "pool" is honoured only when the pool ships enabled.
+    // The miner ALWAYS uses the pinned OFFICIAL_POOL_URL for pool mode, so a hand-written address in this file
+    // can never redirect payouts. The mode the app believes it is in always matches the mode it actually runs.
+    let modo = match modo {
+        "pool" if POOL_ENABLED => "pool",
+        _ => "solo",
+    };
     (modo.to_string(), v["addr"].as_str().unwrap_or("").to_string())
 }
 fn save_mining_prefs(datadir: &std::path::Path, mode: &str, addr: &str) {
@@ -1619,6 +1690,41 @@ fn load_seed_phrase(datadir: &std::path::Path) -> Vec<String> {
 // key derived from the user's password. The Core wallet's private keys are encrypted separately with
 // `encryptwallet`. Losing the password is recovered ONLY from the 12 words (there is no backdoor).
 fn enc_seed_path(datadir: &std::path::Path) -> std::path::PathBuf { datadir.join("wallet_seed.enc") }
+
+fn backup_flag_path(datadir: &std::path::Path) -> std::path::PathBuf { datadir.join("backup_verified.json") }
+
+// Whether the wallet backup was REALLY verified (the user re-entered the 12 words and they matched). Persisted
+// next to the wallet, NEVER a default true: a false "backup verified" badge can cause real fund loss. Absent or
+// unreadable file -> false.
+fn read_backup_verified(datadir: &std::path::Path) -> bool {
+    std::fs::read_to_string(backup_flag_path(datadir)).ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v["verified"].as_bool())
+        .unwrap_or(false)
+}
+
+// Persist REAL proof of backup (fingerprint + method + date). Called ONLY after a genuine re-entry match.
+// Atomic (tmp + rename) with restrictive perms where the OS allows, like the seed file.
+fn write_backup_verified(datadir: &std::path::Path, fingerprint: &str) {
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let v = json!({ "verified": true, "fingerprint": fingerprint, "method": "reenter-words-v1", "date_unix": ts });
+    let path = backup_flag_path(datadir);
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, v.to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+}
+
+// Invalidate the verified-backup proof (e.g. a new/restored wallet): the badge must NOT carry over to a different
+// wallet. Called when a wallet is created/restored so a fresh wallet starts as NOT verified.
+fn clear_backup_verified(datadir: &std::path::Path) {
+    let _ = std::fs::remove_file(backup_flag_path(datadir));
+}
 
 /// The single guard that keeps create/restore from EVER overwriting an existing wallet. Both
 /// `wallet_create_bip39` and `wallet_restore_bip39` MUST call this before touching any file: a wallet on disk
@@ -1768,6 +1874,18 @@ mod seed_crypto_tests {
                    "an existing wallet must never be overwritten by create/restore");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // B (legacy wallets): a legacy plaintext phrase is classified by BIP39; a corrupt one is NEVER "valid" and
+    // (in the frontend) never becomes create-onboarding. A wrong word count or bad checksum -> legacy_corrupt.
+    #[test]
+    fn legacy_phrase_classification() {
+        let valid = "legal winner thank year wave sausage worth useful legal winner thank yellow"; // BIP39 vector
+        assert_eq!(super::classify_legacy_phrase(valid), "legacy_valid");
+        assert_eq!(super::classify_legacy_phrase("legal winner thank"), "legacy_corrupt"); // wrong count
+        assert_eq!(super::classify_legacy_phrase(""), "legacy_corrupt");
+        let bad = "legal winner thank year wave sausage worth useful legal winner thank thank"; // broken checksum
+        assert_eq!(super::classify_legacy_phrase(bad), "legacy_corrupt");
+    }
 }
 
 #[cfg(test)]
@@ -1867,12 +1985,15 @@ mod pool_disabled_tests {
     //
     // This test is the reminder, not the mechanism: turning the switch on must be a deliberate act that
     // fails here first, so nobody flips it "just to try" and ships pool mining by accident.
+    // 1.0.9 ships the pool ENABLED: the honest share UI (connection state, share found vs sent vs ACCEPTED,
+    // reconnect countdown, maintenance) shipped and is covered end-to-end. This test now pins the switch ON
+    // deliberately, so turning it back OFF is also a conscious act, not an accident.
     #[test]
-    fn pool_mining_is_off_in_this_release() {
+    fn pool_mining_is_enabled_in_1_0_9() {
         assert!(
-            !POOL_ENABLED,
-            "pool mining is ON. That is only correct once the UI shows connection state and share \
-             accepted-vs-sent, and an end-to-end test covers it. If you meant it, update this test."
+            POOL_ENABLED,
+            "pool mining is OFF, but 1.0.9 ships it ON (the honest share UI is in). If you meant to disable it, \
+             update this test and the release guard."
         );
     }
 
@@ -1887,23 +2008,22 @@ mod pool_disabled_tests {
     // older version could have left it there. Disabling the button is not enough -- the UI is not the guard.
     // Loading must normalise it, so the mode the app believes it is in always matches the mode it runs.
     #[test]
-    fn a_pool_mode_written_by_hand_in_the_settings_file_is_ignored() {
+    fn a_hand_written_custom_pool_is_ignored_and_only_the_official_pool_is_honoured() {
         let dir = std::env::temp_dir().join("brisvia-prefs-pool-a-mano");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        // Someone edits the file (or it survived from a version where pool was on).
+        // "pool" written by hand is a VALID mode in 1.0.9 (the pool ships enabled): it is honoured, but the
+        // miner always uses the pinned OFFICIAL_POOL_URL, never an address taken from this file.
         super::save_mining_prefs(&dir, "pool", "pool.malicioso.com:3333");
         let (modo, _addr) = super::load_mining_prefs(&dir);
-        assert_eq!(
-            modo, "solo",
-            "a hand-written 'pool' survived: the app would believe it is in pool mode while mining solo"
-        );
+        assert_eq!(modo, "pool", "the official pool mode must be honoured with POOL_ENABLED on");
 
-        // And the same for a custom pool pointing anywhere.
+        // "custom" (a third-party pool address) is NOT supported in 1.0.9: it must be ignored (-> solo), so a
+        // hand-written attacker address can never redirect the miner. This is the last door.
         super::save_mining_prefs(&dir, "custom", "cualquier.cosa:1234");
         let (modo, _) = super::load_mining_prefs(&dir);
-        assert_eq!(modo, "solo", "a hand-written 'custom' survived");
+        assert_eq!(modo, "solo", "a hand-written 'custom' pool address must be ignored, never used");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2388,6 +2508,9 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
         state.pool_shares_rejected.store(0, Ordering::SeqCst);
         state.pool_last_accepted_ts.store(0, Ordering::SeqCst);
         state.pool_suspended.store(false, Ordering::SeqCst);
+        state.pool_retry_after.store(0, Ordering::SeqCst);
+        state.pool_has_job.store(false, Ordering::SeqCst);
+        state.pool_ever_job.store(false, Ordering::SeqCst);
         *state.pool_last_error.lock().unwrap() = String::new();
     }
 
@@ -2502,6 +2625,9 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
         let pool_rejected = state.pool_shares_rejected.clone();
         let pool_last_error = state.pool_last_error.clone();
         let pool_suspended = state.pool_suspended.clone();
+        let pool_retry_after = state.pool_retry_after.clone();
+        let pool_has_job = state.pool_has_job.clone();
+        let pool_ever_job = state.pool_ever_job.clone();
         let pool_last_accepted_ts = state.pool_last_accepted_ts.clone();
         std::thread::spawn(move || {
             use std::io::BufRead;
@@ -2530,12 +2656,23 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
                 let mut p_rej = 0u64;
                 let mut p_conn = false;
                 let mut p_susp = false;
+                let mut p_retry = 0u64;     // absolute unix ts of the next reconnect/maintenance attempt (0 = none)
+                let mut p_has_job = false;  // a pool job is active right now -> WORKING (not just authenticated)
+                let mut p_ever_job = false; // had at least one job this session (authenticated/first vs waiting-again)
                 let mut p_err: Option<String> = None;
                 for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
                     if let Ok(evt) = serde_json::from_str::<Value>(&line) {
                         match evt["event"].as_str() {
                             // Dataset ready or first block: the engine is working, stop showing "Preparing…".
                             Some("seed_ready") => ready.store(true, Ordering::SeqCst),
+                            // A real pool job arrived: we are now WORKING (contributing). Also marks ready
+                            // (stops "Preparing…") and ends any reconnect countdown.
+                            Some("pool_job") => {
+                                ready.store(true, Ordering::SeqCst);
+                                p_has_job = true; p_ever_job = true; p_retry = 0;
+                            }
+                            // Backoff/maintenance wait announced with an ABSOLUTE unix ts of the next attempt.
+                            Some("pool_reconnecting") => { p_retry = evt["retry_at"].as_u64().unwrap_or(0); }
                             Some("accepted") => {
                                 ready.store(true, Ordering::SeqCst);
                                 total += 1;
@@ -2554,7 +2691,8 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
                             // "connected" means the pool ACCEPTED the login (we can actually mine), not just that a
                             // TCP socket opened. So pool_connected (socket) does NOT flip it; pool_login does.
                             Some("pool_connected") => {}
-                            Some("pool_login") => { p_conn = true; p_susp = false; ready.store(true, Ordering::SeqCst); }
+                            // Login ACCEPTED -> authenticated. No job yet (until pool_job) and no longer reconnecting.
+                            Some("pool_login") => { p_conn = true; p_susp = false; p_has_job = false; p_retry = 0; ready.store(true, Ordering::SeqCst); }
                             Some("share_submitted") => { p_sent += 1; }
                             Some("share_accepted") => { p_ok += 1; ready.store(true, Ordering::SeqCst); }
                             Some("share_rejected") => {
@@ -2565,14 +2703,16 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
                             // A share met the NETWORK target: a real block found via the pool. Counts as a block.
                             Some("pool_block") => { total += 1; ready.store(true, Ordering::SeqCst); }
                             Some("pool_disconnected") => {
-                                p_conn = false;
+                                p_conn = false; p_has_job = false;
                                 p_err = Some(match evt["reason"].as_str() {
                                     Some(r) => format!("desconectado: {r}"), None => "desconectado".into() });
                             }
                             // The pool is under MAINTENANCE (explicit), not a crash or an error. Not connected
                             // for mining, but the UI must say "en mantenimiento", never "error" or "solo". The
                             // miner keeps reconnecting on its own; clear any stale error so nothing scary lingers.
-                            Some("pool_suspended") => { p_conn = false; p_susp = true; p_err = None; }
+                            // Maintenance: not connected, not an error, NOT a fall to solo. The countdown comes
+                            // from the accompanying pool_reconnecting (absolute ts); do not overwrite it here.
+                            Some("pool_suspended") => { p_conn = false; p_susp = true; p_has_job = false; p_err = None; }
                             _ => {}
                         }
                     }
@@ -2587,6 +2727,9 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
                 // Pool status: publish the recomputed counters. Stamp the last-accepted time only when it grows.
                 pool_connected.store(p_conn, Ordering::SeqCst);
                 pool_suspended.store(p_susp, Ordering::SeqCst);
+                pool_retry_after.store(p_retry, Ordering::SeqCst);
+                pool_has_job.store(p_has_job, Ordering::SeqCst);
+                pool_ever_job.store(p_ever_job, Ordering::SeqCst);
                 pool_sent.store(p_sent, Ordering::SeqCst);
                 pool_accepted.store(p_ok, Ordering::SeqCst);
                 pool_rejected.store(p_rej, Ordering::SeqCst);
@@ -2665,6 +2808,24 @@ fn miner_status(state: State<AppState>) -> Value {
     // "preparing" = mining but the engine is still building the RandomX dataset (no event received yet).
     let preparing = mining && !state.miner_ready.load(Ordering::SeqCst);
     let total = *state.total_mined_secs.lock().unwrap() + if mining { secs } else { 0 };
+    // Pool state machine (single source of truth, derived from the miner's events). "working" REQUIRES a real
+    // active job, never just an open socket. "reconnecting" is a real countdown; "suspended" (maintenance) takes
+    // priority. The miner NEVER falls to solo: an off/idle pool reads as connecting/reconnecting/disconnected.
+    let pool_conn = state.pool_connected.load(Ordering::SeqCst);
+    let pool_susp = state.pool_suspended.load(Ordering::SeqCst);
+    let pool_hasjob = state.pool_has_job.load(Ordering::SeqCst);
+    let pool_everjob = state.pool_ever_job.load(Ordering::SeqCst);
+    let pool_retry_at = state.pool_retry_after.load(Ordering::SeqCst);
+    let now_secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs()).unwrap_or(0);
+    let pool_phase = if !mining { "disconnected" }
+        else if pool_susp { "suspended" }
+        else if !pool_conn && pool_retry_at > now_secs { "reconnecting" }
+        else if !pool_conn { "connecting" }
+        else if pool_hasjob { "working" }
+        else if pool_everjob { "waiting" }
+        else { "authenticated" };
+    let pool_retry_secs = pool_retry_at.saturating_sub(now_secs);
     json!({
         "mining": mining,
         "preparing": preparing,
@@ -2685,8 +2846,12 @@ fn miner_status(state: State<AppState>) -> Value {
         // the pool CONFIRMED (a contribution counts only here). A sent share is not a paid share.
         "pool": {
             "enabled": POOL_ENABLED,
-            "connected": state.pool_connected.load(Ordering::SeqCst),
-            "suspended": state.pool_suspended.load(Ordering::SeqCst),
+            "connected": pool_conn,
+            "suspended": pool_susp,
+            // The real state-machine phase and the reconnect/maintenance countdown (seconds remaining, 0 = none).
+            "phase": pool_phase,
+            "hasJob": pool_hasjob,
+            "retrySecs": pool_retry_secs,
             "sharesSent": state.pool_shares_sent.load(Ordering::SeqCst),
             "sharesAccepted": state.pool_shares_accepted.load(Ordering::SeqCst),
             "sharesRejected": state.pool_shares_rejected.load(Ordering::SeqCst),
@@ -3106,6 +3271,25 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Linux (Intel/Wayland/Mesa): WebKitGTK can fail to initialize EGL ("Could not create default EGL
+    // display: EGL_BAD_PARAMETER. Aborting...") on Intel HD graphics under a Wayland session, so the window
+    // never opens (reported on a ThinkPad T430 / Intel HD 4000 / Ubuntu 26.04). Disabling the DMABUF renderer
+    // and the accelerated compositor makes WebKitGTK fall back to a path that initializes there. These are set
+    // as DEFAULTS, before the webview is created, and only when the user has not set them, so power users can
+    // still override (e.g. WEBKIT_DISABLE_COMPOSITING_MODE=0). This covers both the .AppImage and the .deb.
+    // GDK_BACKEND is deliberately NOT forced: pinning everyone to XWayland would regress working Wayland setups.
+    #[cfg(target_os = "linux")]
+    {
+        for (k, v) in [
+            ("WEBKIT_DISABLE_DMABUF_RENDERER", "1"),
+            ("WEBKIT_DISABLE_COMPOSITING_MODE", "1"),
+        ] {
+            if std::env::var_os(k).is_none() {
+                std::env::set_var(k, v);
+            }
+        }
+    }
+
     // data directory next to the user's app data (override with BRISVIA_DATADIR, e.g. for isolated tests)
     let datadir = std::env::var("BRISVIA_DATADIR")
         .map(PathBuf::from)
@@ -3135,6 +3319,9 @@ pub fn run() {
         pool_address: Arc::new(Mutex::new(init_pool)),
         pool_connected: Arc::new(AtomicBool::new(false)),
         pool_suspended: Arc::new(AtomicBool::new(false)),
+        pool_retry_after: Arc::new(AtomicU64::new(0)),
+        pool_has_job: Arc::new(AtomicBool::new(false)),
+        pool_ever_job: Arc::new(AtomicBool::new(false)),
         pool_shares_sent: Arc::new(AtomicU64::new(0)),
         pool_shares_accepted: Arc::new(AtomicU64::new(0)),
         pool_shares_rejected: Arc::new(AtomicU64::new(0)),
@@ -3323,6 +3510,7 @@ pub fn run() {
             wallet_reveal_seed,
             wallet_migrate_encrypt,
             wallet_check_backup,
+            wallet_legacy_status,
             settings_get,
             settings_set,
             open_url,

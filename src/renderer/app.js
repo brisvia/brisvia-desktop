@@ -113,7 +113,7 @@ $('#pass-next').addEventListener('click', async () => {
   const msg = $('#pass-msg'); msg.hidden = false; msg.className = 'verify-msg err';
   if ([...p1].length < 6) { msg.textContent = T('onboarding.pass_weak'); return; } // [...] counts code points, matching backend MIN_PASSWORD_LEN
   if (p1 !== p2) { msg.textContent = T('onboarding.pass_mismatch'); return; }
-  const btn = $('#pass-next'); btn.disabled = true; btn.textContent = T('onboarding.creating');
+  const btn = $('#pass-next'); btn.disabled = true; btn.textContent = T(passMode === 'import' ? 'onboarding.restoring' : 'onboarding.creating');
   try {
     if (passMode === 'create') {
       const r = await window.brisvia.wallet.create(p1);
@@ -288,6 +288,7 @@ function fmtDuration(secs) {
 async function refreshMine() {
   const s = await window.brisvia.getStatus();
   mining = s.mining;
+  renderMineMode(s); // keep the in-tab mode box in sync with the REAL active mode (before any early return)
   // Suppress the "Preparing…" flash for a few seconds after a live power change (the engine relaunches behind the scenes).
   const preparing = mining && s.preparing && Date.now() > suppressPreparingUntil;
   const toggle = $('#toggle');
@@ -318,11 +319,19 @@ async function refreshMine() {
   toggle.disabled = false;
   // Three states: stopped / preparing (building the dataset, a few seconds) / participating.
   if (preparing) {
+    if (!refreshMine._prepSince) refreshMine._prepSince = Date.now();
+    const prepEl = (Date.now() - refreshMine._prepSince) / 1000;
     $('#state-badge').textContent = T('mine.preparing');
     $('#state-badge').className = 'badge prep';
     $('#hero-title').textContent = T('mine.preparing_title');
-    $('#hero-sub').textContent = T('mine.preparing_sub');
+    // Escalate honestly: "Preparing…" must never sit mute forever nor read as "mining" (the badge stays "prep").
+    // Soft notice at 30s; "may be stuck" + how to retry (Stop cleans the worker, then Start) at 120s.
+    $('#hero-sub').textContent = prepEl > 120 ? T('mine.preparing_stuck')
+      : (prepEl > 30 ? T('mine.preparing_slow') : T('mine.preparing_sub'));
+    { const retry = $('#mine-retry'); if (retry) retry.hidden = !(prepEl > 120); } // real Retry button after 120s
   } else {
+    refreshMine._prepSince = 0;
+    { const retry = $('#mine-retry'); if (retry) retry.hidden = true; }
     $('#state-badge').textContent = mining ? T('mine.participating') : T('mine.stopped');
     $('#state-badge').className = 'badge ' + (mining ? 'on' : 'off');
     $('#hero-title').textContent = mining ? T('mine.on_title') : T('mine.ready_title');
@@ -348,14 +357,22 @@ async function refreshMine() {
     if (inPool) {
       $('#pool-accepted').textContent = window.I18N.fmtNum(p.sharesAccepted || 0);
       $('#pool-sent').textContent = window.I18N.fmtNum(p.sharesSent || 0);
-      const connected = !!p.connected;
-      // Maintenance is a distinct, honest state: the pool told us it is paused. Not an error, not a disconnect,
-      // and the miner is NOT falling to solo — it keeps reconnecting. Show it plainly, never as a failure.
-      const suspended = !!p.suspended;
-      $('#pool-conn-dot').className = 'conn-dot ' + (connected ? 'on' : ((suspended || mining) ? 'wait' : 'off'));
-      $('#pool-conn-text').textContent = suspended
-        ? T('pool.maintenance')
-        : (connected ? T('pool.connected') : (mining ? T('pool.connecting') : T('pool.disconnected')));
+      $('#pool-rejected').textContent = window.I18N.fmtNum(p.sharesRejected || 0);
+      // Single source of truth: the phase comes from the backend state machine (derived from the miner's real
+      // events). "working" means an active job + hashing, NEVER just an open socket; "suspended" is honest
+      // maintenance (not an error, not a fall to solo); "reconnecting" shows a real countdown. Green only while
+      // actually working; amber while connecting/authenticated/waiting/reconnecting/suspended; grey when off.
+      const phase = p.phase || (mining ? 'connecting' : 'disconnected');
+      const dotClass = (phase === 'working') ? 'on' : (phase === 'disconnected' ? 'off' : 'wait');
+      $('#pool-conn-dot').className = 'conn-dot ' + dotClass;
+      let phaseTxt = T('pool.phase_' + phase);
+      // Reconnect / maintenance countdown (retrySecs = seconds remaining, ticks down on the frontend's clock).
+      if ((phase === 'reconnecting' || phase === 'suspended') && p.retrySecs > 0) {
+        phaseTxt += ' ' + T('pool.retry_in', { s: p.retrySecs });
+      }
+      $('#pool-conn-text').textContent = phaseTxt;
+      const connected = phase === 'working' || phase === 'waiting' || phase === 'authenticated';
+      const suspended = phase === 'suspended';
       const la = $('#pool-last-accepted');
       if (p.lastAcceptedTs > 0) {
         la.hidden = false;
@@ -363,9 +380,9 @@ async function refreshMine() {
       } else { la.hidden = true; }
       const err = $('#pool-error');
       if (p.lastError) { err.hidden = false; err.textContent = p.lastError; } else { err.hidden = true; }
-      // Speed in pool mode: the pool worker does not emit a per-second hashrate yet, so avoid a misleading
-      // "0 H/s" — say "measuring" while connected. The honest work signal here is accepted shares (above).
-      // Emitting the real pool hashrate is a tracked follow-up, validated against the live pool.
+      // Speed in pool mode: the pool worker DOES emit a per-second hashrate (consumed into s.hashrate). While
+      // it is still 0 (right after login, before the first sample) show "measuring" instead of a misleading
+      // "0 H/s". The honest work signal here is accepted shares (above).
       if (suspended) $('#m-speed').textContent = T('pool.maintenance');
       else if (mining && connected && (s.hashrate || 0) === 0) $('#m-speed').textContent = T('pool.measuring');
     }
@@ -393,6 +410,20 @@ $('#toggle').addEventListener('click', async () => {
     const r = await window.brisvia.start(currentIntensity());
     if (r && r.error && mm) { mm.textContent = transError(r.error); mm.hidden = false; }
   }
+  refreshMine();
+});
+// Retry a stuck "Preparing…": stop terminates the (possibly hung) worker cleanly (mining=false), then start
+// launches a FRESH one. Stop-before-start means a retry never leaves two workers running.
+$('#mine-retry')?.addEventListener('click', async () => {
+  const r = $('#mine-retry'); if (r) r.disabled = true;
+  const mm = $('#mine-msg'); if (mm) mm.hidden = true;
+  try {
+    await window.brisvia.stop();
+    refreshMine._prepSince = 0;
+    const res = await window.brisvia.start(currentIntensity());
+    if (res && res.error && mm) { mm.textContent = transError(res.error); mm.hidden = false; }
+  } catch {}
+  if (r) r.disabled = false;
   refreshMine();
 });
 // Mining power: a percentage (1..100) of the machine's cores. Named shortcuts + a slider for fine control.
@@ -441,13 +472,48 @@ function catLabel(cat) {
 }
 let availableBalance = 0; // spendable balance; used by the Send modal and the "use max" button
 let walletEncrypted = false; // whether the Core wallet has a password (new format) vs old unencrypted one
+let walletCryptoKnown = false; // did wallet.kind() actually tell us? false = UNKNOWN (slow/down node) -> never assume unencrypted
+// Re-check the wallet crypto state. A failed kind() (slow/down node) leaves it UNKNOWN, never "unencrypted":
+// assuming unencrypted would hide the password field and make a real send fail as "wrong password".
+async function refreshWalletCrypto() {
+  try {
+    const k = await window.brisvia.wallet.kind();
+    if (k && typeof k.encrypted === 'boolean') { walletEncrypted = k.encrypted; walletCryptoKnown = true; return; }
+  } catch {}
+  walletCryptoKnown = false;
+}
+// Reflect the crypto state on the Send modal. UNKNOWN: keep the password field visible, show a "cannot verify,
+// retrying" note, DISABLE sending, and retry. encrypted: show the field. unencrypted: hide it. Only SENDING is
+// blocked on unknown — receiving and viewing the address stay available.
+let sendCryptoTimer = null;
+function clearSendCryptoTimer() { if (sendCryptoTimer) { clearTimeout(sendCryptoTimer); sendCryptoTimer = null; } }
+function applySendCryptoState(nextDelay) {
+  const field = $('#send-pass-field'), note = $('#send-crypto-unknown'), go = $('#send-go');
+  clearSendCryptoTimer();
+  if (!walletCryptoKnown) {
+    if (field) field.hidden = false;   // never hide the password on unknown
+    if (note) note.hidden = false;
+    if (go) go.disabled = true;        // block ONLY sending
+    const d = nextDelay || 3000;       // progressive backoff 3s -> 5s -> ~10s (cap), not a fixed 3s forever
+    sendCryptoTimer = setTimeout(async () => {
+      sendCryptoTimer = null;
+      if ($('#modal-send').hidden) return; // cancel if Send was closed
+      await refreshWalletCrypto();
+      applySendCryptoState(Math.min(Math.round(d * 1.8), 10000));
+    }, d);
+  } else {
+    if (field) field.hidden = !walletEncrypted;
+    if (note) note.hidden = true;
+    if (go) go.disabled = false;
+  }
+}
 async function loadWallet() {
   const w = await window.brisvia.wallet.summary();
   // Big number = what can be spent now (available). Maturing (mining rewards) and Incoming (unconfirmed) are
   // shown apart, each only if there is an amount. They are NEVER added into the available number.
   availableBalance = w.balance || 0;
   const bb = $('#backup-badge'); if (bb) { bb.textContent = T('wallet.backup_ok'); bb.hidden = !w.backed_up; }
-  try { const k = await window.brisvia.wallet.kind(); walletEncrypted = !!(k && k.encrypted); } catch {}
+  await refreshWalletCrypto();
   $('#bal-amount').textContent = fmt(w.balance);
   const mat = w.immature || 0, inc = w.incoming || 0;
   $('#bd-maturing-row').hidden = !(mat > 0);
@@ -607,11 +673,13 @@ $('#recv-history').addEventListener('click', async (e) => {
 function showReceive(addr) {
   $('#recv-history').hidden = true;
   $('#recv-addr').textContent = addr || '';
-  $('#qr').innerHTML = fakeQR(addr || '');
+  // No decorative QR: it looked scannable but encoded NOTHING, which is misleading on a receive-funds screen.
+  // The copyable address above is the source of truth. A REAL QR of the exact address is a post-launch follow-up.
+  const qr = $('#qr'); if (qr) qr.hidden = true;
   openModal('modal-receive');
 }
-// Deterministic decorative QR (visual placeholder until the real backend generates the actual QR).
-function fakeQR(seedStr) {
+// (removed) Decorative fake QR: misleading on a money screen. Kept out until a real QR encoder is integrated.
+function fakeQR_unused_removed(seedStr) {
   const N = 21; let h = 2166136261;
   for (let i = 0; i < seedStr.length; i++) { h ^= seedStr.charCodeAt(i); h = Math.imul(h, 16777619); }
   let rects = '';
@@ -662,13 +730,15 @@ function fmtAmountInput(n) {
   // very same language rules then reject.
   return (window.I18N && window.I18N.lang === 'es') ? plain.replace('.', ',') : plain;
 }
-$('#act-send').addEventListener('click', () => {
+$('#act-send').addEventListener('click', async () => {
   $('#send-addr').value = ''; $('#send-amount').value = ''; $('#send-pass').value = ''; $('#send-msg').hidden = true;
   $('#send-avail').textContent = fmt(availableBalance);
-  $('#send-pass-field').hidden = !walletEncrypted; // old unencrypted wallets don't ask for a password
   $('#send-step1').hidden = false; $('#send-step2').hidden = true; pendingSend = null; // always open on the review step
   const go = $('#send-go'); go.disabled = false; go.classList.remove('is-busy');
   openModal('modal-send');
+  // Re-check the crypto state on open (it may have been UNKNOWN at load on a slow node) and reflect it.
+  await refreshWalletCrypto();
+  applySendCryptoState();
 });
 // "Use max": fills the whole available balance. The tiny network fee is taken by the node when it builds
 // the transaction; on the test network it is minimal, so if it doesn't fit the user just lowers the amount.
@@ -700,6 +770,7 @@ $('#send-go').addEventListener('click', async () => {
   if (!addr || addr.length < 14 || !addr.toLowerCase().includes('brv')) { msg.textContent = T('send.invalid_addr'); return; }
   if (amountCanon == null || !(amount > 0)) { msg.textContent = T('send.invalid_amount'); return; }
   if (amount > availableBalance + 1e-8) { msg.textContent = T('send.over_balance'); return; }
+  if (!walletCryptoKnown) { msg.textContent = T('send.crypto_unknown'); return; } // never send while UNKNOWN
   if (walletEncrypted && !pass) { msg.textContent = T('send.need_pass'); return; }
   msg.hidden = true;
   go.disabled = true; go.classList.add('is-busy');
@@ -802,7 +873,76 @@ function applyPoolAvailability(enabled) {
     const poolRow = $('#pool-info-row'); if (poolRow) poolRow.hidden = true;
     const customRow = $('#pool-custom-row'); if (customRow) customRow.hidden = true;
   }
+  // Keep the in-tab (Mine) pool button in sync with availability, too.
+  const mp = $('#mine-mode-seg .seg-btn[data-mode="pool"]');
+  if (mp) { mp.disabled = !enabled; mp.classList.toggle('seg-off', !enabled); }
+  const mSoon = $('#mine-mode-soon'); if (mSoon) mSoon.hidden = enabled;
 }
+
+// ===== Mining-mode box IN the Mine tab (Priority 2.B) =====
+// Shows the REAL active mode (from miner_status.mode) and lets the user switch SOLO <-> official pool right from
+// Mining. 1.0.9 has SOLO and the official Brisvia pool only (no custom pools here). Changing while mining stops
+// and restarts cleanly and CONFIRMS the new mode really started; it never falls silently from pool to solo.
+function renderMineMode(s) {
+  const box = $('#mine-mode');
+  if (!box) return;
+  const poolEnabled = !!(s && s.pool && s.pool.enabled);
+  // The mode the backend is REALLY running (normalised: never "pool" while POOL_ENABLED is off).
+  const active = (s && (s.mode === 'pool' || s.mode === 'custom')) ? 'pool' : 'solo';
+  const activeEl = $('#mine-mode-active');
+  if (activeEl) activeEl.textContent = T('settings.mode_' + active).toUpperCase();
+  const desc = $('#mine-mode-desc');
+  if (desc) desc.textContent = T('mine.mode_' + active + '_desc');
+  // Reflect the CONFIGURED mode on the switch (may differ from active if pool is not enabled yet).
+  $$('#mine-mode-seg .seg-btn').forEach((b) => {
+    b.classList.toggle('active', b.dataset.mode === currentMiningMode);
+    if (b.dataset.mode === 'pool') { b.disabled = !poolEnabled; b.classList.toggle('seg-off', !poolEnabled); }
+  });
+  const soon = $('#mine-mode-soon');
+  if (soon) soon.hidden = poolEnabled;
+  // If the user configured pool but the backend still runs solo (pool not enabled), say so honestly — never
+  // pretend it is pooled. Do not clobber a live "switching/switched" message (dataset.busy guards it).
+  const st = $('#mine-mode-status');
+  if (st && !st.dataset.busy) {
+    if (currentMiningMode !== active) { st.hidden = false; st.textContent = T('mine.mode_mismatch'); }
+  }
+}
+
+// Switch mode from the Mine tab: persist atomically, then (if mining) stop+restart cleanly, then CONFIRM the
+// backend really switched. Never leaves an ambiguous state and never silently falls to solo.
+async function changeMiningMode(mode) {
+  const st = $('#mine-mode-status');
+  if (st) { st.dataset.busy = '1'; st.hidden = false; st.textContent = T('mine.mode_switching'); }
+  applyMiningMode(mode);                                     // updates currentMiningMode + the Settings mirror
+  try { await window.brisvia.settings.set('miningMode', mode); } catch {}
+  const wasMining = mining;
+  try {
+    if (wasMining) {
+      await window.brisvia.stop();
+      await window.brisvia.start(currentIntensity());
+    }
+  } catch (e) {
+    if (st) { st.textContent = T('mine.mode_switch_err'); delete st.dataset.busy; }
+    await refreshMine();
+    return;
+  }
+  await refreshMine();
+  // Confirm the REAL active mode after the restart (never a silent fall to solo).
+  const s = await window.brisvia.getStatus();
+  const active = (s && (s.mode === 'pool' || s.mode === 'custom')) ? 'pool' : 'solo';
+  if (st) {
+    delete st.dataset.busy;
+    st.hidden = false;
+    st.textContent = (active === mode)
+      ? T('mine.mode_switched', { m: T('settings.mode_' + active).toUpperCase() })
+      : T('mine.mode_mismatch');
+  }
+}
+$$('#mine-mode-seg .seg-btn').forEach((b) => b.addEventListener('click', () => {
+  if (b.disabled) return;
+  if (b.dataset.mode === currentMiningMode) return;
+  changeMiningMode(b.dataset.mode);
+}));
 // Custom pool address: persist what the user types (on change/blur), trimmed.
 {
   const poolAddrInput = $('#set-pool-addr');
@@ -1225,6 +1365,12 @@ function launchCountdownText() {
 // the wallet works now). On a testnet/preview build it stays the test-network notice. It hides ITSELF the
 // moment real mining begins, with no update required.
 function updateTestnetBanner() {
+  // Money-screen safety (P0): the Send modal's "these coins are for practice only" note must ONLY appear on a
+  // CONFIRMED test build. On the mainnet build — or before we know which network this build targets — hide it,
+  // so a money screen never tells someone their REAL BRVA is "for practice". Fail-safe: hidden unless we know
+  // it is testnet.
+  const sendNet = document.querySelector('.send-net');
+  if (sendNet) sendNet.hidden = !(netInfoReceived && !isMainnetBuild);
   const banner = $('#testnet-banner');
   if (!banner) return;
   const diff = MAINNET_START - Date.now();
@@ -1303,21 +1449,33 @@ async function init() {
     // definitive "no seed on disk" (false) opens the first-run flow.
     let walletExists = true;
     try { walletExists = await window.brisvia.wallet.seedOnDisk(); } catch { walletExists = true; }
-    if (!walletExists) {
+    // A legacy plaintext backup that is CORRUPT (bad checksum / wrong word count / unreadable) must NEVER be
+    // mistaken for "no wallet" (which would offer CREATE over real funds) nor silently loaded as an unusable
+    // wallet: send the user to RECOVERY (restore), never the create flow. Resolved locally, without the node.
+    let legacyCorrupt = false;
+    if (walletExists) {
+      try { const lg = await window.brisvia.wallet.legacyStatus(); legacyCorrupt = !!(lg && lg.status === 'legacy_corrupt'); } catch {}
+    }
+    if (legacyCorrupt) {
+      $('#setup').hidden = false;
+      onbStep = 0; renderOnb(); setupStep('import'); // recovery/restore only — NEVER create
+      setInterval(pollNet, 3000);
+    } else if (!walletExists) {
       $('#setup').hidden = false;
       onbStep = 0; renderOnb(); setupStep('welcome');
       setInterval(pollNet, 3000);
     } else {
-    setNet(false, 'net.connecting');
-    let ready = false, decided = false, walletOnDisk = false;
+    // The wallet EXISTS (seedOnDisk, resolved locally above). From here the node NEVER decides onboarding:
+    // we only wait for it to LOAD the wallet (walletReady). A slow, syncing, unreachable or offline node keeps
+    // us on the wallet view, never on create/restore. No RPC timeout/error can open the first-run flow: the
+    // node's walletOnDisk (which is false when the node is down, indistinguishable from "no wallet") is NEVER
+    // consulted to end this wait — only walletReady advances, and the timeout falls through to the wallet view.
+    setNet(false, 'net.wallet_found');
+    let ready = false, decided = false;
     for (let i = 0; i < 150 && !decided; i++) {
       await pollNet();
       const s = await window.brisvia.nodeStatus();
-      if (s && s.connected) {
-        if (s.walletOnDisk) walletOnDisk = true;
-        if (s.walletReady) { ready = true; decided = true; }
-        else if (s.walletOnDisk === false) { decided = true; }
-      }
+      if (s && s.connected && s.walletReady) { ready = true; decided = true; }
       if (!decided) await sleep(1000);
     }
     if (ready) {
@@ -1344,7 +1502,6 @@ async function init() {
       // for the 12 words (which they may not have) or, worse, overwriting their wallet. Go to the wallet view;
       // pollNet + the refresh interval load it once the node is ready. A slow node after an update (or the
       // mainnet port change) must not be mistaken for "no wallet".
-      void walletOnDisk; // (kept for logging/telemetry; the decision no longer branches on it)
       $('#setup').hidden = true;
       showView('wallet');
       loadWallet();
@@ -1395,7 +1552,7 @@ $('#protect-go').addEventListener('click', async () => {
   const btn = $('#protect-go'); btn.disabled = true;
   const r = await window.brisvia.wallet.migrateEncrypt(p1);
   btn.disabled = false;
-  if (r && r.ok) { walletEncrypted = true; msg.hidden = true; closeModal('modal-protect'); loadWallet(); }
+  if (r && r.ok) { walletEncrypted = true; walletCryptoKnown = true; msg.hidden = true; closeModal('modal-protect'); loadWallet(); }
   else { msg.textContent = (r && r.error) ? transError(r.error) : T('protect.fail'); }
 });
 
