@@ -3,7 +3,7 @@ name: Verify candidate artifacts
 # Verifies the draft artifacts WITHOUT RECOMPILING: downloads each package, pulls the node out of it,
 # runs it on its native system and asks IT which network it is.
 #
-# Why it exists (ChatGPT, 2026-07-15): "It is not enough for the workflow to have run the binary before
+# Why it exists (audit, 2026-07-15): "It is not enough for the workflow to have run the binary before
 # packaging it. You have to run the one that came out of the final package." The build verifies what it
 # stages; this verifies what people download. They are not the same, and the difference between them is
 # exactly where a wrong sidecar slips in.

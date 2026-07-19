@@ -33,6 +33,19 @@ async function installMock(page, config) {
       walletOnDisk: false,
       createWords: DEMO_WORDS,
       createError: null,
+      // Auto-start-at-launch scenario knobs:
+      //   mainnetInMs   launch instant relative to now (ms). Positive = future (wait mode); negative = already past.
+      //   mainnetAbsMs  absolute launch instant (ms); overrides mainnetInMs when set.
+      //   ibd           node still syncing (SOLO dependency not ready) when true.
+      //   poolConnected / poolSuspended  pool availability (POOL dependency).
+      //   autoStart / autoIntensity  the persisted auto-start choice the backend would return on startup.
+      mainnetInMs: 3600000, // default: 1 h in the future -> wait mode
+      mainnetAbsMs: null,
+      ibd: false,
+      poolConnected: false,
+      poolSuspended: false,
+      autoStart: false,
+      autoIntensity: 'equilibrado',
     },
     config || {},
   );
@@ -41,8 +54,12 @@ async function installMock(page, config) {
     // Minimal in-page state so mode switches and start/stop are OBSERVABLE across calls (the real backend is
     // stateful; a stateless mock can't test a SOLO<->POOL switch). The reported mode is normalised exactly like
     // the backend: never "pool" while the pool is not enabled.
-    const S = { mining: false, mode: (c.miningMode || 'solo'), poolEnabled: c.poolEnabled === true };
+    const S = { mining: false, mode: (c.miningMode || 'solo'), poolEnabled: c.poolEnabled === true,
+                autoStart: c.autoStart === true, autoIntensity: c.autoIntensity || 'equilibrado' };
     const reportedMode = () => (S.mode === 'pool' && S.poolEnabled ? 'pool' : 'solo');
+    // The launch instant is a FIXED point captured once when the page loads (like the real backend constant), so
+    // real time advancing past it crosses the boundary — that is how the "hot unlock" is tested without a restart.
+    const launchAt = (typeof c.mainnetAbsMs === 'number') ? c.mainnetAbsMs : Date.now() + c.mainnetInMs;
     // Responses per command. Each mimics the real shape the Rust backend returns.
     const responders = {
       // --- Startup / system ---
@@ -66,8 +83,8 @@ async function installMock(page, config) {
         headers: 0,
         peers: 3,
         difficulty: 1,
-        ibd: false, // not syncing
-        verificationprogress: 1,
+        ibd: c.ibd === true, // still syncing when the scenario sets ibd (SOLO dependency not ready)
+        verificationprogress: c.ibd === true ? 0.5 : 1,
         bestblockhash: '0'.repeat(64),
         networkhashps: 0,
       }),
@@ -78,10 +95,11 @@ async function installMock(page, config) {
         mode: reportedMode(), // REAL active mode, normalised (never "pool" while the pool is disabled)
         pool: {
           enabled: S.poolEnabled,
-          connected: false,
-          suspended: false,
-          phase: S.mining && reportedMode() === 'pool' ? 'working' : 'disconnected',
-          retrySecs: 0,
+          connected: c.poolConnected === true,
+          suspended: c.poolSuspended === true,
+          phase: S.mining && reportedMode() === 'pool' ? 'working'
+            : (c.poolSuspended === true ? 'suspended' : 'disconnected'),
+          retrySecs: c.poolSuspended === true ? 45 : 0,
           hasJob: false,
           sharesSent: 0,
           sharesAccepted: 0,
@@ -93,6 +111,10 @@ async function installMock(page, config) {
         intensity: '50',
         threads: 0,
         cores: 8,
+        // Auto-start-at-launch fields the frontend reads: the canonical launch instant + the persisted choice.
+        mainnetStartMs: launchAt,
+        autoStart: S.autoStart,
+        autoIntensity: S.autoIntensity,
         totalSeconds: 0,
       }),
       miner_start: () => { S.mining = true; return { mining: true }; },
@@ -138,6 +160,8 @@ async function installMock(page, config) {
       achievements: () => ({ list: [], justUnlocked: [] }),
       settings_get: () => ({ autostart: false, tray: true, defaultIntensity: '50', miningMode: S.mode }),
       settings_set: (a) => { if (a && a.key === 'miningMode') S.mode = a.value; return { ok: true, key: a && a.key, value: a && a.value }; },
+      // Arm/disarm the voluntary auto-start (persisted in the stateful mock so a reload could re-read it).
+      mining_set_autostart: (a) => { S.autoStart = !!(a && a.enabled); if (a && a.intensity) S.autoIntensity = a.intensity; return { ok: true, autoStart: S.autoStart, autoIntensity: S.autoIntensity }; },
     };
 
     const invoke = (cmd, args) => {

@@ -2,7 +2,7 @@
 //! Ties together `stratum` (protocol), `pool_miner` (the RandomX search) and `worksource` (the job type).
 //! Approach D: the pool sends a ready header; the worker only varies the nonce and submits {job_id, nonce}.
 //!
-//! Cancellation (per ChatGPT's SECURITY review, P0): a reader loop receives jobs and raises a `cancel` flag on
+//! Cancellation (per the SECURITY review, P0): a reader loop receives jobs and raises a `cancel` flag on
 //! every new job (or disconnect); the miner checks that flag (mine_job polls it every 256 hashes), so it drops a
 //! dead job within milliseconds instead of scanning up to 50M nonces. Only the current generation's share is
 //! submitted; a solution for a superseded job is discarded. The audited solo path is untouched.
@@ -33,7 +33,7 @@ fn suspended_retry_secs(address: &str, given: Option<u64>) -> u64 {
 }
 
 /// One event the worker reports (the Tauri backend turns these into UI updates, like the solo worker).
-/// Per ChatGPT: found-locally, submitted, and accepted are DISTINCT — the UI counts a contribution only on
+/// Per the audit: found-locally, submitted, and accepted are DISTINCT — the UI counts a contribution only on
 /// `ShareAccepted` (the pool's explicit confirmation), never on submit.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PoolEvent {
@@ -209,7 +209,7 @@ where
                             on_event(PoolEvent::ShareRejected { reason: reason.unwrap_or_default() });
                         }
                     }
-                    // Contract (avoids the block+ack double count ChatGPT flagged): the pool sends EXACTLY ONE
+                    // Contract (avoids the block+ack double count the audit flagged): the pool sends EXACTLY ONE
                     // verdict per share. A share that turns out to be a block arrives as a `block`, NOT as an
                     // `ack{accepted}` as well — so counting the block as an accepted share here is not a double
                     // count. `accepted:false` (e.g. a stale block on a reorg) marks the block without crediting it.
@@ -221,7 +221,7 @@ where
                     }
                     // A pool-level error (bad login, too many bad shares) is terminal for this session.
                     Poll::Message(Incoming::PoolError(e)) => return Err(format!("pool error: {e}")),
-                    // The pool went into maintenance mid-session. Atomic cutoff (ChatGPT): invalidate the
+                    // The pool went into maintenance mid-session. Atomic cutoff (audit): invalidate the
                     // current job and cancel mining so NO share found from this instant on is submitted; zero
                     // the hashrate; tell the UI; then end the session so the reconnect loop waits the suggested
                     // delay and comes back — it must NEVER fall to solo.
@@ -684,7 +684,7 @@ mod tests {
         assert!(accepted, "worker should mark the share accepted only after the pool's ack");
     }
 
-    // Guardian (ChatGPT P0 #1): a pool under maintenance must be reported as Suspended, NOT as a Disconnect or
+    // Guardian (audit P0 #1): a pool under maintenance must be reported as Suspended, NOT as a Disconnect or
     // an error, and the miner must never submit a share or fall to solo. Login-time path.
     #[test]
     fn login_time_maintenance_is_suspended_not_disconnected() {

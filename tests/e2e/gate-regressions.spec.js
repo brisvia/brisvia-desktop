@@ -1,4 +1,4 @@
-// E2E regressions for the pre-freeze gate (ChatGPT): A (unknown crypto), B (legacy corrupt), D (retry).
+// E2E regressions for the pre-freeze gate (audit): A (unknown crypto), B (legacy corrupt), D (retry).
 'use strict';
 
 const { test, expect } = require('@playwright/test');
@@ -30,8 +30,7 @@ test('B: valid/modern wallet does not trigger recovery', async ({ page }) => {
 // allow sending; receiving/the address stay available.
 test('A: unknown crypto -> Send blocked, password shown, receive still works', async ({ page }) => {
   await gotoWallet(page, { kindFails: true });
-  await page.locator('[data-testid="act-send"]').click().catch(() => {});
-  await page.locator('#act-send').click().catch(() => {});
+  await page.locator('#act-send').click();
   // The "cannot verify" note shows and the review button is disabled.
   await expect(page.locator('#send-crypto-unknown')).toBeVisible();
   await expect(page.locator('#send-go')).toBeDisabled();

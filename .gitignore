@@ -46,3 +46,8 @@ __pycache__/
 
 # Sealed validation evidence (per-run hashes and manifests; kept private, never versioned)
 evidence/
+
+# Internal docs/tools kept out of the public repo (pre-launch audit)
+PROJECT_STATE.md
+PRODUCT_CONTRACTS.md
+tools/autorizar.py

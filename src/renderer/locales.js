@@ -17,6 +17,26 @@ window.LOCALES = {
       mainnet_in: 'Minado real en {d} d {h} h {m} min {s} s',
       mainnet_soon: 'El minado real está por comenzar',
     },
+    // Voluntary auto-start when mainnet goes live (Mining tab). Off by default; a conscious choice.
+    autostart: {
+      label: 'Comenzar a minar automáticamente cuando se active mainnet',
+      badge: 'Automático',
+      mainnet_active: 'Mainnet activa',
+      hint: 'Al llegar la hora, la aplicación puede usar tu procesador (CPU) automáticamente.',
+      detail_mode: 'Modo:',
+      detail_cpu: 'CPU:',
+      cancel: 'Cancelar inicio automático',
+      retry: 'Reintentar',
+      cpu_suave: 'Suave',
+      cpu_equilibrado: 'Equilibrado',
+      cpu_intenso: 'Intenso',
+      state_armed: 'Preparado para comenzar al lanzamiento',
+      state_waiting_node: 'Esperando que el nodo esté listo',
+      state_waiting_pool: 'Esperando disponibilidad de la pool',
+      state_starting: 'Inicio automático en curso',
+      state_failed: 'No se pudo iniciar automáticamente',
+      state_cancelled: 'Inicio automático cancelado',
+    },
     // Modo espera (build de red real, antes del lanzamiento del 1 de agosto de 2026 15:00 UTC).
     wait: {
       badge: 'Próximamente',
@@ -347,6 +367,26 @@ window.LOCALES = {
       wallet_note: 'Your wallet (your 12 words) will also work on the real network.',
       mainnet_in: 'Real mining in {d}d {h}h {m}min {s}s',
       mainnet_soon: 'Real mining is about to begin',
+    },
+    // Voluntary automatic start when mainnet goes live (Mining tab). Off by default; a conscious opt-in.
+    autostart: {
+      label: 'Start mining automatically when mainnet goes live',
+      badge: 'Automatic',
+      mainnet_active: 'Mainnet active',
+      hint: 'When the time comes, the app may use your processor (CPU) automatically.',
+      detail_mode: 'Mode:',
+      detail_cpu: 'CPU:',
+      cancel: 'Cancel automatic start',
+      retry: 'Retry',
+      cpu_suave: 'Light',
+      cpu_equilibrado: 'Balanced',
+      cpu_intenso: 'Full',
+      state_armed: 'Ready to start at launch',
+      state_waiting_node: 'Waiting for the node to be ready',
+      state_waiting_pool: 'Waiting for the pool to be available',
+      state_starting: 'Automatic start in progress',
+      state_failed: 'Could not start automatically',
+      state_cancelled: 'Automatic start cancelled',
     },
     // Wait mode (real-network build, before the Aug 1, 2026 15:00 UTC launch).
     wait: {

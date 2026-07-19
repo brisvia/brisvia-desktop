@@ -1104,7 +1104,7 @@ fn wallet_send(state: State<AppState>, address: String, amount: String, password
 fn wallet_estimate_send(state: State<AppState>, address: String, amount: String) -> Result<Value, String> {
     let briv = parse_amount_briv(&amount)?;
     // The SAME exact 8-decimal string the real send uses — never routed through an f64 — so the estimate and
-    // the send agree on the amount to the base unit (ChatGPT's correction).
+    // the send agree on the amount to the base unit (audit correction).
     let exact = briv_to_decimal(briv);
     let mut out = serde_json::Map::new();
     out.insert(address, json!(exact));
@@ -1312,7 +1312,7 @@ fn descriptors_from_mnemonic(mnemonic: &Mnemonic) -> Result<(String, String, Str
 // E2E MIGRATION HELPER — compiled ONLY under the `e2e-helper` feature, NEVER in the public app.
 // It exists so the macOS/Linux migration jobs can create a THROWAWAY wallet_seed.enc using the EXACT production
 // crypto (so the file is byte-compatible with what the app writes) and, after an update, prove the surviving
-// file still unlocks and derives the SAME address. Security (ChatGPT): there is deliberately NO seed-input path
+// file still unlocks and derives the SAME address. Security (audit): there is deliberately NO seed-input path
 // in the production binary — this whole module and its bin are feature-gated out of every release build. The
 // throwaway mnemonic/password travel over STDIN (never argv/logs); only the PUBLIC address is printed.
 // Gated behind the existing `e2e` feature (test-only, never in a release build).
@@ -1608,13 +1608,29 @@ fn save_total_mined(datadir: &std::path::Path, secs: u64) {
     let _ = std::fs::write(total_mined_path(datadir), secs.to_string());
 }
 
-// Mining mode ("solo"/"pool"/"custom") + custom pool address, persisted so the chosen mode survives restarts.
+// Mining mode ("solo"/"pool") + custom pool address + the OPTIONAL "start automatically when mainnet goes live"
+// choice, persisted so they survive restarts. The app fully owns this small JSON object; it is written ATOMICALLY
+// (temp + rename) so a crash mid-write never leaves a half-written prefs file, and every field is PRESERVED across
+// the partial updates the UI makes (changing the mode must not wipe the auto-start choice, and vice versa).
 fn mining_prefs_path(datadir: &std::path::Path) -> std::path::PathBuf { datadir.join("mining_prefs.json") }
-fn load_mining_prefs(datadir: &std::path::Path) -> (String, String) {
-    let v: Value = std::fs::read_to_string(mining_prefs_path(datadir))
+fn read_mining_prefs_raw(datadir: &std::path::Path) -> Value {
+    std::fs::read_to_string(mining_prefs_path(datadir))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| json!({}));
+        .unwrap_or_else(|| json!({}))
+}
+fn write_mining_prefs_raw(datadir: &std::path::Path, v: &Value) {
+    let _ = std::fs::create_dir_all(datadir);
+    let path = mining_prefs_path(datadir);
+    let tmp = path.with_extension("json.tmp");
+    // Atomic: write the whole object to a temp file, then rename over the target. rename() on the same
+    // filesystem is atomic (Windows included), so a reader never sees a partially written prefs file.
+    if std::fs::write(&tmp, v.to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+fn load_mining_prefs(datadir: &std::path::Path) -> (String, String) {
+    let v = read_mining_prefs_raw(datadir);
     let modo = v["mode"].as_str().unwrap_or("solo");
     // The last door: this file is plain JSON on disk and anyone can edit it. Only "solo" and the official
     // "pool" are valid in 1.0.9 -- there are NO custom pools. A hand-written "custom" (with an attacker's
@@ -1628,8 +1644,26 @@ fn load_mining_prefs(datadir: &std::path::Path) -> (String, String) {
     (modo.to_string(), v["addr"].as_str().unwrap_or("").to_string())
 }
 fn save_mining_prefs(datadir: &std::path::Path, mode: &str, addr: &str) {
-    let _ = std::fs::create_dir_all(datadir);
-    let _ = std::fs::write(mining_prefs_path(datadir), json!({ "mode": mode, "addr": addr }).to_string());
+    let mut v = read_mining_prefs_raw(datadir);
+    v["mode"] = json!(mode);
+    v["addr"] = json!(addr);
+    write_mining_prefs_raw(datadir, &v);
+}
+// The VOLUNTARY "start mining automatically when mainnet goes live" choice. OFF unless the user explicitly armed
+// it; `intensity` is the CPU configuration they picked (the same suave/equilibrado/intenso the manual button uses,
+// so the auto-start honours the exact setting chosen, even across a restart). Read on startup to re-arm the pending
+// launch; written atomically, preserving mode/addr. It is consumed (set back to false) the moment mining actually
+// starts, so a later restart never re-triggers an already-honoured auto-start.
+fn load_autostart(datadir: &std::path::Path) -> (bool, String) {
+    let v = read_mining_prefs_raw(datadir);
+    (v["autoStart"].as_bool().unwrap_or(false),
+     v["autoIntensity"].as_str().unwrap_or("equilibrado").to_string())
+}
+fn save_autostart(datadir: &std::path::Path, enabled: bool, intensity: &str) {
+    let mut v = read_mining_prefs_raw(datadir);
+    v["autoStart"] = json!(enabled);
+    v["autoIntensity"] = json!(intensity);
+    write_mining_prefs_raw(datadir, &v);
 }
 
 // Validate a user-supplied custom pool address (host:port): rejects control chars, empty host, bad/out-of-range
@@ -1892,7 +1926,7 @@ mod seed_crypto_tests {
 mod node_conf_tests {
     use super::node_conf;
 
-    // Guardian (ChatGPT P0 #2): after the mainnet port move (P2P 9333->9342, RPC 9332->9338), a stale install
+    // Guardian (audit P0 #2): after the mainnet port move (P2P 9333->9342, RPC 9332->9338), a stale install
     // must never linger on the old ports. The app rewrites bitcoin.conf on EVERY start, so the generated conf
     // must carry exactly the rpc port it is given, must NOT pin a P2P port (the chainparams default 9342 is used),
     // and — fed the mainnet RPC port — must never contain Litecoin's 9333/9332.
@@ -2026,6 +2060,110 @@ mod pool_disabled_tests {
         assert_eq!(modo, "solo", "a hand-written 'custom' pool address must be ignored, never used");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+// The voluntary "start automatically when mainnet goes live" choice: it must be OFF by default, persist the exact
+// CPU setting across a restart, never clobber the mode/address (nor be clobbered by them), stay disarmed once
+// consumed, write atomically, and — the safety property — the launch instant override may exist ONLY in an e2e build.
+#[cfg(test)]
+mod autostart_tests {
+    use super::MAINNET_START;
+
+    fn dir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("brisvia-autostart-{name}"));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    // Off unless the user armed it: with no prefs file, auto-start is disarmed (balanced default).
+    #[test]
+    fn auto_start_is_off_by_default() {
+        let d = dir("default");
+        let (armed, intensity) = super::load_autostart(&d);
+        assert!(!armed, "auto-start must be OFF unless the user armed it on purpose");
+        assert_eq!(intensity, "equilibrado");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // Arming persists and survives a fresh read from disk, with the exact CPU setting chosen (restart-proof).
+    #[test]
+    fn arming_persists_across_a_reload() {
+        let d = dir("persist");
+        super::save_autostart(&d, true, "intenso");
+        let (armed, intensity) = super::load_autostart(&d);
+        assert!(armed);
+        assert_eq!(intensity, "intenso", "the chosen CPU setting must survive a restart exactly");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // The two partial updates the UI makes must not clobber each other: changing the mode must not wipe the
+    // auto-start choice, and arming must not wipe the mode/address.
+    #[test]
+    fn mode_and_auto_start_are_preserved_independently() {
+        let d = dir("preserve");
+        super::save_mining_prefs(&d, "pool", "");
+        super::save_autostart(&d, true, "suave");
+        let (modo, _) = super::load_mining_prefs(&d);
+        let (armed, intensity) = super::load_autostart(&d);
+        assert_eq!(modo, "pool");
+        assert!(armed);
+        assert_eq!(intensity, "suave");
+        // Change the mode again: the auto-start choice must remain intact.
+        super::save_mining_prefs(&d, "solo", "");
+        let (armed2, intensity2) = super::load_autostart(&d);
+        assert!(armed2, "changing the mode wiped the auto-start choice");
+        assert_eq!(intensity2, "suave");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // The one-shot: once consumed (disarmed the instant mining started), a later read never re-triggers it.
+    #[test]
+    fn consuming_the_one_shot_disarms_it() {
+        let d = dir("consume");
+        super::save_autostart(&d, true, "equilibrado");
+        super::save_autostart(&d, false, "equilibrado");
+        let (armed, _) = super::load_autostart(&d);
+        assert!(!armed, "a consumed auto-start must stay off across a restart");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // Every write leaves a single valid JSON file and no leftover temp file (atomic tmp + rename).
+    #[test]
+    fn prefs_writes_are_atomic_and_valid_json() {
+        let d = dir("atomic");
+        super::save_mining_prefs(&d, "pool", "");
+        super::save_autostart(&d, true, "intenso");
+        super::save_mining_prefs(&d, "solo", "");
+        let path = super::mining_prefs_path(&d);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).expect("prefs file must be valid JSON");
+        assert_eq!(v["mode"], "solo");
+        assert_eq!(v["autoStart"], true);
+        assert_eq!(v["autoIntensity"], "intenso");
+        assert!(!path.with_extension("json.tmp").exists(), "the temp file must be renamed away, never left behind");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // SAFETY: a shipped (non-e2e) build has NO launch-instant override compiled in, so any injected env is ignored
+    // and the launch instant is always the fixed constant. This test only exists in a non-e2e build.
+    #[cfg(not(feature = "e2e"))]
+    #[test]
+    fn a_shipped_build_ignores_any_launch_instant_override() {
+        std::env::set_var("BRISVIA_E2E_MAINNET_START", "1");
+        assert_eq!(super::mainnet_start_secs(), MAINNET_START, "a shipped build must ignore a launch-instant override");
+        std::env::remove_var("BRISVIA_E2E_MAINNET_START");
+    }
+
+    // Only an e2e build may move the launch instant, so a test can cross the boundary in seconds. Restores after.
+    #[cfg(feature = "e2e")]
+    #[test]
+    fn an_e2e_build_can_move_the_launch_instant_then_restores() {
+        std::env::set_var("BRISVIA_E2E_MAINNET_START", "1000000000");
+        assert_eq!(super::mainnet_start_secs(), 1_000_000_000, "e2e builds must honour the injectable test instant");
+        std::env::remove_var("BRISVIA_E2E_MAINNET_START");
+        assert_eq!(super::mainnet_start_secs(), MAINNET_START);
     }
 }
 
@@ -2795,9 +2933,24 @@ fn physical_cores() -> usize {
     *PHYS.get_or_init(num_cpus::get_physical)
 }
 
+// The launch instant, as the single canonical UTC source of truth for "is mainnet live yet". In production this
+// is ALWAYS the fixed constant. Only an e2e/CI build (feature "e2e") may override it via BRISVIA_E2E_MAINNET_START,
+// so a test can cross the launch boundary in seconds without touching the machine clock. The override literally
+// cannot exist in a shipped build: the branch is compiled out.
+#[cfg(feature = "e2e")]
+fn mainnet_start_secs() -> i64 {
+    std::env::var("BRISVIA_E2E_MAINNET_START").ok().and_then(|s| s.parse::<i64>().ok()).unwrap_or(MAINNET_START)
+}
+#[cfg(not(feature = "e2e"))]
+fn mainnet_start_secs() -> i64 { MAINNET_START }
+
 #[tauri::command]
 fn miner_status(state: State<AppState>) -> Value {
     let mining = state.mining.load(Ordering::SeqCst);
+    // The auto-start-at-launch choice (voluntary, off unless armed) travels to the UI so the pending launch can be
+    // re-armed after a restart, and the canonical launch instant so the frontend has ONE source of truth for time.
+    let (auto_start, auto_intensity) = load_autostart(&state.datadir);
+    let mainnet_start_ms = mainnet_start_secs() * 1000;
     let secs = state
         .mine_start
         .lock()
@@ -2858,6 +3011,12 @@ fn miner_status(state: State<AppState>) -> Value {
             "lastAcceptedTs": state.pool_last_accepted_ts.load(Ordering::SeqCst),
             "lastError": state.pool_last_error.lock().unwrap().clone(),
         },
+        // Auto-start-at-launch: the canonical launch instant (UTC ms) + whether the user armed automatic start and
+        // with how many threads. The frontend uses `mainnetStartMs` as its single source of truth for the countdown
+        // and the hot unlock, and re-arms the pending auto-start from `autoStart` after a restart.
+        "mainnetStartMs": mainnet_start_ms,
+        "autoStart": auto_start,
+        "autoIntensity": auto_intensity,
         "totalSeconds": total
     })
 }
@@ -3127,6 +3286,22 @@ fn settings_set(app: AppHandle, state: State<AppState>, key: String, value: Valu
         _ => {}
     }
     json!({ "ok": true })
+}
+
+// Arm or disarm the VOLUNTARY "start mining automatically when mainnet goes live" choice. Off unless the user
+// explicitly turns it on; the frontend passes the chosen thread count. Persisted atomically (preserving mode/addr)
+// so it survives a restart. It is a ONE-SHOT: the frontend disarms it (enabled=false) the instant mining actually
+// starts, so a later restart never re-triggers an already-honoured auto-start.
+#[tauri::command]
+fn mining_set_autostart(state: State<AppState>, enabled: bool, intensity: String) -> Value {
+    // Only the app's real intensity labels are accepted; anything else falls back to the balanced default, so a
+    // hand-crafted call can never inject an odd value that reaches the engine.
+    let intensity = match intensity.as_str() {
+        "suave" | "equilibrado" | "intenso" => intensity.as_str(),
+        _ => "equilibrado",
+    };
+    save_autostart(&state.datadir, enabled, intensity);
+    json!({ "ok": true, "autoStart": enabled, "autoIntensity": intensity })
 }
 
 // Open a link (web/social) in the system browser, not inside the webview.
@@ -3513,6 +3688,7 @@ pub fn run() {
             wallet_legacy_status,
             settings_get,
             settings_set,
+            mining_set_autostart,
             open_url,
             system_locale,
             set_language,
@@ -3578,7 +3754,7 @@ mod error_translation_tests {
     use super::friendly_error;
 
     // Captured: bitcoin-cli createwallet <name> twice on the same datadir.
-    const CORE_WALLET_EXISTS: &str = r"Wallet file verification failed. Failed to create database path 'C:\Users\g43343\AppData\Local\Temp\wtest\regtest\wallets\w2'. Database already exists.";
+    const CORE_WALLET_EXISTS: &str = r"Wallet file verification failed. Failed to create database path 'C:\Users\testuser\AppData\Local\Temp\wtest\regtest\wallets\w2'. Database already exists.";
     // Captured: bitcoin-cli walletpassphrase "wrongpassword" 10
     const CORE_BAD_PASSWORD: &str = "Error: The wallet passphrase entered was incorrect.";
     // Captured: bitcoin-cli sendtoaddress on a locked wallet. Contains "passphrase" but is NOT a wrong password.
@@ -3639,7 +3815,7 @@ mod error_translation_tests {
     #[test]
     fn no_error_ever_reaches_the_user_carrying_their_home_directory() {
         // Every message the node can hand us must come back as a code, never as text with a path in it.
-        for raw in [CORE_WALLET_EXISTS, CORE_BAD_PASSWORD, CORE_WALLET_LOCKED, "Insufficient funds", "boom at C:\\Users\\fernando\\x"] {
+        for raw in [CORE_WALLET_EXISTS, CORE_BAD_PASSWORD, CORE_WALLET_LOCKED, "Insufficient funds", "boom at C:\\Users\\alice\\x"] {
             let shown = friendly_error(raw);
             assert!(shown.starts_with("ERR:"), "not a code: {shown}");
             assert!(!shown.to_lowercase().contains("users"), "leaked a path: {shown}");
@@ -3649,9 +3825,9 @@ mod error_translation_tests {
 
     #[test]
     fn the_log_keeps_the_detail_but_strips_personal_paths() {
-        let leaky = "boom at C:\\Users\\fernando\\AppData\\Local\\Temp\\x.dat while doing the thing";
+        let leaky = "boom at C:\\Users\\alice\\AppData\\Local\\Temp\\x.dat while doing the thing";
         let logged = super::sanitize_for_log(leaky);
-        assert!(!logged.contains("fernando"), "the log leaked the user name: {logged}");
+        assert!(!logged.contains("alice"), "the log leaked the user name: {logged}");
         assert!(logged.contains("boom") && logged.contains("while doing the thing"), "the log lost the detail: {logged}");
     }
 }

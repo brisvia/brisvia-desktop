@@ -289,7 +289,13 @@ function fmtDuration(secs) {
 async function refreshMine() {
   const s = await window.brisvia.getStatus();
   mining = s.mining;
+  // Single source of truth from the backend: the canonical launch instant and the persisted auto-start choice
+  // (re-armed after a restart). We do not overwrite the local armed flag while a start is mid-flight.
+  if (typeof s.mainnetStartMs === 'number') backendMainnetMs = s.mainnetStartMs;
+  if (typeof s.autoStart === 'boolean' && !autoStarting) autoArmed = s.autoStart;
+  if (typeof s.autoIntensity === 'string') autoIntensity = s.autoIntensity;
   renderMineMode(s); // keep the in-tab mode box in sync with the REAL active mode (before any early return)
+  evalAutoStart(s);  // honour the voluntary auto-start-at-launch (never without consent, never pool->solo)
   // Suppress the "Preparing…" flash for a few seconds after a live power change (the engine relaunches behind the scenes).
   const preparing = mining && s.preparing && Date.now() > suppressPreparingUntil;
   const toggle = $('#toggle');
@@ -944,6 +950,124 @@ $$('#mine-mode-seg .seg-btn').forEach((b) => b.addEventListener('click', () => {
   if (b.dataset.mode === currentMiningMode) return;
   changeMiningMode(b.dataset.mode);
 }));
+
+// ===================== Voluntary auto-start when mainnet goes live (Mining tab) =====================
+// A one-shot the user must arm on purpose (off by default). Guarantees, in order of importance:
+//   1) never starts mining without the armed consent;
+//   2) never falls from POOL to SOLO — if the pool cannot give work, it WAITS (respecting its backoff);
+//   3) a permanent failure parks and offers retry/cancel (no infinite loop);
+//   4) the choice is consumed the instant mining actually starts, so a restart never re-fires it.
+// The state machine runs on the existing 1s refresh; persistence lives in the backend (survives a restart).
+async function evalAutoStart(s) {
+  if (!isMainnetBuild) { autoState = 'idle'; renderAutoStart(s); return; }   // testnet/preview: not applicable
+  if (!autoArmed) { autoState = 'idle'; autoFailReason = null; renderAutoStart(s); return; }
+  if (autoFailReason) { autoState = 'failed'; renderAutoStart(s); return; }  // parked until the user retries/cancels
+  if (mining) { renderAutoStart(s); await consumeAutoStart(); return; }      // already mining -> consume the one-shot
+  if (isWaitMode()) { autoState = 'armed'; renderAutoStart(s); return; }     // before launch -> stay armed, ready
+  // Mainnet is live, armed and not mining: check the chosen mode's dependencies. Use the mode the backend is
+  // REALLY in (from the status), never a stale local flag — pool only when it actually reports pool.
+  const mode = (s.mode === 'pool' || s.mode === 'custom') ? 'pool' : 'solo';
+  if (mode === 'pool') {
+    const p = s.pool || {};
+    const canWork = !!p.enabled && !!p.connected && !p.suspended; // suspended/off/reconnecting -> WAIT, never solo
+    if (!canWork) { autoState = 'waiting_pool'; renderAutoStart(s); return; }
+  } else if (syncing) {
+    autoState = 'waiting_node'; renderAutoStart(s); return;                  // node still catching up -> wait
+  }
+  if (autoStarting) { renderAutoStart(s); return; }                          // a start is already mid-flight
+  autoStarting = true; autoState = 'starting'; renderAutoStart(s);
+  try {
+    const r = await window.brisvia.start(autoIntensity || currentIntensity());
+    if (r && r.error) {
+      // A node-not-ready / still-starting error is transient: stay armed and retry next tick. Anything else parks.
+      if (/NODE_|STARTING|NOT_READY|SYNC/i.test(String(r.error))) { autoState = 'waiting_node'; }
+      else { autoFailReason = String(r.error); autoState = 'failed'; }
+    } else {
+      await consumeAutoStart();                                              // started for real -> disarm
+    }
+  } catch (e) {
+    autoFailReason = 'ERR:OPERATION_FAILED'; autoState = 'failed';
+  } finally {
+    autoStarting = false; renderAutoStart(s);
+  }
+}
+
+// Disarm the one-shot in the backend (atomic) and locally, so a restart never re-triggers an honoured auto-start.
+async function consumeAutoStart() {
+  autoArmed = false; autoState = 'idle'; autoFailReason = null;
+  try { await window.brisvia.mining.setAutoStart(false, autoIntensity); } catch {}
+}
+
+// Paint the auto-start UI inside the SOLO/POOL box: the toggle, the details panel (state, chosen mode + CPU) and
+// the cancel/retry buttons. Hidden entirely on a testnet/preview build (auto-start only means something on mainnet).
+function renderAutoStart(s) {
+  const box = $('#auto-start');
+  if (!box) return;
+  box.hidden = !isMainnetBuild;
+  if (!isMainnetBuild) return;
+  const toggle = $('#auto-start-toggle'); if (toggle) toggle.checked = autoArmed;
+  const panel = $('#auto-start-panel'); if (panel) panel.hidden = !autoArmed;
+  const statusEl = $('#auto-start-status');
+  if (statusEl) {
+    if (autoState === 'idle') {
+      statusEl.textContent = '';
+    } else {
+      let txt = T('autostart.state_' + autoState);
+      if (autoState === 'failed' && autoFailReason) txt += ' — ' + transError(autoFailReason);
+      statusEl.textContent = txt;
+    }
+  }
+  const modeEl = $('#auto-start-mode');
+  if (modeEl) modeEl.textContent = T('settings.mode_' + (currentMiningMode === 'pool' ? 'pool' : 'solo')).toUpperCase();
+  const cpuEl = $('#auto-start-cpu');
+  if (cpuEl) cpuEl.textContent = T('autostart.cpu_' + (autoIntensity || 'equilibrado'));
+  const retry = $('#auto-start-retry'); if (retry) retry.hidden = autoState !== 'failed';
+  const cancel = $('#auto-start-cancel'); if (cancel) cancel.hidden = !autoArmed;
+}
+
+// Arm/disarm from the toggle. Arming is a conscious action (off by default) and captures the CPU setting chosen at
+// that moment; both persist atomically so they survive a restart.
+async function setAutoStartArmed(on) {
+  autoFailReason = null; autoStarting = false;
+  autoArmed = !!on;
+  autoIntensity = currentIntensity();
+  try { await window.brisvia.mining.setAutoStart(autoArmed, autoIntensity); } catch {}
+  if (!autoArmed) flashToast(T('autostart.badge'), T('autostart.state_cancelled'), 3000);
+  await refreshMine();
+}
+
+// A small sober toast (reuses the achievements toast rail). textContent only — never innerHTML with translated text.
+function flashToast(tag, text, ms) {
+  const c = achToastContainer();
+  const el = document.createElement('div'); el.className = 'ach-toast';
+  const t = document.createElement('span'); t.className = 'ach-toast-tag'; t.textContent = tag;
+  const n = document.createElement('span'); n.className = 'ach-toast-name'; n.textContent = text;
+  el.appendChild(t); el.appendChild(n); c.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('show'));
+  setTimeout(() => { el.classList.remove('show'); setTimeout(() => el.remove(), 400); }, ms || 4500);
+}
+function flashMainnetActive() { flashToast(T('autostart.badge'), T('autostart.mainnet_active'), 6000); }
+
+// Wire the auto-start controls (guarded: the elements live only on the real build's Mining tab).
+(function wireAutoStart() {
+  const toggle = $('#auto-start-toggle');
+  if (toggle) toggle.addEventListener('change', (e) => setAutoStartArmed(e.target.checked));
+  const cancel = $('#auto-start-cancel');
+  if (cancel) cancel.addEventListener('click', () => setAutoStartArmed(false));
+  const retry = $('#auto-start-retry');
+  if (retry) retry.addEventListener('click', () => { autoFailReason = null; autoState = 'armed'; refreshMine(); });
+})();
+
+// Re-evaluate the launch gate the moment the app returns to the foreground or the machine resumes from sleep, so
+// the button unlocks (and an armed auto-start fires) with no refresh. The 1s tick catches a clock change on its own.
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshMine(); });
+window.addEventListener('focus', () => { refreshMine(); });
+let _lastResumeTick = Date.now();
+setInterval(() => {
+  const now = Date.now();
+  if (now - _lastResumeTick > 5000) refreshMine(); // a gap far larger than the interval ⇒ resumed from sleep/clock jump
+  _lastResumeTick = now;
+}, 2000);
 // Custom pool address: persist what the user types (on change/blur), trimmed.
 {
   const poolAddrInput = $('#set-pool-addr');
@@ -1255,7 +1379,7 @@ async function pollNet() {
     // Network + mode: gives the user certainty about WHERE they are mining (asked by users who weren't sure).
     // `network` comes from the build itself (NET_CHAIN), so it's right even before the node connects.
     $('#nr-network').textContent = networkLabel(info && info.network);
-    // Show what the user picked, honestly (audit N5 + Fernando pto3): mining runs solo until the pool
+    // Show what the user picked, honestly (audit N5): mining runs solo until the pool
     // client lands, so pool/custom are shown as "solo · <group> pending".
     $('#nr-mode').textContent = currentMiningMode === 'pool' ? T('net_panel.mode_pool_pending')
       : currentMiningMode === 'custom' ? T('net_panel.mode_custom_pending')
@@ -1344,16 +1468,28 @@ document.addEventListener('langchange', () => {
 // Kept in sync with the backend MAINNET_START (src-tauri/src/lib.rs). This is only a UX convenience:
 // the real protection is the network consensus, not this client.
 //   Unix seconds: 1785596400   ·   ISO: 2026-08-01T15:00:00Z   (12:00 Argentina)
-const MAINNET_START = Date.UTC(2026, 7, 1, 15, 0, 0); // = 1785596400 * 1000 ms
+const MAINNET_START = Date.UTC(2026, 7, 1, 15, 0, 0); // = 1785596400 * 1000 ms (fallback until the backend answers)
+// The backend is the single source of truth for the launch instant (miner_status.mainnetStartMs, canonical UTC).
+// We mirror the last value seen; before the first status arrives we fall back to the compile-time constant above.
+// Using the backend value (never a local text or timezone) is also what lets an e2e build move the boundary to
+// test the crossing in seconds.
+let backendMainnetMs = null;
+function mainnetStartMs() { return (typeof backendMainnetMs === 'number' && backendMainnetMs > 0) ? backendMainnetMs : MAINNET_START; }
+
+// Voluntary "start automatically when mainnet goes live". `autoArmed` mirrors the persisted choice (re-armed from
+// the backend after a restart); `autoIntensity` is the CPU setting chosen; `autoState` drives the in-tab UI text; a
+// permanent failure parks in `autoFailReason` (no infinite loop) until the user retries or cancels; `autoStarting`
+// guards against firing two starts at once.
+let autoArmed = false, autoIntensity = 'equilibrado', autoState = 'idle', autoFailReason = null, autoStarting = false;
 
 // Wait mode: a REAL-network build opened BEFORE the launch instant. The wallet works normally; only the
 // "Mine" button is held until launch. A testnet/preview build is never in wait mode (people test now).
-// Automatic by date: the moment the clock passes MAINNET_START, mining enables itself with no user action.
-function isWaitMode() { return isMainnetBuild && Date.now() < MAINNET_START; }
+// Automatic by date: the moment the clock passes the launch instant, mining enables itself with no user action.
+function isWaitMode() { return isMainnetBuild && Date.now() < mainnetStartMs(); }
 
 // Human countdown to launch ("Real mining in Xd Yh" / "…about to begin"). Reused by the banner and the Mine view.
 function launchCountdownText() {
-  const diff = MAINNET_START - Date.now();
+  const diff = mainnetStartMs() - Date.now();
   if (diff <= 0) return T('testnet.mainnet_soon');
   const d = Math.floor(diff / 86400000);
   const h = Math.floor((diff % 86400000) / 3600000);
@@ -1405,7 +1541,9 @@ setInterval(() => {
     const sub = $('#hero-sub'); if (sub) sub.textContent = T('wait.sub') + ' — ' + launchCountdownText();
     const cd = $('#countdown'); if (cd && !cd.hidden) cd.textContent = launchCountdownText();
   } else if (_wasWaiting === true) {
-    refreshMine(); // the launch instant just passed: leave wait mode right away, no restart needed
+    // The launch instant just passed: leave wait mode right away (no restart) and flash "Mainnet active".
+    flashMainnetActive();
+    refreshMine();
   }
   _wasWaiting = waiting;
 }, 1000);
@@ -1445,7 +1583,7 @@ async function init() {
     // Decide the first screen WITHOUT waiting for the node: the welcome/onboarding does not need a
     // connected node, so if there is no wallet on disk yet we show it immediately instead of waiting
     // for the node-status loop below (which can take a while before the seed nodes are reachable).
-    // Fail CLOSED (ChatGPT, absolute priority): if we cannot tell whether a wallet exists, assume it DOES,
+    // Fail CLOSED (audit, absolute priority): if we cannot tell whether a wallet exists, assume it DOES,
     // so a read glitch never shows the welcome/onboarding on top of an existing wallet. Default true; only a
     // definitive "no seed on disk" (false) opens the first-run flow.
     let walletExists = true;
@@ -1519,6 +1657,8 @@ async function init() {
       onbStep = 0; renderOnb(); setupStep('welcome');
     }
   }
+  loadSettings(); // hydrate the chosen mining mode (and the rest of settings) at startup, even if the Settings
+                  // view is never opened, so the mode box reflects the persisted mode instead of defaulting to solo.
   refreshMine();
   setInterval(refreshMine, 1000);
   setInterval(() => {

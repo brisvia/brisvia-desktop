@@ -1,6 +1,6 @@
 //! Stratum client for pool mining — the protocol layer of PoolWorkSource (Brisvia 1.0, "approach D").
 //!
-//! Per ChatGPT's SECURITY review (2026-07-11) the pool does ALL the sensitive work: it builds the coinbase,
+//! Per the SECURITY review (2026-07-11) the pool does ALL the sensitive work: it builds the coinbase,
 //! chooses its own extranonce, computes the merkle root over the full transaction set, and serializes the
 //! 80-byte header with the nonce set to zero. The miner receives that exact header and only rewrites the 4
 //! nonce bytes (offset 76, little-endian) before hashing with RandomX. The submit carries ONLY {job_id, nonce}.

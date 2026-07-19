@@ -31,13 +31,13 @@ test('pool disabled -> pool button disabled + "coming soon"', async ({ page }) =
 test('SOLO -> POOL confirms the pool is really active', async ({ page }) => {
   await gotoMine(page, { poolEnabled: true, miningMode: 'solo' });
   await page.locator('[data-testid="mode-pool"]').click();
-  await expect(page.locator('[data-testid="mode-confirm"]')).toContainText(/POOL/i);
-  await expect(page.locator('[data-testid="mine-mode-active"]')).toHaveText(/POOL/i);
+  await expect(page.locator('[data-testid="mode-confirm"]')).toContainText(/grupo|pool/i);
+  await expect(page.locator('[data-testid="mine-mode-active"]')).toHaveText(/grupo|pool/i);
 });
 
 test('POOL -> SOLO confirms solo is really active', async ({ page }) => {
   await gotoMine(page, { poolEnabled: true, miningMode: 'pool' });
-  await expect(page.locator('[data-testid="mine-mode-active"]')).toHaveText(/POOL/i); // starts in pool
+  await expect(page.locator('[data-testid="mine-mode-active"]')).toHaveText(/grupo|pool/i); // starts in pool
   await page.locator('[data-testid="mode-solo"]').click();
   await expect(page.locator('[data-testid="mode-confirm"]')).toContainText(/SOLO/i);
   await expect(page.locator('[data-testid="mine-mode-active"]')).toHaveText(/SOLO/i);
@@ -48,15 +48,15 @@ test('switch WHILE mining stops+restarts and keeps mining in the new mode', asyn
   await page.locator('[data-testid="mine-toggle"]').click();           // start mining (solo)
   await expect(page.locator('[data-testid="mine-toggle"]')).toHaveText(/detener|stop/i);
   await page.locator('[data-testid="mode-pool"]').click();              // switch to pool
-  await expect(page.locator('[data-testid="mode-confirm"]')).toContainText(/POOL/i);
-  await expect(page.locator('[data-testid="mine-mode-active"]')).toHaveText(/POOL/i);
+  await expect(page.locator('[data-testid="mode-confirm"]')).toContainText(/grupo|pool/i);
+  await expect(page.locator('[data-testid="mine-mode-active"]')).toHaveText(/grupo|pool/i);
   await expect(page.locator('[data-testid="mine-toggle"]')).toHaveText(/detener|stop/i); // still mining
 });
 
 test('restart with the previously chosen mode shows it as active', async ({ page }) => {
   // Reopening with miningMode already 'pool' (persisted) must show POOL as active, not reset to solo.
   await gotoMine(page, { poolEnabled: true, miningMode: 'pool' });
-  await expect(page.locator('[data-testid="mine-mode-active"]')).toHaveText(/POOL/i);
+  await expect(page.locator('[data-testid="mine-mode-active"]')).toHaveText(/grupo|pool/i);
 });
 
 test('pool configured but NOT enabled -> shows SOLO active, never a silent pool claim', async ({ page }) => {

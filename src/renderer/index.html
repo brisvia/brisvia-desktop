@@ -204,6 +204,28 @@
               <summary class="muted small" data-i18n="mine.mode_tech"></summary>
               <p class="muted small" data-i18n="mine.mode_tech_note"></p>
             </details>
+            <!-- Voluntary auto-start when mainnet goes live. OFF by default; only meaningful on the real build
+                 (JS hides it on testnet/preview). The toggle is a conscious opt-in; once armed, the panel shows the
+                 state, the chosen mode + CPU, and Cancel/Retry. It never starts mining without this consent and
+                 never falls from POOL to SOLO. -->
+            <div id="auto-start" class="auto-start" hidden>
+              <label class="auto-start-row">
+                <input type="checkbox" id="auto-start-toggle" data-testid="auto-start-toggle" />
+                <span class="small" data-i18n="autostart.label"></span>
+              </label>
+              <div id="auto-start-panel" class="auto-start-panel" hidden>
+                <p id="auto-start-status" class="small brand-fg" data-testid="auto-start-status"></p>
+                <div class="auto-start-detail muted small">
+                  <span data-i18n="autostart.detail_mode"></span> <strong id="auto-start-mode" data-testid="auto-start-mode"></strong>
+                  · <span data-i18n="autostart.detail_cpu"></span> <strong id="auto-start-cpu" data-testid="auto-start-cpu"></strong>
+                </div>
+                <p class="muted xsmall" data-i18n="autostart.hint"></p>
+                <div class="auto-start-actions">
+                  <button id="auto-start-retry" class="btn ghost small" data-testid="auto-start-retry" data-i18n="autostart.retry" hidden></button>
+                  <button id="auto-start-cancel" class="btn ghost small" data-testid="auto-start-cancel" data-i18n="autostart.cancel" hidden></button>
+                </div>
+              </div>
+            </div>
           </div>
           <button id="toggle" class="btn giant primary" data-testid="mine-toggle"></button>
           <p id="mine-msg" class="verify-msg err" data-testid="mine-msg" hidden></p>

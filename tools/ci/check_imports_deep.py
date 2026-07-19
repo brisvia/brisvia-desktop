@@ -2,7 +2,7 @@
 
 WHY
 ---
-I told ChatGPT "no symbol is missing" from the rc6 test executable, and it refused the claim:
+An early claim that "no symbol is missing" from the rc6 test executable was refused on review:
 
     "Your claim 'all symbols exist' must be broadened to: all names, all ordinals and all final targets
      of forwarded exports. Until then, the contradiction is still not complete."

@@ -10,7 +10,7 @@ nodes. --check re-derives and diffs so the two cannot drift.
 PHASE 1 ONLY
 ------------
 This runs the shipped shutdown-brisvia-node.ps1 directly against real bitcoind nodes -- the fast, precise
-half ChatGPT recommended first. The full installer /S pass is a later phase and needs the NSIS installer,
+half the audit recommended first. The full installer /S pass is a later phase and needs the NSIS installer,
 which the validation workflow builds. Kept separate so a bug in one does not mask the other.
 
     python derive_scenario_workflow.py           write it
