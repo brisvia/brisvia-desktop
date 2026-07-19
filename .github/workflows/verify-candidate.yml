@@ -26,9 +26,9 @@ permissions:
 env:
   GENESIS: aa6bc268339aa9f4f2e39ae33aca7b7e48e395033d08d37c08f828890af7baf7
   # The three seeds, serialized as they go inside the binary: 0x01 (IPv4), 0x04 (length), IP, port BE.
-  SEED_HOSTINGER: "0104bb4df0912475"
-  SEED_ORACLE1: "01048150fa242475"
-  SEED_ORACLE2: "0104819f6c662475"
+  SEED_HOSTINGER: "0104bb4df091247e"
+  SEED_ORACLE1: "01048150fa24247e"
+  SEED_ORACLE2: "0104819f6c66247e"
 
 jobs:
   windows:
