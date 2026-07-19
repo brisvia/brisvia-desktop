@@ -12,6 +12,7 @@ function transError(err) {
       BAD_PASSWORD: 'errors.bad_password', WEAK_PASSWORD: 'errors.weak_password',
       NO_SEED_FILE: 'errors.no_seed_file', SEED_CORRUPT: 'errors.seed_corrupt',
       INVALID_PHRASE: 'errors.invalid_phrase', ENCRYPT_FAILED: 'errors.encrypt_failed',
+      MIGRATE_VERIFY: 'errors.migrate_verify',
       WALLET_EXISTS: 'errors.wallet_exists',
       NODE_SYNCING: 'errors.node_syncing', NO_PEERS: 'errors.no_peers', CLOCK_SKEW: 'errors.clock_skew',
       WALLET_NOT_READY: 'errors.wallet_not_ready', MINER_NOT_FOUND: 'errors.miner_not_found',
