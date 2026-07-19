@@ -3304,16 +3304,54 @@ fn mining_set_autostart(state: State<AppState>, enabled: bool, intensity: String
     json!({ "ok": true, "autoStart": enabled, "autoIntensity": intensity })
 }
 
+// Hosts the app is allowed to open in the system browser. A wallet app must not open arbitrary URLs, so
+// this surface is restricted to our own site and the social/share networks it links to.
+fn is_open_url_allowed(url: &str) -> bool {
+    // https only.
+    let rest = match url.strip_prefix("https://") {
+        Some(r) => r,
+        None => return false,
+    };
+    // Authority = everything before the first '/', '?' or '#'.
+    let end = rest.find(|c| c == '/' || c == '?' || c == '#').unwrap_or(rest.len());
+    let authority = &rest[..end];
+    // Reject an empty authority and any "user@host" userinfo trick.
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+    // Drop an optional ":port".
+    let host = authority.split(':').next().unwrap_or(authority).to_ascii_lowercase();
+    // Our own domain and any subdomain (brisvia.com, explorer.brisvia.com, pool.brisvia.com, …).
+    if host == "brisvia.com" || host.ends_with(".brisvia.com") {
+        return true;
+    }
+    // Social + share networks the app links to (barra social + botón Compartir Brisvia).
+    const ALLOWED: &[&str] = &[
+        "x.com", "twitter.com",
+        "instagram.com", "www.instagram.com",
+        "facebook.com", "www.facebook.com",
+        "telegram.me", "t.me",
+        "discord.gg", "discord.com",
+        "reddit.com", "www.reddit.com",
+        "wa.me", "api.whatsapp.com",
+    ];
+    ALLOWED.contains(&host.as_str())
+}
+
 // Open a link (web/social) in the system browser, not inside the webview.
 #[tauri::command]
 fn open_url(url: String) {
-    // http/https only, for safety
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
+    // Only https URLs to an explicitly allowed host. Anything else is refused (wallet app: tight surface).
+    if !is_open_url_allowed(&url) {
         return;
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = Command::new("cmd").args(["/C", "start", "", &url]).spawn();
+        // rundll32 (not "cmd /C start"): it takes the URL as a real argument, so '&' and other query
+        // characters in the share links can't be reinterpreted by the shell.
+        let _ = Command::new("rundll32.exe")
+            .args(["url.dll,FileProtocolHandler", &url])
+            .spawn();
     }
     #[cfg(target_os = "macos")]
     {
@@ -3322,6 +3360,40 @@ fn open_url(url: String) {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         let _ = Command::new("xdg-open").arg(&url).spawn();
+    }
+}
+
+#[cfg(test)]
+mod open_url_tests {
+    use super::is_open_url_allowed;
+
+    #[test]
+    fn allows_own_site_and_social_and_share_hosts() {
+        // Social bar
+        assert!(is_open_url_allowed("https://brisvia.com/"));
+        assert!(is_open_url_allowed("https://explorer.brisvia.com/tx/abc"));
+        assert!(is_open_url_allowed("https://x.com/brisviacoin"));
+        assert!(is_open_url_allowed("https://instagram.com/brisviacoin"));
+        assert!(is_open_url_allowed("https://www.facebook.com/profile.php?id=61591756292086"));
+        assert!(is_open_url_allowed("https://telegram.me/brisvia"));
+        assert!(is_open_url_allowed("https://discord.gg/ZF4MExMJn4"));
+        assert!(is_open_url_allowed("https://www.reddit.com/r/Brisvia"));
+        // Share button (query strings with '&')
+        assert!(is_open_url_allowed("https://twitter.com/intent/tweet?text=hi&url=https%3A%2F%2Fbrisvia.com"));
+        assert!(is_open_url_allowed("https://t.me/share/url?url=https%3A%2F%2Fbrisvia.com&text=hi"));
+        assert!(is_open_url_allowed("https://wa.me/?text=hi%20https%3A%2F%2Fbrisvia.com"));
+    }
+
+    #[test]
+    fn refuses_other_schemes_hosts_and_tricks() {
+        assert!(!is_open_url_allowed("http://brisvia.com/"));            // not https
+        assert!(!is_open_url_allowed("https://evil.com/"));             // host not allowed
+        assert!(!is_open_url_allowed("https://brisvia.com.evil.com/")); // suffix trick
+        assert!(!is_open_url_allowed("https://evil.com@brisvia.com/")); // userinfo trick
+        assert!(!is_open_url_allowed("https://notbrisvia.com/"));       // lookalike, no dot
+        assert!(!is_open_url_allowed("file:///etc/passwd"));            // not https
+        assert!(!is_open_url_allowed("javascript:alert(1)"));           // not https
+        assert!(!is_open_url_allowed("https:///nohostpath"));           // empty authority
     }
 }
 
