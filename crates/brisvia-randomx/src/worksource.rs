@@ -1,6 +1,6 @@
 //! WorkSource — the single abstraction that lets the miner get work from either the local node (solo)
 //! or a pool (stratum), while the RandomX engine stays the same. Per PLAN-integracion-minero-pool.md
-//! and ChatGPT's review: "adapt around, don't refactor inside" — the audited solo hashing loop is
+//! and an external review: "adapt around, don't refactor inside" — the audited solo hashing loop is
 //! untouched; only the SOURCE of the header and the DESTINATION of the result change.
 //!
 //! This file defines the common types and the trait. The two implementations live next to it:

@@ -2,7 +2,7 @@ name: Publish approved release
 
 # The only path by which 1.0.6 can reach people.
 #
-# IT DOES NOT TRUST THE .BAT. The .bat runs on Fernando's machine and anyone with access to that machine
+# IT DOES NOT TRUST THE .BAT. The .bat runs on the owner's machine and anyone with access to that machine
 # could edit it. This workflow redoes ALL of the identity checks on its own. The .bat is the hand that
 # turns the key; this is the lock.
 #

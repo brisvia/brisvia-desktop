@@ -53,6 +53,10 @@
         get: () => call('settings_get'),
         set: (key, value) => call('settings_set', { key, value }),
       },
+      mining: {
+        // Arm/disarm the voluntary "start automatically when mainnet goes live" choice (persisted atomically).
+        setAutoStart: (enabled, intensity) => call('mining_set_autostart', { enabled, intensity: intensity || 'equilibrado' }),
+      },
     };
     return;
   }
@@ -94,16 +98,21 @@
 
   let st = { mining: false, seconds: 0, intensity: 'equilibrado' };
   setInterval(() => { if (st.mining) st.seconds++; }, 1000);
+  // Preview mirror of the backend's canonical launch instant (2026-08-01 15:00:00 UTC).
+  const MOCK_MAINNET_START_MS = Date.UTC(2026, 7, 1, 15, 0, 0);
 
   window.brisvia = {
     getStatus: async () => {
       const base = { suave: 120, equilibrado: 320, intenso: 620 }[st.intensity] || 320;
       const cores = 8, threads = { suave: 1, equilibrado: 4, intenso: 8 }[st.intensity] || 4;
-      return { mining: st.mining, hashrate: st.mining ? base : 0, accepted: Math.floor(st.seconds / 12), secondsMining: st.seconds, intensity: st.intensity, threads: st.mining ? threads : 0, cores, totalSeconds: st.seconds };
+      return { mining: st.mining, hashrate: st.mining ? base : 0, accepted: Math.floor(st.seconds / 12), secondsMining: st.seconds, intensity: st.intensity, threads: st.mining ? threads : 0, cores, totalSeconds: st.seconds, mainnetStartMs: MOCK_MAINNET_START_MS, autoStart: LS.get('brv_autostart', false), autoIntensity: LS.get('brv_autointensity', 'equilibrado') };
     },
     start: async (i) => { st.mining = true; if (i) st.intensity = i; return { mining: true }; },
     stop: async () => { st.mining = false; return { mining: false }; },
     setIntensity: async (i) => { st.intensity = i; return { intensity: i }; },
+    mining: {
+      setAutoStart: async (enabled, intensity) => { LS.set('brv_autostart', !!enabled); LS.set('brv_autointensity', intensity || 'equilibrado'); return { ok: true, autoStart: !!enabled, autoIntensity: intensity || 'equilibrado' }; },
+    },
 
     wallet: {
       exists: async () => LS.get('brv_wallet', null) !== null,

@@ -1,6 +1,6 @@
 // E2E regression: wallet existence is independent of the node.
 //
-// ChatGPT priority: the existence of the wallet MUST be resolved locally (seedOnDisk reads wallet_seed.enc)
+// Audit priority: the existence of the wallet MUST be resolved locally (seedOnDisk reads wallet_seed.enc)
 // BEFORE consulting the node. A slow / down / syncing / offline node must NEVER open the create/restore
 // onboarding on top of an existing wallet — no RPC timeout or error can show the first-run flow. And the
 // opposite must still hold: with no wallet on disk, onboarding shows regardless of the node.
