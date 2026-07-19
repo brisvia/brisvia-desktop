@@ -55,16 +55,18 @@ verdict(){
 run_variant(){
   local name="$1"; shift
   local logf; logf="$(mktemp)"
+  local dtmp; dtmp="$(mktemp -d)"   # datadir DESCARTABLE: la prueba NO toca la billetera real del usuario
   log "==================================================================="
   log ">> VARIANTE: $name"
-  log "   env: $*"
-  # Lanzamos con las env pasadas como 'CLAVE=valor' antes del binario.
-  ( env "$@" "$AI" ) >"$logf" 2>&1 &
+  log "   env: BRISVIA_DATADIR=<temporal descartable> $*"
+  # Lanzamos con las env pasadas + BRISVIA_DATADIR temporal (la app lo respeta) para NO tocar la billetera real.
+  ( env BRISVIA_DATADIR="$dtmp" "$@" "$AI" ) >"$logf" 2>&1 &
   local pid=$!
   sleep "$SECS"
   # matar el arbol de procesos del intento
   kill "$pid" 2>/dev/null; sleep 1; kill -9 "$pid" 2>/dev/null
   pkill -f "$(basename "$AI")" 2>/dev/null
+  rm -rf "$dtmp"
   log "   RESULTADO: $(verdict "$logf")"
   log "   --- ultimas 12 lineas del intento ---"
   tail -12 "$logf" | sed 's/^/   | /' | tee -a "$OUT" >/dev/null
@@ -93,9 +95,9 @@ if [ -d "$WORK/squashfs-root" ]; then
   find "$WORK/squashfs-root" -type f \( -name 'libglib-2.0.so*' -o -name 'libgio-2.0.so*' \
        -o -name 'libgobject-2.0.so*' -o -name 'libgmodule-2.0.so*' \) -print -delete \
        | sed 's/^/   quitado: /' | tee -a "$OUT" >/dev/null
-  logf6="$(mktemp)"
-  ( env WEBKIT_DISABLE_DMABUF_RENDERER=1 WEBKIT_DISABLE_COMPOSITING_MODE=1 "$WORK/squashfs-root/AppRun" ) >"$logf6" 2>&1 &
-  pid6=$!; sleep "$SECS"; kill "$pid6" 2>/dev/null; sleep 1; kill -9 "$pid6" 2>/dev/null; pkill -f AppRun 2>/dev/null
+  logf6="$(mktemp)"; dtmp6="$(mktemp -d)"   # datadir descartable tambien aca
+  ( env BRISVIA_DATADIR="$dtmp6" WEBKIT_DISABLE_DMABUF_RENDERER=1 WEBKIT_DISABLE_COMPOSITING_MODE=1 "$WORK/squashfs-root/AppRun" ) >"$logf6" 2>&1 &
+  pid6=$!; sleep "$SECS"; kill "$pid6" 2>/dev/null; sleep 1; kill -9 "$pid6" 2>/dev/null; pkill -f AppRun 2>/dev/null; rm -rf "$dtmp6"
   log "   RESULTADO: $(verdict "$logf6")"
   log "   --- ultimas 12 lineas ---"
   tail -12 "$logf6" | sed 's/^/   | /' | tee -a "$OUT" >/dev/null
@@ -105,7 +107,24 @@ else
 fi
 rm -rf "$WORK"
 log ""
-log "==================================================================="
+# --- ANALISIS AUTOMATICO: cual variante abrio la ventana ---
+log "=================================================================="
+log " ANALISIS AUTOMATICO"
+WIN=$(grep -nE "^>> VARIANTE" "$OUT" | while read -r ln; do
+        n=${ln%%:*}; nombre=$(echo "$ln" | sed 's/.*VARIANTE[: ]*//')
+        res=$(sed -n "$((n)),$((n+6))p" "$OUT" | grep -m1 "RESULTADO:")
+        echo "$res" | grep -q "OK: parece haber abierto" && { echo "$nombre"; break; }
+      done | head -1)
+if [ -n "$WIN" ]; then
+  log " -> ABRIO con: $WIN"
+  log "    Si abrio con la variante 3 (DMABUF+COMPOSITING off), el arreglo del programa (ya en la rama) lo resuelve."
+  log "    Si solo abrio con X11 o software, hay que decidir eso como default o recomendar el .deb."
+else
+  log " -> NINGUNA variante abrio la ventana en $SECS s. Mandanos el archivo completo; probablemente haya"
+  log "    que combinar el arreglo de GLib (variante 6 / .deb) con el de EGL, o probar el .deb aparte."
+fi
+log " (Nota: la prueba usó un datadir DESCARTABLE en cada intento; NO tocó tu billetera real.)"
+log "=================================================================="
 log " FIN. Envianos el archivo:  $OUT"
-log "==================================================================="
+log "=================================================================="
 echo "Listo. Mandanos el contenido de: $OUT"

@@ -41,9 +41,18 @@ El dueño del equipo corre:
     ./diagnose-linux-gui.sh /ruta/al/Brisvia-Miner-Linux.AppImage
 
 Prueba el AppImage bajo 6 combinaciones (tal cual / DMABUF off / DMABUF+compositor off / +X11 / +software /
-AppImage sin GLib empaquetada), unos segundos cada una, sin tocar billetera ni datos, y escribe
-`brisvia-linux-diagnostic-<host>.txt`. Con ese archivo sabemos EXACTO qué combinación abre la ventana y cuál de
-los arreglos hay que dejar como definitivo.
+AppImage sin GLib empaquetada), unos segundos cada una, y escribe `brisvia-linux-diagnostic-<host>.txt`. Con ese
+archivo sabemos EXACTO qué combinación abre la ventana y cuál de los arreglos hay que dejar como definitivo.
+
+- **No toca la billetera real**: cada intento usa un `BRISVIA_DATADIR` temporal descartable (la app lo respeta),
+  así que el diagnóstico nunca lee ni escribe la billetera del usuario. El datadir temporal se borra al terminar.
+- **Análisis automático**: al final el script dice qué variante abrió la ventana (o si ninguna) y qué implica.
+- **Qué devolver**: mandar el archivo `brisvia-linux-diagnostic-<host>.txt` completo. No hace falta nada más.
+
+### Artefactos oficiales a probar (release v1.0.8, verificar el SHA-256 antes)
+- `Brisvia-Miner-Linux.AppImage` → `bbc81069bea4c009bfad9a1272f1e5cb23ada419fecf327af0926bdd424b1eec`
+- `Brisvia.Miner_1.0.8_amd64.deb` → `2d13ac45ffce506915d8c94f5f3b99cf8199b2bb49e4a3c9a0aa36253c82f9a2`
+Descarga: brisvia.com → o el release en GitHub. El `.deb` es el candidato robusto para Ubuntu 24.04/26.04 (evita el conflicto de GLib de raíz); combinado con el arreglo de EGL ya en la rama, es la vía recomendada.
 
 ## Matriz de validación (pendiente — necesita hardware/entorno real)
 No reproducible desde la máquina de build (Windows) ni en CI headless (la falla EGL depende de GPU + Wayland
