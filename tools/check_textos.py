@@ -30,6 +30,9 @@ PERMITIDO = {
     "BRVA",      # the ticker
     "Español",   # the language buttons show each language in ITS OWN language, on purpose
     "English",
+    "Português",
+    "中文",
+    "Русский",
     "brv1q…",    # a sample address: the same in every language
     "••••••••",  # password dots
     "H/s",       # hashes per second: a unit, like km/h. The same in every language.
@@ -39,9 +42,13 @@ fallos = []
 loc = LOC.read_text(encoding="utf-8")
 html = HTML.read_text(encoding="utf-8")
 
-# ---------- the two dictionaries ----------
+# ---------- the two source dictionaries (es, en) ----------
+# The English block ends where the next language block begins. The app now ships pt/zh/ru appended
+# after en, so slicing to EOF would fold their keys into "English" and report phantom mismatches.
 i_es, i_en = loc.index("es: {"), loc.index("en: {")
-blk_es, blk_en = loc[i_es:i_en], loc[i_en:]
+_nexts = [loc.index(m) for m in ("pt: {", "zh: {", "ru: {") if m in loc and loc.index(m) > i_en]
+i_en_end = min(_nexts) if _nexts else len(loc)
+blk_es, blk_en = loc[i_es:i_en], loc[i_en:i_en_end]
 
 
 def claves(bloque):
