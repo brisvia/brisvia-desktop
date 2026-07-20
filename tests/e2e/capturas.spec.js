@@ -1,6 +1,6 @@
-// Genera capturas actualizadas del renderer 1.0.9 (mismo HTML/CSS que la app instalada) para la web,
-// en ES y EN: la vista de mineria (minero en funcionamiento) y la billetera. Usa el mock de preview,
-// oculta el banner de cuenta regresiva y muestra la version publica (1.0.8).
+// Generates updated captures of the 1.0.9 renderer (same HTML/CSS as the installed app) for the website,
+// in ES and EN: the mining view (miner running) and the wallet. Uses the preview mock, hides the
+// countdown banner and shows the public version (1.0.8).
 'use strict';
 const { test } = require('@playwright/test');
 const { installMock } = require('./fixtures');
@@ -9,11 +9,11 @@ const OUT = 'C:/Users/g43343/AppData/Local/Temp/claude/c--xampp-htdocs-crypto/13
 
 test.use({ viewport: { width: 1024, height: 680 }, deviceScaleFactor: 2 });
 
-test('capturas ES/EN de miner + wallet', async ({ page }) => {
+test('captures ES/EN of miner + wallet', async ({ page }) => {
   await page.addInitScript(() => {
     try { localStorage.setItem('brisvia_onboarded', '1'); localStorage.setItem('brv_lang', 'es'); } catch (e) {}
   });
-  // mainnetInMs negativo = mainnet ya activa (estado real de mineria, sin modo espera ni aviso testnet).
+  // negative mainnetInMs = mainnet already live (real mining state, no wait mode, no testnet notice).
   await installMock(page, { network: 'brisvia', walletReady: true, seedOnDisk: true, mainnetInMs: -1000, poolEnabled: true });
   await page.goto('/');
   await page.locator('.view[data-view="wallet"]').waitFor({ timeout: 15000 });

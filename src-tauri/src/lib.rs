@@ -3325,7 +3325,7 @@ fn is_open_url_allowed(url: &str) -> bool {
     if host == "brisvia.com" || host.ends_with(".brisvia.com") {
         return true;
     }
-    // Social + share networks the app links to (barra social + botón Compartir Brisvia).
+    // Social + share networks the app links to (social bar + Share Brisvia button).
     const ALLOWED: &[&str] = &[
         "x.com", "twitter.com",
         "instagram.com", "www.instagram.com",
