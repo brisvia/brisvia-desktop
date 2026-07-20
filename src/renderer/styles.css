@@ -49,7 +49,7 @@ h1, h2, h3 { margin: 0; }
 }
 
 /* Content / views */
-.content { flex: 1; padding: 24px 26px; max-width: 1120px; width: 100%; margin: 0 auto; }
+.content { flex: 1; padding: 16px 26px; max-width: 1120px; width: 100%; margin: 0 auto; }
 /* On wide screens (when maximized) the Wallet uses 2 columns to avoid empty areas.
    Both columns stretch to the same height so their bottom borders line up; the Activity panel
    becomes a flex column and pins its pager to the bottom edge. */
@@ -121,7 +121,7 @@ h1, h2, h3 { margin: 0; }
 .btn.mineral { background: var(--mineral); color: #05271a; }
 .btn.ghost { background: transparent; border-color: var(--border); color: var(--text); }
 .btn.ghost:hover { border-color: var(--brand); color: var(--brand); }
-.btn.giant { font-size: 17px; padding: 16px 30px; border-radius: 15px; margin-top: 6px; }
+.btn.giant { font-size: 17px; padding: 13px 30px; border-radius: 15px; margin-top: 4px; }
 .btn.block { display: block; width: 100%; margin-top: 10px; }
 .row-gap { display: flex; gap: 10px; margin-top: 16px; }
 .row-gap .btn { flex: 1; }
@@ -151,7 +151,8 @@ h1, h2, h3 { margin: 0; }
 
 /* ---- Mine ---- */
 .mine-grid { display: grid; grid-template-columns: 1.5fr .9fr; gap: 22px; align-items: start; }
-.hero { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; padding: 6px 4px; }
+/* Vertical rhythm kept a touch tight so the longer languages (pt/ru) still fit the Mine view without a scroll. */
+.hero { display: flex; flex-direction: column; align-items: flex-start; gap: 9px; padding: 2px 4px; }
 .state-line { min-height: 24px; }
 .badge { display: inline-flex; align-items: center; gap: 7px; padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; border: 1px solid var(--border); color: var(--muted); }
 .badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
@@ -161,9 +162,10 @@ h1, h2, h3 { margin: 0; }
 .badge.prep { color: var(--brand); border-color: rgba(53,191,197,.4); background: var(--brand-soft); }
 .badge.prep::before { background: var(--brand); box-shadow: 0 0 0 4px rgba(53,191,197,.16); animation: pulse 1s infinite; }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
-h1 { font-size: 26px; line-height: 1.14; letter-spacing: -.02em; max-width: 15ch; }
+/* max-width of 18ch so the longest language titles (pt/ru) do not wrap to an extra line. */
+h1 { font-size: 26px; line-height: 1.1; letter-spacing: -.02em; max-width: 18ch; }
 #hero-sub { margin: 0; max-width: 42ch; }
-.intensity { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
+.intensity { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
 .seg { display: inline-flex; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 4px; gap: 4px; }
 .seg-btn { font: inherit; font-weight: 600; color: var(--muted); background: transparent; border: 0; border-radius: 9px; padding: 8px 16px; cursor: pointer; transition: all .15s ease; }
 .seg-btn.active { background: var(--brand-soft); color: var(--brand); box-shadow: inset 0 0 0 1px rgba(53,191,197,.35); }
