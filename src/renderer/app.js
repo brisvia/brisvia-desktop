@@ -712,11 +712,14 @@ function fakeQR_unused_removed(seedStr) {
 // send 1 BRVA instead of 1000 and lose 999. Nobody can tell "1,000" (one thousand) from "1,000" (one, with
 // three decimals) without knowing the convention — so we don't try. Thousands separators are not accepted
 // in either language; the placeholder shows the expected shape.
+// Languages whose users write decimals with a comma (Spanish, Brazilian Portuguese, Russian). Single
+// source of truth so the amount parser and the "use max" formatter never disagree about the separator.
+function usesCommaDecimal(lang) { return /^(es|pt|ru)$/.test(lang || ''); }
 function toCanonicalAmount(raw, lang) {
   const s = String(raw == null ? '' : raw).trim().replace(/\s/g, '');
   if (s === '') return null;
-  const decimal = lang === 'es' ? ',' : '.';
-  const foreign = lang === 'es' ? '.' : ',';
+  const decimal = usesCommaDecimal(lang) ? ',' : '.';
+  const foreign = usesCommaDecimal(lang) ? '.' : ',';
   if (s.includes(foreign)) return null;          // "1,000" in EN or "1.000" in ES: ambiguous, refuse
   if (s.split(decimal).length > 2) return null;  // more than one separator
   if (!/^[0-9]*[.,]?[0-9]*$/.test(s)) return null;
@@ -737,7 +740,7 @@ function fmtAmountInput(n) {
   const plain = n.toFixed(8).replace(/\.?0+$/, '');
   // Write it with the separator this language expects, or "use max" would fill the box with text the
   // very same language rules then reject.
-  return (window.I18N && window.I18N.lang === 'es') ? plain.replace('.', ',') : plain;
+  return (window.I18N && usesCommaDecimal(window.I18N.lang)) ? plain.replace('.', ',') : plain;
 }
 $('#act-send').addEventListener('click', async () => {
   $('#send-addr').value = ''; $('#send-amount').value = ''; $('#send-pass').value = ''; $('#send-msg').hidden = true;
