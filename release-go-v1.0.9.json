@@ -1,0 +1,32 @@
+{
+ "status": "GO",
+ "version": "1.0.9",
+ "tag": "v1.0.9",
+ "commit_sha": "bd02cdf6e70d5c70612116cf60996e965384d60b",
+ "tree_sha": "880c4f8d2b5f17d6d5a29166841a447f7cfc6550",
+ "repo": "brisvia/brisvia-desktop",
+ "generated_utc": "2026-07-20T14:00:00Z",
+ "assets": [
+  {"name": "Brisvia-Miner-Linux.AppImage", "size": 186456568, "sha256": "9c33d996db86a54a81e108cb13b11cd5d0f82f6bbec03aa32945181c582d631b"},
+  {"name": "Brisvia-Miner-Windows.exe", "size": 10725893, "sha256": "bec330a7ad9d169a3f99e69e39f75e654659e4b0bce27fb041021044bc5b80c0"},
+  {"name": "Brisvia-Miner-macOS.dmg", "size": 16351521, "sha256": "f6a2fe1ea1b5f3a8e8d1ea3e45388d7c330c875ffa302394f76cfe9c931f8ecb"},
+  {"name": "Brisvia.Miner.app.tar.gz", "size": 15547236, "sha256": "a6de26863fa743c22fdc35bbfdba9a05b6f6766938cf9b08671a4acb2c189ea8"},
+  {"name": "Brisvia.Miner.app.tar.gz.sig", "size": 412, "sha256": "c494466556162801811034a40c195c5f0b22d8d0defab27424b1d44eb71efb2c"},
+  {"name": "Brisvia.Miner_1.0.9_aarch64.dmg", "size": 16351521, "sha256": "f6a2fe1ea1b5f3a8e8d1ea3e45388d7c330c875ffa302394f76cfe9c931f8ecb"},
+  {"name": "Brisvia.Miner_1.0.9_amd64.AppImage", "size": 186456568, "sha256": "9c33d996db86a54a81e108cb13b11cd5d0f82f6bbec03aa32945181c582d631b"},
+  {"name": "Brisvia.Miner_1.0.9_amd64.AppImage.sig", "size": 428, "sha256": "fbd45fa1f64d994b2b2144b656c7d1e8004e290fa7c436a30d560fd331e2600a"},
+  {"name": "Brisvia.Miner_1.0.9_amd64.deb", "size": 127072162, "sha256": "0e65fcbc614a95ad6f1503ce46ded9f3ccfa28ec51161573bcf18b3520b6c7a2"},
+  {"name": "Brisvia.Miner_1.0.9_x64-setup.exe", "size": 10725893, "sha256": "bec330a7ad9d169a3f99e69e39f75e654659e4b0bce27fb041021044bc5b80c0"},
+  {"name": "Brisvia.Miner_1.0.9_x64-setup.exe.sig", "size": 424, "sha256": "6a0639ebafb085b98db41d0e11cd9ea59f7d844b7c0fdfb707d3bbb951e714db"}
+ ],
+ "gates": {
+  "build_windows": "PASS",
+  "build_linux": "PASS",
+  "build_macos": "PASS",
+  "verify_candidate": "PASS",
+  "verify_update_1.0.8_to_1.0.9": "PASS"
+ },
+ "main_contains_candidate": true,
+ "release_is_draft": true,
+ "latest_json_offers": "pre-1.0.9"
+}
