@@ -41,12 +41,12 @@ window.LOCALES = {
     wait: {
       badge: 'Próximamente',
       tag: 'Cuenta regresiva',
-      note: 'El minado real comienza el 1 de agosto de 2026 a las 15:00 UTC (12:00 en Argentina).',
+      note: 'El minado real comienza el 1 de agosto de 2026 a las 15:00 UTC.',
       // NOTE: these texts are ONLY seen by someone who already created their wallet (with no wallet, the app shows the welcome).
       // That is why we do not say "you can create your wallet": they already have one. We talk about what is actually useful to them.
       wallet_note: 'Tu billetera ya está lista. El minado se habilita solo ese día.',
       title: 'El minado real todavía no comenzó',
-      sub: 'Tu billetera ya está lista y podés usarla cuando quieras. El minado se habilita solo el 1 de agosto de 2026 a las 15:00 UTC (12:00 en Argentina).',
+      sub: 'Tu billetera ya está lista y podés usarla cuando quieras. El minado se habilita solo el 1 de agosto de 2026 a las 15:00 UTC.',
       // Estado de red mientras falta para el lanzamiento: NO mostrar "Sincronizando" (confunde), sino que
       // estamos esperando la apertura de la red.
       net: 'En espera de lanzamiento',
@@ -401,10 +401,10 @@ window.LOCALES = {
     wait: {
       badge: 'Coming soon',
       tag: 'Countdown',
-      note: 'Real mining starts on August 1, 2026 at 15:00 UTC (12:00 in Argentina).',
+      note: 'Real mining starts on August 1, 2026 at 15:00 UTC.',
       wallet_note: 'Your wallet is ready. Mining unlocks by itself on that day.',
       title: 'Real mining has not started yet',
-      sub: 'Your wallet is ready and you can use it whenever you want. Mining unlocks by itself on August 1, 2026 at 15:00 UTC (12:00 in Argentina).',
+      sub: 'Your wallet is ready and you can use it whenever you want. Mining unlocks by itself on August 1, 2026 at 15:00 UTC.',
       // Network status while waiting for launch: do NOT show "Syncing" (confusing); show that we are
       // waiting for the network to open.
       net: 'Waiting for launch',
@@ -760,10 +760,10 @@ window.LOCALES = {
     wait: {
       badge: 'Em breve',
       tag: 'Contagem regressiva',
-      note: 'A mineração real começa em 1º de agosto de 2026 às 15:00 UTC (12:00 na Argentina).',
+      note: 'A mineração real começa em 1º de agosto de 2026 às 15:00 UTC.',
       wallet_note: 'Sua carteira está pronta. A mineração se libera sozinha nesse dia.',
       title: 'A mineração real ainda não começou',
-      sub: 'Sua carteira está pronta e você pode usá-la quando quiser. A mineração se libera sozinha em 1º de agosto de 2026 às 15:00 UTC (12:00 na Argentina).',
+      sub: 'Sua carteira está pronta e você pode usá-la quando quiser. A mineração se libera sozinha em 1º de agosto de 2026 às 15:00 UTC.',
       net: 'Aguardando o lançamento'
     },
     sync: {
@@ -1311,10 +1311,10 @@ window.LOCALES = {
     wait: {
       badge: '即将上线',
       tag: '倒计时',
-      note: '正式挖矿将于 2026 年 8 月 1 日 15:00 UTC（阿根廷时间 12:00）开始。',
+      note: '正式挖矿将于 2026 年 8 月 1 日 15:00 UTC 开始。',
       wallet_note: '你的钱包已准备就绪。挖矿将在那天自动开放。',
       title: '正式挖矿尚未开始',
-      sub: '你的钱包已准备就绪，随时可以使用。挖矿将于 2026 年 8 月 1 日 15:00 UTC（阿根廷时间 12:00）自动开放。',
+      sub: '你的钱包已准备就绪，随时可以使用。挖矿将于 2026 年 8 月 1 日 15:00 UTC 自动开放。',
       net: '等待上线'
     },
     sync: {
@@ -1861,10 +1861,10 @@ window.LOCALES = {
     wait: {
       badge: 'Скоро',
       tag: 'Обратный отсчёт',
-      note: 'Настоящий майнинг стартует 1 августа 2026 года в 15:00 UTC (12:00 по Аргентине).',
+      note: 'Настоящий майнинг стартует 1 августа 2026 года в 15:00 UTC.',
       wallet_note: 'Ваш кошелёк уже готов. Майнинг откроется сам в этот день.',
       title: 'Настоящий майнинг ещё не начался',
-      sub: 'Ваш кошелёк уже готов, и вы можете пользоваться им когда угодно. Майнинг откроется сам 1 августа 2026 года в 15:00 UTC (12:00 по Аргентине).',
+      sub: 'Ваш кошелёк уже готов, и вы можете пользоваться им когда угодно. Майнинг откроется сам 1 августа 2026 года в 15:00 UTC.',
       net: 'Ожидание запуска'
     },
     sync: {
