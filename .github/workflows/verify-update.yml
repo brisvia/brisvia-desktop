@@ -1,4 +1,4 @@
-name: Verify migration 1.0.8 -> 1.0.9 (real install-over-install)
+name: Verify migration (real install-over-install)
 
 # Required control before publishing: prove the EXACT installers upgrade cleanly. Jobs:
 #   migration-windows           download the PUBLISHED, SHA-256-pinned 1.0.8 (the real base users have) -> create
@@ -20,9 +20,25 @@ on:
   workflow_dispatch:
     inputs:
       candidate_tag:
-        description: "Draft tag holding the sealed 1.0.9 packages"
+        description: "Draft tag holding the sealed packages of the NEW version"
         required: true
         default: "v1.0.9"
+      from_tag:
+        description: "Published release tag users are upgrading FROM"
+        required: true
+        default: "v1.0.8"
+      from_version:
+        description: "Version number of the FROM packages (asset names)"
+        required: true
+        default: "1.0.8"
+      to_version:
+        description: "Version number of the NEW packages (asset names)"
+        required: true
+        default: "1.0.9"
+      from_win_sha:
+        description: "Known SHA-256 of the published FROM Windows setup.exe"
+        required: true
+        default: "04456725a24cd7ed860d53c2d13f8ccc8108bd9b1b8435baab23d336229ab37a"
 
 permissions:
   contents: write # draft releases are only visible to write-level tokens
@@ -30,7 +46,7 @@ permissions:
 jobs:
   # ------------------------------------------------------------------------------------------------
   smoke-linux:
-    name: Smoke - the exact 1.0.9 AppImage opens on Linux
+    name: Smoke - the exact ${{ inputs.to_version }} AppImage opens on Linux
     runs-on: ubuntu-22.04
     steps:
       - name: Install WebKit + xvfb
@@ -43,13 +59,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release download "${{ inputs.candidate_tag }}" --repo "${{ github.repository }}" \
-            --pattern 'Brisvia.Miner_1.0.9_amd64.AppImage' --dir . --clobber
-          chmod +x Brisvia.Miner_1.0.9_amd64.AppImage
-          echo "AppImage SHA-256: $(sha256sum Brisvia.Miner_1.0.9_amd64.AppImage | cut -d' ' -f1)"
+            --pattern 'Brisvia.Miner_${{ inputs.to_version }}_amd64.AppImage' --dir . --clobber
+          chmod +x Brisvia.Miner_${{ inputs.to_version }}_amd64.AppImage
+          echo "AppImage SHA-256: $(sha256sum Brisvia.Miner_${{ inputs.to_version }}_amd64.AppImage | cut -d' ' -f1)"
 
       - name: Open the exact package and confirm it stays alive
         run: |
-          APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a ./Brisvia.Miner_1.0.9_amd64.AppImage > appimage.log 2>&1 &
+          APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a ./Brisvia.Miner_${{ inputs.to_version }}_amd64.AppImage > appimage.log 2>&1 &
           APP_PID=$!
           sleep 20
           if ! kill -0 "$APP_PID" 2>/dev/null; then echo "FAIL: the app died on open"; cat appimage.log; exit 1; fi
@@ -60,7 +76,7 @@ jobs:
 
       - name: Extract the sidecars and smoke-test the exact node + worker
         run: |
-          ./Brisvia.Miner_1.0.9_amd64.AppImage --appimage-extract >/dev/null
+          ./Brisvia.Miner_${{ inputs.to_version }}_amd64.AppImage --appimage-extract >/dev/null
           BD=$(find squashfs-root -type f -name bitcoind | head -1)
           CLI=$(find squashfs-root -type f -name bitcoin-cli | head -1)
           WK=$(find squashfs-root -type f -name brisvia-worker | head -1)
@@ -77,7 +93,7 @@ jobs:
 
   # ------------------------------------------------------------------------------------------------
   smoke-macos:
-    name: Smoke - the exact 1.0.9 .app opens on macOS
+    name: Smoke - the exact ${{ inputs.to_version }} .app opens on macOS
     runs-on: macos-14
     steps:
       - name: Download the exact 1.0.9 DMG from the draft release
@@ -85,8 +101,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release download "${{ inputs.candidate_tag }}" --repo "${{ github.repository }}" \
-            --pattern 'Brisvia.Miner_1.0.9_aarch64.dmg' --dir . --clobber
-          echo "DMG SHA-256: $(shasum -a 256 Brisvia.Miner_1.0.9_aarch64.dmg | cut -d' ' -f1)"
+            --pattern 'Brisvia.Miner_${{ inputs.to_version }}_aarch64.dmg' --dir . --clobber
+          echo "DMG SHA-256: $(shasum -a 256 Brisvia.Miner_${{ inputs.to_version }}_aarch64.dmg | cut -d' ' -f1)"
 
       - name: Mount, verify, smoke the sidecars, and attempt a clean app exit
         run: |
@@ -101,7 +117,7 @@ jobs:
           codesign --verify --deep --strict "$APP" 2>&1 | head -3 || echo "(unsigned, as documented)"
           spctl --assess --type execute "$APP" 2>&1 | head -3 || echo "(Gatekeeper would reject: unsigned/unnotarized, as documented)"
           VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
-          echo "version: $VER"; [ "$VER" = "1.0.9" ] || { echo "FAIL: version $VER != 1.0.9"; exit 1; }
+          echo "version: $VER"; [ "$VER" = "${{ inputs.to_version }}" ] || { echo "FAIL: version $VER != ${{ inputs.to_version }}"; exit 1; }
 
           # --- sidecar smoke: the EXACT bundled node binary starts, responds and stops ---
           BD=$(find "$APP/Contents" -type f -name bitcoind | head -1)
@@ -145,7 +161,7 @@ jobs:
           echo "OK: macOS package opens and all sidecars run"
 
   migration-windows:
-    name: Windows - install 1.0.8, create wallet, install 1.0.9 over it, wallet survives
+    name: Windows - install ${{ inputs.from_version }}, create wallet, install ${{ inputs.to_version }} over it, wallet survives
     runs-on: windows-2022
     steps:
       - name: Checkout desktop app (specs + wdio config)
@@ -181,11 +197,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          gh release download v1.0.8 --repo "${{ github.repository }}" --pattern 'Brisvia.Miner_1.0.8_x64-setup.exe' --dir v107 --clobber
+          gh release download "${{ inputs.from_tag }}" --repo "${{ github.repository }}" --pattern 'Brisvia.Miner_${{ inputs.from_version }}_x64-setup.exe' --dir v107 --clobber
           # Pin the exact published asset by its known, minisign-verified SHA-256, and fail if it ever changes or
           # disappears — so the migration always installs the authentic 1.0.8 users actually have, never a swap.
-          EXPECTED=04456725a24cd7ed860d53c2d13f8ccc8108bd9b1b8435baab23d336229ab37a
-          GOT=$(sha256sum "v107/Brisvia.Miner_1.0.8_x64-setup.exe" | cut -d' ' -f1)
+          EXPECTED=${{ inputs.from_win_sha }}
+          GOT=$(sha256sum "v107/Brisvia.Miner_${{ inputs.from_version }}_x64-setup.exe" | cut -d' ' -f1)
           echo "1.0.8 setup.exe sha256: $GOT"
           [ "$GOT" = "$EXPECTED" ] || { echo "FAIL: the published 1.0.8 installer changed or is missing ($GOT != $EXPECTED)"; exit 1; }
           echo "OK: the published 1.0.8 installer matches its known signed SHA-256"
@@ -224,7 +240,7 @@ jobs:
       - name: Download the sealed 1.0.9 NSIS from the draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release download "${{ inputs.candidate_tag }}" --repo "${{ github.repository }}" --pattern 'Brisvia.Miner_1.0.9_x64-setup.exe' --dir . --clobber
+        run: gh release download "${{ inputs.candidate_tag }}" --repo "${{ github.repository }}" --pattern 'Brisvia.Miner_${{ inputs.to_version }}_x64-setup.exe' --dir . --clobber
 
       - name: Install 1.0.9 over 1.0.8 (clean update - the app was closed after onboarding)
         shell: pwsh
@@ -234,7 +250,7 @@ jobs:
           # live in it. We closed every process above; confirm none of ours is running, then install.
           $alive = @(Get-Process bitcoind,brisvia-worker,brisvia-miner -ErrorAction SilentlyContinue)
           if ($alive.Count -gt 0) { throw "FAIL: something of ours was still running before the update: $($alive.Name -join ', ')" }
-          $exe = Get-ChildItem . -Filter 'Brisvia.Miner_1.0.9_x64-setup.exe' | Select-Object -First 1
+          $exe = Get-ChildItem . -Filter 'Brisvia.Miner_${{ inputs.to_version }}_x64-setup.exe' | Select-Object -First 1
           $p = Start-Process -FilePath $exe.FullName -ArgumentList "/S","/D=$env:INSTALL_DIR" -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "1.0.9 install failed: $($p.ExitCode)" }
           Write-Host "OK: 1.0.9 installed cleanly over 1.0.8"
@@ -300,7 +316,7 @@ jobs:
   # then run the EXACT 1.0.8 and 1.0.9 packages over the same data directory and assert nothing was lost.
   # Secrets stay on STDIN; only the public address is printed.
   migration-linux:
-    name: Linux - headless data preservation across 1.0.8 -> 1.0.9 (real packages)
+    name: Linux - headless data preservation across ${{ inputs.from_version }} -> ${{ inputs.to_version }} (real packages)
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout desktop app (helper source)
@@ -339,8 +355,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release download v1.0.8 --repo "${{ github.repository }}" --pattern 'Brisvia.Miner_1.0.8_amd64.AppImage' --dir pkgs --clobber
-          gh release download "${{ inputs.candidate_tag }}" --repo "${{ github.repository }}" --pattern 'Brisvia.Miner_1.0.9_amd64.AppImage' --dir pkgs --clobber
+          gh release download "${{ inputs.from_tag }}" --repo "${{ github.repository }}" --pattern 'Brisvia.Miner_${{ inputs.from_version }}_amd64.AppImage' --dir pkgs --clobber
+          gh release download "${{ inputs.candidate_tag }}" --repo "${{ github.repository }}" --pattern 'Brisvia.Miner_${{ inputs.to_version }}_amd64.AppImage' --dir pkgs --clobber
           chmod +x pkgs/*.AppImage
       - name: Create a throwaway wallet at the REAL data path, run 1.0.8 then 1.0.9, assert preservation
         run: |
@@ -371,8 +387,8 @@ jobs:
             pkill -f bitcoind 2>/dev/null || true
             echo "OK: $tag opened over the existing wallet and stayed alive"
           }
-          run_pkg "pkgs/Brisvia.Miner_1.0.8_amd64.AppImage" "v107"
-          run_pkg "pkgs/Brisvia.Miner_1.0.9_amd64.AppImage" "v108"
+          run_pkg "pkgs/Brisvia.Miner_${{ inputs.from_version }}_amd64.AppImage" "v107"
+          run_pkg "pkgs/Brisvia.Miner_${{ inputs.to_version }}_amd64.AppImage" "v108"
           H_AFTER=$(sha256sum "$DD/wallet_seed.enc" | cut -d' ' -f1)
           [ "$H_BEFORE" = "$H_AFTER" ] || { echo "FAIL: wallet_seed.enc CHANGED $H_BEFORE -> $H_AFTER"; exit 1; }
           [ "$(cat "$DD/witness.txt" 2>/dev/null)" = "brisvia-witness" ] || { echo "FAIL: witness file lost"; exit 1; }
@@ -384,7 +400,7 @@ jobs:
       - name: Ports guard - the packaged node binds 9342/9338, never 9332/9333
         run: |
           set -e
-          ./pkgs/Brisvia.Miner_1.0.9_amd64.AppImage --appimage-extract >/dev/null
+          ./pkgs/Brisvia.Miner_${{ inputs.to_version }}_amd64.AppImage --appimage-extract >/dev/null
           BD=$(find squashfs-root -type f -name bitcoind | head -1)
           CLI=$(find squashfs-root -type f -name bitcoin-cli | head -1)
           DDP="$RUNNER_TEMP/ports"; mkdir -p "$DDP"
@@ -402,7 +418,7 @@ jobs:
           wait "$NODE" 2>/dev/null || true
 
   migration-macos:
-    name: macOS - headless data preservation across 1.0.8 -> 1.0.9 (real packages)
+    name: macOS - headless data preservation across ${{ inputs.from_version }} -> ${{ inputs.to_version }} (real packages)
     runs-on: macos-14
     steps:
       - name: Checkout desktop app (helper source)
@@ -434,8 +450,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          gh release download v1.0.8 --repo "${{ github.repository }}" --pattern 'Brisvia.Miner_1.0.8_aarch64.dmg' --dir pkgs --clobber
-          gh release download "${{ inputs.candidate_tag }}" --repo "${{ github.repository }}" --pattern 'Brisvia.Miner_1.0.9_aarch64.dmg' --dir pkgs --clobber
+          gh release download "${{ inputs.from_tag }}" --repo "${{ github.repository }}" --pattern 'Brisvia.Miner_${{ inputs.from_version }}_aarch64.dmg' --dir pkgs --clobber
+          gh release download "${{ inputs.candidate_tag }}" --repo "${{ github.repository }}" --pattern 'Brisvia.Miner_${{ inputs.to_version }}_aarch64.dmg' --dir pkgs --clobber
           extract_app() {
             local dmg="$1" dest="$2"
             local mnt="$RUNNER_TEMP/mnt-$dest"; mkdir -p "$mnt" "$RUNNER_TEMP/$dest"
@@ -444,8 +460,8 @@ jobs:
             xattr -dr com.apple.quarantine "$RUNNER_TEMP/$dest/Brisvia Miner.app" 2>/dev/null || true
             hdiutil detach "$mnt" 2>/dev/null || true
           }
-          extract_app "pkgs/Brisvia.Miner_1.0.8_aarch64.dmg" v107
-          extract_app "pkgs/Brisvia.Miner_1.0.9_aarch64.dmg" v108
+          extract_app "pkgs/Brisvia.Miner_${{ inputs.from_version }}_aarch64.dmg" v107
+          extract_app "pkgs/Brisvia.Miner_${{ inputs.to_version }}_aarch64.dmg" v108
       - name: Create a throwaway wallet at the REAL data path, run 1.0.8 then 1.0.9, assert preservation
         run: |
           set -e
