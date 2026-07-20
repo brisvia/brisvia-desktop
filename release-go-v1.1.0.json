@@ -1,0 +1,43 @@
+{
+ "status": "GO",
+ "version": "1.1.0",
+ "tag": "v1.1.0",
+ "commit_sha": "24a719074ced9be77d0b02bfd96f91d224199fcf",
+ "tree_sha": "c5e6402d33909e706bb98c9c513e449ab4354ac8",
+ "built_from_commit": "d9e7ee1278488cb6c1b77ea4a14b3c559013f3a4",
+ "built_from_note": "The three builds ran at d9e7ee1. The commits after it touch only .github/workflows/verify-update.yml and localization/app-translations-review-1.1.0.md: src/ and src-tauri/ are byte-identical, so these artifacts are the code of this tree.",
+ "repo": "brisvia/brisvia-desktop",
+ "generated_utc": "2026-07-20T23:20:00Z",
+ "assets": [
+  {"name": "Brisvia-Miner-Linux.AppImage", "size": 186477048, "sha256": "19c99f4f3db9af4e3425c5101d2893429c183ebd96e2627224548c4f9e787b94"},
+  {"name": "Brisvia-Miner-Windows.exe", "size": 10746733, "sha256": "532353e032e7dd3e116c6d43377b17441d4d61eb2740f64109a599246ca492a3"},
+  {"name": "Brisvia-Miner-macOS.dmg", "size": 16373169, "sha256": "be1eb4025d627d8847b7c67bc02b8e1af1d6a6f9998ccc6361cadb07d3f61a7d"},
+  {"name": "Brisvia.Miner.app.tar.gz", "size": 15576552, "sha256": "21d111561d56d1569efa06ae0a5dfe58aa746e02f366bcfed6d9c3192061b827"},
+  {"name": "Brisvia.Miner.app.tar.gz.sig", "size": 412, "sha256": "fcbb83fed1b383933daec3d37793a60f2082d023afde0c383a44af8e0d0bf72e"},
+  {"name": "Brisvia.Miner_1.1.0_aarch64.dmg", "size": 16373169, "sha256": "be1eb4025d627d8847b7c67bc02b8e1af1d6a6f9998ccc6361cadb07d3f61a7d"},
+  {"name": "Brisvia.Miner_1.1.0_amd64.AppImage", "size": 186477048, "sha256": "19c99f4f3db9af4e3425c5101d2893429c183ebd96e2627224548c4f9e787b94"},
+  {"name": "Brisvia.Miner_1.1.0_amd64.AppImage.sig", "size": 428, "sha256": "aed92e6e226ebff20bf81287545520735024e8cac5957e2cf3311b8576fb509e"},
+  {"name": "Brisvia.Miner_1.1.0_amd64.deb", "size": 127092010, "sha256": "c8d604559307f19c12a1d9328580c78eef7924ab3b682bd482021bfd642e7211"},
+  {"name": "Brisvia.Miner_1.1.0_x64-setup.exe", "size": 10746733, "sha256": "532353e032e7dd3e116c6d43377b17441d4d61eb2740f64109a599246ca492a3"},
+  {"name": "Brisvia.Miner_1.1.0_x64-setup.exe.sig", "size": 424, "sha256": "986679fa8d236bf0a2ad10f7e52772df36c48fd89e4d1fd6c3a0e0a8b00c1940"}
+ ],
+ "gates": {
+  "build_windows": "PASS",
+  "build_linux": "PASS",
+  "build_macos": "PASS",
+  "verify_candidate": "PASS",
+  "installer_scenarios": "PASS",
+  "e2e_real_windows": "PASS",
+  "tests_rust": "PASS",
+  "verify_update_1.0.9_to_1.1.0": "PASS"
+ },
+ "signatures_verified": {
+  "method": "ed25519 over blake2b-512, checked against the updater pubkey embedded in tauri.conf.json",
+  "windows_x64_setup_exe": "VALID",
+  "macos_app_tar_gz": "VALID",
+  "linux_amd64_appimage": "VALID"
+ },
+ "main_contains_candidate": true,
+ "release_is_draft": true,
+ "latest_json_offers": "1.0.9"
+}
