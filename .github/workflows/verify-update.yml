@@ -54,7 +54,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-0 xvfb file
 
-      - name: Download the exact 1.0.9 AppImage from the draft release
+      - name: Download the exact ${{ inputs.to_version }} AppImage from the draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -96,7 +96,7 @@ jobs:
     name: Smoke - the exact ${{ inputs.to_version }} .app opens on macOS
     runs-on: macos-14
     steps:
-      - name: Download the exact 1.0.9 DMG from the draft release
+      - name: Download the exact ${{ inputs.to_version }} DMG from the draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -191,7 +191,7 @@ jobs:
           "TMP=$temp"               | Out-File $env:GITHUB_ENV -Append
           "INSTALL_DIR=$installDir" | Out-File $env:GITHUB_ENV -Append
 
-      - name: Download + verify the PUBLISHED 1.0.8 installer (the real base users update from — no rebuild)
+      - name: Download + verify the PUBLISHED ${{ inputs.from_version }} installer (the real base users update from — no rebuild)
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -202,24 +202,24 @@ jobs:
           # disappears — so the migration always installs the authentic 1.0.8 users actually have, never a swap.
           EXPECTED=${{ inputs.from_win_sha }}
           GOT=$(sha256sum "v107/Brisvia.Miner_${{ inputs.from_version }}_x64-setup.exe" | cut -d' ' -f1)
-          echo "1.0.8 setup.exe sha256: $GOT"
-          [ "$GOT" = "$EXPECTED" ] || { echo "FAIL: the published 1.0.8 installer changed or is missing ($GOT != $EXPECTED)"; exit 1; }
-          echo "OK: the published 1.0.8 installer matches its known signed SHA-256"
+          echo "${{ inputs.from_version }} setup.exe sha256: $GOT"
+          [ "$GOT" = "$EXPECTED" ] || { echo "FAIL: the published ${{ inputs.from_version }} installer changed or is missing ($GOT != $EXPECTED)"; exit 1; }
+          echo "OK: the published ${{ inputs.from_version }} installer matches its known signed SHA-256"
 
-      - name: Install 1.0.8
+      - name: Install ${{ inputs.from_version }}
         shell: pwsh
         run: |
           $exe = Get-ChildItem v107 -Filter *.exe | Select-Object -First 1
           $p = Start-Process -FilePath $exe.FullName -ArgumentList "/S","/D=$env:INSTALL_DIR" -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw "1.0.8 install failed: $($p.ExitCode)" }
+          if ($p.ExitCode -ne 0) { throw "${{ inputs.from_version }} install failed: $($p.ExitCode)" }
           $app = Get-ChildItem $env:INSTALL_DIR -Recurse -Filter brisvia-miner.exe | Select-Object -First 1
-          if (-not $app) { throw "1.0.8 exe not found after install" }
+          if (-not $app) { throw "${{ inputs.from_version }} exe not found after install" }
           $v = (Get-Item $app.FullName).VersionInfo.ProductVersion
-          if ($v -notmatch "^1\.0\.8") { throw "installed version is $v, not 1.0.8" }
+          if (-not $v.StartsWith("${{ inputs.from_version }}")) { throw "installed version is $v, not ${{ inputs.from_version }}" }
           "BRISVIA_E2E_APP=$($app.FullName)" | Out-File $env:GITHUB_ENV -Append
-          Write-Host "1.0.8 installed: $($app.FullName) ($v)"
+          Write-Host "${{ inputs.from_version }} installed: $($app.FullName) ($v)"
 
-      - name: Create a wallet on the installed 1.0.8 (tauri-driver over the real app)
+      - name: Create a wallet on the installed ${{ inputs.from_version }} (tauri-driver over the real app)
         run: npx wdio run wdio.conf.js --spec tests/e2e-real/migration/prepare.spec.js
 
       - name: Record the wallet state BEFORE the update (no secrets)
@@ -237,12 +237,12 @@ jobs:
           "DATADIR=$dd"                 | Out-File $env:GITHUB_ENV -Append
           Write-Host "seed: $($seed.FullName)  SHA256=$h"
 
-      - name: Download the sealed 1.0.9 NSIS from the draft release
+      - name: Download the sealed ${{ inputs.to_version }} NSIS from the draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release download "${{ inputs.candidate_tag }}" --repo "${{ github.repository }}" --pattern 'Brisvia.Miner_${{ inputs.to_version }}_x64-setup.exe' --dir . --clobber
 
-      - name: Install 1.0.9 over 1.0.8 (clean update - the app was closed after onboarding)
+      - name: Install ${{ inputs.to_version }} over ${{ inputs.from_version }} (clean update - the app was closed after onboarding)
         shell: pwsh
         run: |
           # The realistic user path: the Tauri auto-updater quits the app (its node closes with it via
@@ -252,27 +252,27 @@ jobs:
           if ($alive.Count -gt 0) { throw "FAIL: something of ours was still running before the update: $($alive.Name -join ', ')" }
           $exe = Get-ChildItem . -Filter 'Brisvia.Miner_${{ inputs.to_version }}_x64-setup.exe' | Select-Object -First 1
           $p = Start-Process -FilePath $exe.FullName -ArgumentList "/S","/D=$env:INSTALL_DIR" -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw "1.0.9 install failed: $($p.ExitCode)" }
-          Write-Host "OK: 1.0.9 installed cleanly over 1.0.8"
+          if ($p.ExitCode -ne 0) { throw "${{ inputs.to_version }} install failed: $($p.ExitCode)" }
+          Write-Host "OK: ${{ inputs.to_version }} installed cleanly over ${{ inputs.from_version }}"
 
-      - name: Version is 1.0.9, wallet survived byte-for-byte, no second wallet
+      - name: Version is ${{ inputs.to_version }}, wallet survived byte-for-byte, no second wallet
         shell: pwsh
         run: |
           $app = Get-ChildItem $env:INSTALL_DIR -Recurse -Filter brisvia-miner.exe | Select-Object -First 1
           $v = (Get-Item $app.FullName).VersionInfo.ProductVersion
-          if ($v -notmatch "^1\.0\.9") { throw "FAIL: still $v, the update was not applied" }
+          if (-not $v.StartsWith("${{ inputs.to_version }}")) { throw "FAIL: still $v, the update was not applied" }
           "BRISVIA_E2E_APP=$($app.FullName)" | Out-File $env:GITHUB_ENV -Append
           if (-not (Test-Path $env:SEED_PATH)) { throw "FAIL: wallet_seed.enc DISAPPEARED with the update" }
           $h = (Get-FileHash $env:SEED_PATH -Algorithm SHA256).Hash.ToLower()
           if ($h -ne $env:SEED_HASH) { throw "FAIL: wallet_seed.enc CHANGED: $env:SEED_HASH -> $h" }
           $cnt = @(Get-ChildItem $env:APPDATA -Recurse -Filter wallet_seed.enc).Count
           if ($cnt -ne 1) { throw "FAIL: $cnt seed files exist (a second wallet was created)" }
-          Write-Host "OK: 1.0.8 -> $v, seed byte-identical, single wallet"
+          Write-Host "OK: ${{ inputs.from_version }} -> $v, seed byte-identical, single wallet"
 
-      - name: Open 1.0.9 and unlock with the same password (tauri-driver over the real app)
+      - name: Open ${{ inputs.to_version }} and unlock with the same password (tauri-driver over the real app)
         run: npx wdio run wdio.conf.js --spec tests/e2e-real/migration/verify.spec.js
 
-      - name: Ports guard - the packaged 1.0.9 node binds 9342/9338, never 9332/9333
+      - name: Ports guard - the packaged ${{ inputs.to_version }} node binds 9342/9338, never 9332/9333
         shell: pwsh
         run: |
           # Stop anything of ours first so the standalone check owns the ports.
@@ -351,14 +351,14 @@ jobs:
           export RANDOMX_LIB_DIR="$PWD/core/src/randomx/build"
           cargo build --manifest-path src-tauri/Cargo.toml --features "e2e mainnet" --bin e2e-wallet-helper
           echo "HELPER=$PWD/src-tauri/target/debug/e2e-wallet-helper" >> "$GITHUB_ENV"
-      - name: Download the exact 1.0.8 and 1.0.9 AppImages
+      - name: Download the exact ${{ inputs.from_version }} and ${{ inputs.to_version }} AppImages
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release download "${{ inputs.from_tag }}" --repo "${{ github.repository }}" --pattern 'Brisvia.Miner_${{ inputs.from_version }}_amd64.AppImage' --dir pkgs --clobber
           gh release download "${{ inputs.candidate_tag }}" --repo "${{ github.repository }}" --pattern 'Brisvia.Miner_${{ inputs.to_version }}_amd64.AppImage' --dir pkgs --clobber
           chmod +x pkgs/*.AppImage
-      - name: Create a throwaway wallet at the REAL data path, run 1.0.8 then 1.0.9, assert preservation
+      - name: Create a throwaway wallet at the REAL data path, run ${{ inputs.from_version }} then ${{ inputs.to_version }}, assert preservation
         run: |
           set -e
           # A HOME with a SPACE and NON-ASCII chars, so the data path is exercised on both (audit). The chars
@@ -445,7 +445,7 @@ jobs:
           export RANDOMX_LIB_DIR="$PWD/core/src/randomx/build"
           cargo build --manifest-path src-tauri/Cargo.toml --features "e2e mainnet" --bin e2e-wallet-helper
           echo "HELPER=$PWD/src-tauri/target/debug/e2e-wallet-helper" >> "$GITHUB_ENV"
-      - name: Download the exact 1.0.8 and 1.0.9 DMGs and extract the .app
+      - name: Download the exact ${{ inputs.from_version }} and ${{ inputs.to_version }} DMGs and extract the .app
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -462,7 +462,7 @@ jobs:
           }
           extract_app "pkgs/Brisvia.Miner_${{ inputs.from_version }}_aarch64.dmg" v107
           extract_app "pkgs/Brisvia.Miner_${{ inputs.to_version }}_aarch64.dmg" v108
-      - name: Create a throwaway wallet at the REAL data path, run 1.0.8 then 1.0.9, assert preservation
+      - name: Create a throwaway wallet at the REAL data path, run ${{ inputs.from_version }} then ${{ inputs.to_version }}, assert preservation
         run: |
           set -e
           export HOME="$RUNNER_TEMP/brisvia mig ünïcode"
