@@ -146,8 +146,6 @@ jobs:
           fi
 
       - name: The draft's assets are EXACTLY the approved ones
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           gh api "repos/${{ github.repository }}/releases/$RELEASE_ID/assets" > /tmp/assets.json
