@@ -325,7 +325,6 @@ h1 { font-size: 26px; line-height: 1.14; letter-spacing: -.02em; max-width: 15ch
 
 @media (max-width: 720px) {
   .mine-grid { grid-template-columns: 1fr; }
-  .share-btn { grid-column: 1; }
   .nav-btn { padding: 7px 11px; }
   .content { padding: 18px; }
 }
@@ -343,7 +342,10 @@ h1 { font-size: 26px; line-height: 1.14; letter-spacing: -.02em; max-width: 15ch
 .hsocial:hover::after, .hsocial:focus-visible::after { opacity: 1; }
 
 /* Share Brisvia: discreet button at the foot of the "Your contribution" panel + network grid in the modal. */
-.share-btn { grid-column: 2; align-self: start; width: 100%; margin-top: 2px; display: inline-flex; align-items: center; justify-content: center; gap: 9px; }
+/* Right column: the stats card + the Share button stacked, so the button sits right under the card and
+   never falls to the bottom of a tall hero (which pushed it out of view / behind the scroll). */
+.mine-side { display: flex; flex-direction: column; gap: 14px; align-self: start; }
+.share-btn { width: 100%; display: inline-flex; align-items: center; justify-content: center; gap: 9px; }
 .share-btn svg { width: 17px; height: 17px; fill: currentColor; flex: 0 0 auto; }
 .share-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 14px 0 10px; }
 .share-net { display: inline-flex; align-items: center; justify-content: center; gap: 9px; }
