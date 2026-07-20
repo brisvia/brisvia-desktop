@@ -5,7 +5,8 @@
 window.I18N = (function () {
   let lang = 'es';
   let dict = {};
-  const fallback = () => (window.LOCALES && window.LOCALES.es) || {};
+  // Universal fallback for missing keys: English (a full translation), then Spanish (source).
+  const fallback = () => (window.LOCALES && (window.LOCALES.en || window.LOCALES.es)) || {};
 
   function resolve(obj, key) {
     return key.split('.').reduce((o, k) => (o && o[k] != null ? o[k] : null), obj);
@@ -45,20 +46,39 @@ window.I18N = (function () {
   }
 
   function setLang(l, persist) {
-    lang = (window.LOCALES && window.LOCALES[l]) ? l : 'es';
+    lang = (window.LOCALES && window.LOCALES[l]) ? l : 'en';
     dict = window.LOCALES[lang] || {};
     if (persist !== false) { try { localStorage.setItem('brv_lang', lang); } catch {} }
     applyDom();
     document.dispatchEvent(new CustomEvent('langchange', { detail: { lang } }));
   }
 
-  // First run: OS in Spanish -> es; anything else -> en. Afterwards it respects the saved manual choice.
+  // Maps an OS/browser language tag to a supported app language, or null if unsupported.
+  // Policy mirrors the website: es/en/pt/ru by prefix; Simplified Chinese -> zh; Traditional
+  // Chinese (zh-Hant / zh-TW / zh-HK / zh-MO) is NOT supported yet -> null (falls back to English).
+  function mapTag(tag) {
+    tag = String(tag || '').toLowerCase(); if (!tag) return null;
+    if (tag === 'es' || tag.indexOf('es-') === 0) return 'es';
+    if (tag === 'en' || tag.indexOf('en-') === 0) return 'en';
+    if (tag === 'pt' || tag.indexOf('pt-') === 0) return 'pt';
+    if (tag === 'ru' || tag.indexOf('ru-') === 0) return 'ru';
+    if (tag === 'zh-tw' || tag === 'zh-hk' || tag === 'zh-mo' || tag.indexOf('hant') !== -1) return null;
+    if (tag === 'zh' || tag.indexOf('zh-') === 0 || tag.indexOf('hans') !== -1) return 'zh';
+    return null;
+  }
+  // First run: detect the OS language and open in the matching supported language; anything
+  // unsupported -> English (universal fallback). Afterwards it respects the saved manual choice.
   function detect() {
     let saved = null;
     try { saved = localStorage.getItem('brv_lang'); } catch {}
     if (saved && window.LOCALES && window.LOCALES[saved]) return saved;
-    const sys = (navigator.language || navigator.userLanguage || 'en').toLowerCase();
-    return sys.startsWith('es') ? 'es' : 'en';
+    const list = (navigator.languages && navigator.languages.length)
+      ? navigator.languages : [navigator.language || navigator.userLanguage || ''];
+    for (let i = 0; i < list.length; i++) {
+      const m = mapTag(list[i]);
+      if (m && window.LOCALES && window.LOCALES[m]) return m;
+    }
+    return 'en';
   }
 
   function fmtNum(n, opts) { return new Intl.NumberFormat(lang, opts).format(Number(n) || 0); }
