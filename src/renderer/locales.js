@@ -886,7 +886,7 @@ window.LOCALES = {
       mode_solo_desc: 'Você minera por conta própria contra o seu nó. Recompensa completa, mas resultados menos frequentes.',
       mode_pool_desc: 'Você junta o seu trabalho com o de outros mineradores. Pagamentos proporcionais e mais regulares, que dependem da pool.',
       mode_tech: 'Detalhes técnicos',
-      mode_tech_note: 'Um trabalho aceito comprova o esforço que você contribuiu, mas não é um bloco nem um pagamento imediato.',
+      mode_tech_note: 'Uma share aceita comprova o esforço que você contribuiu, mas não é um bloco nem um pagamento imediato.',
       mode_switching: 'Trocando de modo…',
       mode_switched: 'Modo ativo: {m}',
       mode_switch_err: 'Não foi possível trocar de modo. Você continua no modo anterior.',
@@ -1020,7 +1020,7 @@ window.LOCALES = {
       intensity_sub: 'Com quanta força a mineração começa.',
       mining_mode_title: 'Como você minera',
       mining_mode_sub: 'Escolha como o seu computador participa da rede.',
-      mode_solo: 'Sozinho',
+      mode_solo: 'Sozinho (solo)',
       mode_pool: 'Grupo oficial',
       mode_custom: 'Outro grupo',
       mode_solo_desc: 'Seu computador minera por conta própria. Você recebe a recompensa completa de um bloco, mas só quando o seu computador encontra um (pode demorar).',
@@ -1261,12 +1261,12 @@ window.LOCALES = {
       phase_reconnecting: 'Reconectando…',
       phase_suspended: 'Pool em manutenção…',
       phase_disconnected: 'Não conectado à pool',
-      shares_accepted: 'Trabalhos aceitos',
-      shares_sent: 'Trabalhos enviados',
-      shares_rejected: 'Trabalhos rejeitados',
-      last_accepted: 'Último trabalho aceito: {t}',
+      shares_accepted: 'Shares aceitas',
+      shares_sent: 'Shares enviadas',
+      shares_rejected: 'Shares rejeitadas',
+      last_accepted: 'Último share aceito: {t}',
       measuring: 'medindo…',
-      note_no_guarantee: 'Um trabalho aceito fica registrado, mas não é um bloco nem um pagamento: você recebe quando a pool encontra blocos, eles amadurecem e a rede não os descarta. Os primeiros pagamentos ficam pendentes até o pagamento de controle. O valor exato ainda não é mostrado aqui.'
+      note_no_guarantee: 'Uma share (unidade de trabalho aceita pela pool) fica registrada, mas não é um bloco nem um pagamento: você recebe quando a pool encontra blocos, eles amadurecem e a rede não os descarta. Os primeiros pagamentos ficam pendentes até o pagamento de controle. O valor exato ainda não é mostrado aqui.'
     }
   },
   zh: {
@@ -1989,7 +1989,7 @@ window.LOCALES = {
       mode_solo_desc: 'Вы майните сами по себе через свой узел. Полная награда, но результаты реже.',
       mode_pool_desc: 'Вы объединяете работу с другими майнерами. Пропорциональные, более регулярные выплаты, которые зависят от пула.',
       mode_tech: 'Технические подробности',
-      mode_tech_note: 'Принятая доля подтверждает вложенную работу, но это не блок и не мгновенная выплата.',
+      mode_tech_note: 'Принятая шара подтверждает вложенную работу, но это не блок и не мгновенная выплата.',
       mode_switching: 'Смена режима…',
       mode_switched: 'Активный режим: {m}',
       mode_switch_err: 'Не удалось сменить режим. Остаётся прежний режим.',
@@ -2123,7 +2123,7 @@ window.LOCALES = {
       intensity_sub: 'С какой силой стартует майнинг.',
       mining_mode_title: 'Как вы майните',
       mining_mode_sub: 'Выберите, как ваш компьютер участвует в сети.',
-      mode_solo: 'Соло',
+      mode_solo: 'Соло-майнинг',
       mode_pool: 'Официальный пул',
       mode_custom: 'Свой пул',
       mode_solo_desc: 'Ваш компьютер майнит сам по себе. Вы получаете полную награду за блок, но только когда компьютер его находит (это может занять время).',
@@ -2364,12 +2364,12 @@ window.LOCALES = {
       phase_reconnecting: 'Повторное подключение…',
       phase_suspended: 'Пул на техобслуживании…',
       phase_disconnected: 'Нет подключения к пулу',
-      shares_accepted: 'Принятые доли',
-      shares_sent: 'Отправленные доли',
-      shares_rejected: 'Отклонённые доли',
-      last_accepted: 'Последняя принятая доля: {t}',
+      shares_accepted: 'Принятые шары',
+      shares_sent: 'Отправленные шары',
+      shares_rejected: 'Отклонённые шары',
+      last_accepted: 'Последняя принятая шара: {t}',
       measuring: 'измерение…',
-      note_no_guarantee: 'Принятая доля учитывается, но это не блок и не выплата: вам платят, когда пул находит блоки, они дозревают, и сеть их не отбрасывает. Первые выплаты остаются в ожидании до контрольного платежа. Точная сумма здесь пока не показывается.'
+      note_no_guarantee: 'Шара (единица работы, принятая пулом) учитывается, но это не блок и не выплата: вам платят, когда пул находит блоки, они дозревают, и сеть их не отбрасывает. Первые выплаты остаются в ожидании до контрольного платежа. Точная сумма здесь пока не показывается.'
     }
   },
 
