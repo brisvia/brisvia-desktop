@@ -5,6 +5,6 @@
   "approved_by": "Fernando (owner)",
   "method": "explicit session authorization - owner delegated the trigger to the assistant",
   "authorization": "publicala y dejamela instalada en mi pc",
-  "scope": "1.1.0 adds pt-BR, zh-CN and ru (five languages), first-run OS-language detection, a five-language picker, one shared rule for which languages write decimals with a comma, and a Mine-view scroll fix. No changes to consensus, key derivation, mining or security.",
-  "approved_utc": "2026-07-20T23:20:00Z"
+  "scope": "1.1.0 adds pt-BR, zh-CN and ru (five languages), first-run OS-language detection, a five-language picker, one shared rule for which languages write decimals with a comma, and a Mine-view scroll fix. The launch notice announces 15:00 UTC only, with no local-time aside. No changes to consensus, key derivation, mining or security.",
+  "approved_utc": "2026-07-20T23:55:00Z"
 }
