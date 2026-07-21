@@ -2,64 +2,64 @@
  "status": "GO",
  "version": "1.1.0",
  "tag": "v1.1.0",
- "commit_sha": "53e60bcf3cffa093a59e527c6e0812c71ac0ad1a",
- "tree_sha": "e804395e87fddeb3d0c5b7431f5ef0b28cbe3c45",
+ "commit_sha": "b47316a30373c068690aedeca7b0ca5d1317a46c",
+ "tree_sha": "d63b275637dd47249527fc7888bbe740277e619c",
  "repo": "brisvia/brisvia-desktop",
- "generated_utc": "2026-07-20T23:55:00Z",
+ "generated_utc": "2026-07-21T01:40:00Z",
  "assets": [
   {
    "name": "Brisvia-Miner-Linux.AppImage",
-   "sha256": "75c516ca9864aaed8ed309427914dad63e7ca1d136c51fc983221c1e146c5f67",
-   "size": 186477048
+   "sha256": "87fbbd68d42a94a9c9ce2fc520239c146f2a984a0830b9618aaf5bfddf7378f8",
+   "size": 186481144
   },
   {
    "name": "Brisvia-Miner-macOS.dmg",
-   "sha256": "02799ab4549b49859dcf616f5ca03b0c33fc666e373b8622457248b6c02460de",
-   "size": 16373078
+   "sha256": "ea9865ac48a8122e73951f5438505f788dad8f269a6367da11518971bd1152b6",
+   "size": 16372046
   },
   {
    "name": "Brisvia-Miner-Windows.exe",
-   "sha256": "3ea0f7d030c03a79cca170fb013f83ce3b78c8e147e7b5aad664a00d5fed1ed7",
-   "size": 10748272
+   "sha256": "230b85a2c076acbe494e2fdf3ac08a2cc64133796bf1df1f21db2d12caed762a",
+   "size": 10756294
   },
   {
    "name": "Brisvia.Miner.app.tar.gz",
-   "sha256": "7b3b2288b50b69b11872c0fdf28501d070227b965fd3564985b7d0812436c9fd",
-   "size": 15576438
+   "sha256": "475b85f0cb96c294b49cb6ffdc3364da61455cbcb586db20f1b9719e6556e9f8",
+   "size": 15574828
   },
   {
    "name": "Brisvia.Miner.app.tar.gz.sig",
-   "sha256": "b56b4ab456f31251365684a1f93e05afa14a3f30b6e80d8ebbd0816ccbbf4f29",
+   "sha256": "9ad047a588ff9b3d69c181d214192bc4bdcf41d4aa9da162b816eb7fc81aa4ee",
    "size": 412
   },
   {
    "name": "Brisvia.Miner_1.1.0_aarch64.dmg",
-   "sha256": "02799ab4549b49859dcf616f5ca03b0c33fc666e373b8622457248b6c02460de",
-   "size": 16373078
+   "sha256": "ea9865ac48a8122e73951f5438505f788dad8f269a6367da11518971bd1152b6",
+   "size": 16372046
   },
   {
    "name": "Brisvia.Miner_1.1.0_amd64.AppImage",
-   "sha256": "75c516ca9864aaed8ed309427914dad63e7ca1d136c51fc983221c1e146c5f67",
-   "size": 186477048
+   "sha256": "87fbbd68d42a94a9c9ce2fc520239c146f2a984a0830b9618aaf5bfddf7378f8",
+   "size": 186481144
   },
   {
    "name": "Brisvia.Miner_1.1.0_amd64.AppImage.sig",
-   "sha256": "870c770a480681450fbc4dd6ec973eb46b0f43447780f4306b94ca8782a0ab07",
+   "sha256": "33a4fbb13cac27b911ee842bfce1a1352db166675fc0a6a4fc3c7a09336a769f",
    "size": 428
   },
   {
    "name": "Brisvia.Miner_1.1.0_amd64.deb",
-   "sha256": "0f7eba8b44230051004f2c4b4fa7ed3f0f754ac205fd4d3fa8de7215183751c9",
-   "size": 127092082
+   "sha256": "f484bd2e3931975684397b415819aa88284f0b57e1ef49888aa665945ff09857",
+   "size": 127101632
   },
   {
    "name": "Brisvia.Miner_1.1.0_x64-setup.exe",
-   "sha256": "3ea0f7d030c03a79cca170fb013f83ce3b78c8e147e7b5aad664a00d5fed1ed7",
-   "size": 10748272
+   "sha256": "230b85a2c076acbe494e2fdf3ac08a2cc64133796bf1df1f21db2d12caed762a",
+   "size": 10756294
   },
   {
    "name": "Brisvia.Miner_1.1.0_x64-setup.exe.sig",
-   "sha256": "74f4c9e9299a81be508f37c069f0582ae215518f66cdf1286888c07a5f97f26c",
+   "sha256": "6a7f8151c93d1123bb82f1ab3d3117f9ac820ce369425cdddb32a9fcb563ad83",
    "size": 424
   }
  ],
@@ -73,14 +73,15 @@
   "tests_rust": "PASS",
   "verify_update_1.0.9_to_1.1.0": "PASS"
  },
- "gates_note": "verify_candidate, installer_scenarios, e2e_real_windows, tests_rust and the 1.0.9 -> 1.1.0 migration all passed on the identical app code; the only change since is the launch notice, which now reads in UTC alone.",
+ "gates_note": "Every gate was re-run against this exact build (commit b47316a), not inherited from an earlier candidate. The change since the previous candidate is the connection-failure error path in lib.rs plus its five-language wording, so the Rust binary is different and the whole suite was repeated rather than carried over.",
  "signatures_verified": {
   "method": "ed25519 over blake2b-512, checked against the updater pubkey embedded in tauri.conf.json",
+  "key_id": "5a9fe07b58bf4a00",
   "windows_x64_setup_exe": "VALID",
   "macos_app_tar_gz": "VALID",
   "linux_amd64_appimage": "VALID"
  },
- "hashes_verified": "the three updater artifacts were downloaded and their SHA-256 recomputed; they match what the release declares",
+ "hashes_verified": "the three updater artifacts were downloaded and their SHA-256 recomputed locally; they match the digests the release reports",
  "main_contains_candidate": true,
  "release_is_draft": true,
  "latest_json_offers": "1.0.9"
