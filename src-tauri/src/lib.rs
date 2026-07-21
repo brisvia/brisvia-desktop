@@ -437,7 +437,18 @@ fn rpc(datadir: &PathBuf, wallet: Option<&str>, method: &str, params: Value) -> 
             let v: Value = r.into_json().unwrap_or_else(|_| json!({}));
             Err(friendly_error(v["error"]["message"].as_str().unwrap_or("node error")))
         }
-        Err(e) => Err(e.to_string()),
+        // A transport failure against our OWN node on 127.0.0.1 is not a mystery worth showing raw.
+        // This used to return the underlying English text, which friendly_error could not match, so the
+        // user got the catch-all "the operation could not be completed" — the message a real user hit
+        // after antivirus quarantined bitcoind.exe: the cookie from an earlier run was still on disk, so
+        // the check above passed, and then nothing was listening. They spent an evening writing firewall
+        // rules for a program that was never blocked by the firewall.
+        Err(e) => Err(match e.kind() {
+            // Nothing is listening on the port: the node is not running at all.
+            ureq::ErrorKind::ConnectionFailed => "ERR:NODE_NOT_LISTENING".to_string(),
+            // It heard us but took too long, or we could not read the answer: it is probably still coming up.
+            _ => "ERR:NODE_NOT_READY".to_string(),
+        }),
     }
 }
 
