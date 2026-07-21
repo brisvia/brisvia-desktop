@@ -37,6 +37,17 @@ const SUMMARY_EVERY: Duration = Duration::from_secs(60);
 /// otherwise send terminal escape sequences or megabytes of text and forge what the log looks like.
 const MAX_SERVER_TEXT: usize = 120;
 
+const PROTOCOL_VERSION: &str = "brisvia-stratum-1";
+
+fn print_version() -> ! {
+    // Cuando alguien reporta un problema, esto dice EXACTAMENTE que binario esta corriendo.
+    println!("brisvia-miner {}", env!("CARGO_PKG_VERSION"));
+    println!("  build     : {}", option_env!("BRISVIA_BUILD").unwrap_or("dev"));
+    println!("  platform  : {} {}", std::env::consts::OS, std::env::consts::ARCH);
+    println!("  protocol  : {PROTOCOL_VERSION}");
+    std::process::exit(0)
+}
+
 fn print_help(code: i32) -> ! {
     // La ayuda pedida a proposito va por la salida normal y con codigo 0. Un error de argumentos va
     // por la salida de errores y con codigo 2: asi un guion puede distinguirlos.
@@ -52,6 +63,7 @@ OPTIONS:
   -p, --pool <HOST:PORT>  Pool to connect to. Default: {DEFAULT_POOL}
   -w, --worker <NAME>     A name for this machine, to tell your miners apart. Default: cli
       --verbose-shares    Print every single share. Off by default: it floods the log.
+  -V, --version           Show version and build info.
   -h, --help              Show this.
 
 EXAMPLE:
@@ -189,6 +201,7 @@ fn parse_args() -> Args {
                 }));
                 i += 1;
             }
+            "--version" | "-V" => print_version(),
             "--verbose-shares" => verbose_shares = true,
             "-h" | "--help" => print_help(0),
             other => {
@@ -228,6 +241,27 @@ fn parse_args() -> Args {
         }
         Some(n) => n,
     };
+
+    if worker.len() > 64 || worker.is_empty()
+        || !worker.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        argument_error("--worker must be 1 to 64 characters, letters, numbers, '.', '_' or '-'");
+    }
+    // El destino se revisa formalmente: sin esquema (nada de http://), sin espacios ni controles, y
+    // con host y puerto separables. TLS y la validacion del certificado son siempre obligatorios, asi
+    // que un destino cualquiera no baja la seguridad, pero un formato roto debe avisarse claro.
+    if pool.contains("://") || pool.contains(char::is_whitespace)
+        || pool.chars().any(|c| c.is_control()) || pool.len() > 255
+    {
+        argument_error("--pool must be host:port, with no scheme, spaces or control characters");
+    }
+    if pool.rsplit_once(':').map(|(h, p)| h.is_empty() || p.parse::<u16>().is_err()).unwrap_or(true) {
+        argument_error("--pool must be host:port, for example pool.brisvia.com:3333");
+    }
+    if pool != DEFAULT_POOL {
+        println!("Custom pool selected ({pool}). Verify that you trust its operator.
+");
+    }
 
     Args { address, pool, worker, threads, verbose_shares }
 }
@@ -341,7 +375,12 @@ fn main() {
                 println!("{line}");
             }
         }
-        _ => {}
+        // Estos dos se ignoran A PROPOSITO, no por descuido: el envio de una share es un paso
+        // intermedio (el veredicto llega en ShareAccepted/Rejected), y el cambio de objetivo a mitad
+        // de trabajo lo maneja el motor. Se nombran para que, si el enum crece, el compilador obligue
+        // a decidir que hacer con lo nuevo en vez de tragarlo en silencio.
+        PoolEvent::ShareSubmitted { .. } => {}
+        PoolEvent::TargetChangeIgnored => {}
     };
 
     // tls = true, always. There is deliberately no way to ask for anything else.
