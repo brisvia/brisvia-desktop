@@ -215,6 +215,58 @@ jobs:
           ./src-tauri/binaries/bitcoind -version | head -1 || echo "bitcoind version check failed"
           file ./src-tauri/binaries/brisvia-worker || true
 
+      # The bundler copies GLib into the AppImage. It must not: the host's GIO and GVFS modules are loaded
+      # from the system and call symbols a bundled GLib 2.72 does not export, so on Ubuntu 24.04 and 26.04
+      # the app fails to start with "undefined symbol: g_task_set_static_name". Confirmed by running the
+      # published 1.1.0 artifact inside a real ubuntu:26.04 container (host GLib 2.88): as published it hits
+      # both the GLib clash and an EGL failure; with these four files removed it hits neither. See
+      # .github/workflows/linux-appimage-ubuntu2604.yml, which reproduces it on demand.
+      #
+      # This is not blind deletion: these four are on the official AppImage excludelist precisely because
+      # they have to match the host's GIO/GVFS. The build runs on 22.04 (GLib 2.72) and GLib is forward
+      # compatible, so every supported host satisfies what the bundled GTK and WebKit ask for.
+      #
+      # Order matters. Tauri signs the AppImage during the build, so repacking invalidates that signature
+      # and it has to be produced again from the repacked bytes — otherwise the updater refuses the file.
+      - name: Drop the bundled GLib from the AppImage, then sign it again
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: |
+          set -euo pipefail
+          BUNDLE=src-tauri/target/release/bundle/appimage
+          ORIG=$(ls "$BUNDLE"/*.AppImage | head -1)
+          echo "repacking $ORIG"
+          WORK=$(mktemp -d)
+          ( cd "$WORK" && "$OLDPWD/$ORIG" --appimage-extract >/dev/null )
+          echo "::group::removing the bundled GLib family"
+          find "$WORK/squashfs-root" -type f \( -name 'libglib-2.0.so*' -o -name 'libgio-2.0.so*' \
+               -o -name 'libgobject-2.0.so*' -o -name 'libgmodule-2.0.so*' \) -print -delete
+          echo "::endgroup::"
+          curl -fsSL -o "$WORK/appimagetool" \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x "$WORK/appimagetool"
+          ( cd "$WORK" && ./appimagetool --appimage-extract >/dev/null && \
+            ARCH=x86_64 ./squashfs-root/AppRun "$WORK/squashfs-root" "$WORK/out.AppImage" >/dev/null )
+          mv -f "$WORK/out.AppImage" "$ORIG"
+          chmod +x "$ORIG"
+          rm -f "$ORIG.sig"
+          npm run tauri signer sign -- "$(realpath "$ORIG")"
+          test -s "$ORIG.sig" || { echo "FAIL: the repacked AppImage was not signed"; exit 1; }
+          rm -rf "$WORK"
+
+      - name: Guard - the AppImage must not carry GLib
+        run: |
+          set -euo pipefail
+          BUNDLE=src-tauri/target/release/bundle/appimage
+          A=$(ls "$BUNDLE"/*.AppImage | head -1)
+          WORK=$(mktemp -d); ( cd "$WORK" && "$OLDPWD/$A" --appimage-extract >/dev/null )
+          HITS=$(find "$WORK/squashfs-root" -type f \( -name 'libglib-2.0.so*' -o -name 'libgio-2.0.so*' \
+                 -o -name 'libgobject-2.0.so*' -o -name 'libgmodule-2.0.so*' \) | wc -l)
+          rm -rf "$WORK"
+          [ "$HITS" -eq 0 ] || { echo "FAIL: the AppImage still bundles $HITS GLib files; it will not start on Ubuntu 24.04+"; exit 1; }
+          echo "OK: no bundled GLib — the host's copy will be used"
+
       - name: Stage the .AppImage with a fixed (versionless) name for a permanent download link
         # Keeps releases/latest/download/Brisvia-Miner-Linux.AppImage working across every version.
         run: cp src-tauri/target/release/bundle/appimage/*.AppImage Brisvia-Miner-Linux.AppImage
