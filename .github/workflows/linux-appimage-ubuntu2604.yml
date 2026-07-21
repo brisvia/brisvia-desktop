@@ -38,7 +38,9 @@ jobs:
             curl ca-certificates file xvfb \
             libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 \
             gvfs libglib2.0-0 libglib2.0-bin zstd
-          echo "host GLib:"; dpkg -s libglib2.0-0 | grep ^Version
+          # 26.04 renamed the package (the 64-bit time_t transition), so do not query one fixed name.
+          echo "host GLib package:"; dpkg -l | grep -E 'libglib2\.0-0' || true
+          echo "host GLib soname:"; ls -l /usr/lib/x86_64-linux-gnu/libglib-2.0.so.0* || true
 
       - name: Download the published AppImage
         env:
