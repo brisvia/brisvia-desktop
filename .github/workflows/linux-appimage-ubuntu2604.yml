@@ -1,0 +1,119 @@
+name: Linux - does the AppImage open on Ubuntu 26.04?
+
+# A user on Ubuntu 26.04 (ThinkPad T430, Intel HD 4000, Wayland) reported the AppImage never opening.
+# Two causes were diagnosed by hand and only one of them was ever fixed:
+#
+#   1. The AppImage bundles GLib 2.72 (libgio-2.0.so.0.7200.4). The host's GIO/GVFS modules are newer and
+#      call g_task_set_static_name, which does not exist in 2.72, so loading them fails. Still present in
+#      1.1.0 — verified by listing the published artifact.
+#   2. WebKitGTK failed to create an EGL display. Fixed in the app itself: on Linux it now defaults
+#      WEBKIT_DISABLE_DMABUF_RENDERER and WEBKIT_DISABLE_COMPOSITING_MODE. That shipped in 1.1.0.
+#
+# The blocker was that nobody could reproduce it: the reporter's laptop was the only Ubuntu 26.04 around.
+# This runs the real artifact inside a real Ubuntu 26.04 container, with and without the bundled GLib, and
+# says which one gets further. It proves or disproves cause 1 without needing that laptop.
+#
+# It never publishes anything. Manual trigger only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to test (e.g. v1.1.0)"
+        required: true
+        default: "v1.1.0"
+
+jobs:
+  probar:
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:26.04
+      options: --privileged        # the AppImage runtime wants FUSE; we extract instead, but keep it permissive
+    steps:
+      - name: Install what a desktop Ubuntu would already have
+        run: |
+          set -eux
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            curl ca-certificates file xvfb \
+            libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 \
+            gvfs libglib2.0-0 libglib2.0-bin zstd
+          echo "host GLib:"; dpkg -s libglib2.0-0 | grep ^Version
+
+      - name: Download the published AppImage
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -eux
+          V="${TAG#v}"
+          curl -fsSL -o app.AppImage \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/Brisvia.Miner_${V}_amd64.AppImage"
+          chmod +x app.AppImage
+          sha256sum app.AppImage
+
+      - name: What GLib does it carry?
+        run: |
+          set -eux
+          ./app.AppImage --appimage-extract >/dev/null
+          mv squashfs-root original
+          echo "::group::bundled GLib family"
+          find original -name 'lib*glib*so*' -o -name 'libgio*so*' -o -name 'libgobject*so*' -o -name 'libgmodule*so*' | sort
+          echo "::endgroup::"
+
+      - name: Make a copy without the bundled GLib
+        run: |
+          set -eux
+          cp -a original repacked
+          # These four are on the official AppImage excludelist precisely because they have to match the
+          # host's GIO/GVFS modules. Built on 22.04 (GLib 2.72) and GLib is forward compatible, so every
+          # supported host can satisfy what the bundled GTK/WebKit ask for.
+          find repacked -type f \( -name 'libglib-2.0.so*' -o -name 'libgio-2.0.so*' \
+               -o -name 'libgobject-2.0.so*' -o -name 'libgmodule-2.0.so*' \) -print -delete
+
+      - name: Run both, and see how far each one gets
+        run: |
+          set -x
+          probar () {
+            DIR="$1"; NOMBRE="$2"
+            echo "::group::$NOMBRE"
+            # 20s is plenty: the failures we are hunting happen during start-up, not later.
+            timeout 20 xvfb-run -a "$DIR/AppRun" > "$NOMBRE.out" 2> "$NOMBRE.err" || true
+            echo "--- stderr ---"; tail -40 "$NOMBRE.err" || true
+            if grep -q "g_task_set_static_name" "$NOMBRE.err"; then
+              echo "RESULT[$NOMBRE]: GLib clash PRESENT"
+            else
+              echo "RESULT[$NOMBRE]: no GLib clash"
+            fi
+            if grep -qi "EGL_BAD_PARAMETER\|Could not create default EGL display" "$NOMBRE.err"; then
+              echo "RESULT[$NOMBRE]: EGL failure PRESENT"
+            else
+              echo "RESULT[$NOMBRE]: no EGL failure"
+            fi
+            echo "::endgroup::"
+          }
+          probar original as-published
+          probar repacked without-bundled-glib
+
+      - name: Verdict
+        run: |
+          set -e
+          echo "=============================================="
+          for f in as-published without-bundled-glib; do
+            echo "--- $f"
+            grep -q "g_task_set_static_name" "$f.err" && echo "    GLib clash:  YES" || echo "    GLib clash:  no"
+            grep -qi "EGL_BAD_PARAMETER" "$f.err"      && echo "    EGL failure: YES" || echo "    EGL failure: no"
+          done
+          echo "=============================================="
+          echo "Reading this: if 'as-published' shows the GLib clash and 'without-bundled-glib' does not,"
+          echo "cause 1 is confirmed and dropping the bundled GLib is the fix. EGL under Xvfb is software"
+          echo "rendering, so an EGL line here says little about Intel HD 4000 on Wayland either way."
+
+      - name: Keep the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-2604-logs
+          path: |
+            *.out
+            *.err
