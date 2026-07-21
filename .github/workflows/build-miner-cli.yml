@@ -1,0 +1,133 @@
+name: Build the terminal miner (Linux)
+
+# Builds the headless miner for people running Linux servers with no desktop.
+#
+# WHY A SEPARATE WORKFLOW: the desktop builds carry a whole app (webview, node, installer). This is a
+# single small binary with no interface, and it must run on the widest possible range of servers.
+#
+# WHY ubuntu-22.04 AND NOT NEWER: a binary built on a newer system demands a newer system to run.
+# Built on the machine that produced our first attempt (Ubuntu 24.04) it required glibc 2.38, so it
+# would not start on Ubuntu 22.04 — which is what a large share of servers run. 22.04 gives glibc
+# 2.35, covering Ubuntu 22.04+ and Debian 12+. Same floor as the rest of our Linux artifacts.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish the binary under (leave empty to only build)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out the app
+        uses: actions/checkout@v4
+
+      - name: Check out the node (for the RandomX sources)
+        uses: actions/checkout@v4
+        with:
+          repository: brisvia/brisvia
+          submodules: recursive
+          path: core
+
+      - name: Build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake build-essential
+
+      - name: Build RandomX
+        # The very same library the node and the desktop app use. Using a different one would produce
+        # different hashes, and every share this miner sent would be rejected.
+        run: |
+          cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build core/src/randomx/build -j3
+
+      - name: Build the terminal miner
+        run: |
+          export RANDOMX_LIB_DIR="$PWD/core/src/randomx/build"
+          cd crates/brisvia-randomx
+          cargo build --release --bin brisvia_miner
+          cp target/release/brisvia_miner "$GITHUB_WORKSPACE/brisvia-miner-linux-x86_64"
+
+      - name: What does it need to run
+        # This is the check that would have caught the first attempt. It is printed and enforced: if
+        # the binary ends up demanding something newer than 2.35, the build fails instead of shipping
+        # something that will not start on a normal server.
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          chmod +x brisvia-miner-linux-x86_64
+          echo "size: $(du -h brisvia-miner-linux-x86_64 | cut -f1)"
+          echo "libraries:"; ldd brisvia-miner-linux-x86_64 || true
+          MAX=$(objdump -T brisvia-miner-linux-x86_64 | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
+                | sort -uV | tail -1 | tr -d 'GLIBC_')
+          echo "highest glibc required: $MAX"
+          if [ "$(printf '%s\n2.35\n' "$MAX" | sort -V | tail -1)" != "2.35" ]; then
+            echo "FAIL: needs glibc $MAX, which is newer than 2.35 (Ubuntu 22.04)."
+            echo "It would not start on a large share of servers."
+            exit 1
+          fi
+          echo "OK: runs on Ubuntu 22.04+ and Debian 12+"
+
+      - name: It starts and validates its input
+        # A binary that builds but refuses every address, or crashes on --help, is worse than none.
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          ./brisvia-miner-linux-x86_64 --help | head -3
+          if ./brisvia-miner-linux-x86_64 --address not-an-address 2>&1 | grep -q "not valid"; then
+            echo "OK: rejects a bad address"
+          else
+            echo "FAIL: accepted an invalid address"; exit 1
+          fi
+          if ./brisvia-miner-linux-x86_64 --address bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq 2>&1 \
+             | grep -q "not a Brisvia address"; then
+            echo "OK: rejects an address from another coin"
+          else
+            echo "FAIL: accepted a foreign address"; exit 1
+          fi
+
+      - name: Checksum
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          sha256sum brisvia-miner-linux-x86_64 | tee brisvia-miner-linux-x86_64.sha256
+
+      - name: Keep the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: brisvia-miner-linux
+          path: |
+            brisvia-miner-linux-x86_64
+            brisvia-miner-linux-x86_64.sha256
+
+      - name: Publish, only if a tag was given
+        if: inputs.tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          name: Brisvia terminal miner (Linux)
+          prerelease: true
+          body: |
+            Command-line miner for Linux servers with no desktop.
+
+            This is the same mining engine as the desktop app, without the interface, the wallet or
+            the bundled node. It takes a payout address and mines to the official pool. A payout
+            address can only receive: no private key is involved.
+
+            **Runs on** Ubuntu 22.04+ and Debian 12+ (64-bit).
+
+            ```
+            chmod +x brisvia-miner-linux-x86_64
+            ./brisvia-miner-linux-x86_64 --address brv1your-address-here
+            ```
+
+            `--help` lists every option. The connection is always encrypted and the certificate is
+            always checked. It never switches to solo mining on its own.
+
+            Verify what you downloaded against the `.sha256` file before running it.
+          files: |
+            brisvia-miner-linux-x86_64
+            brisvia-miner-linux-x86_64.sha256
