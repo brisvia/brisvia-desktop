@@ -37,8 +37,10 @@ const SUMMARY_EVERY: Duration = Duration::from_secs(60);
 /// otherwise send terminal escape sequences or megabytes of text and forge what the log looks like.
 const MAX_SERVER_TEXT: usize = 120;
 
-fn usage() -> ! {
-    eprintln!(
+fn print_help(code: i32) -> ! {
+    // La ayuda pedida a proposito va por la salida normal y con codigo 0. Un error de argumentos va
+    // por la salida de errores y con codigo 2: asi un guion puede distinguirlos.
+    let texto = format!(
         "Brisvia terminal miner
 
 USAGE:
@@ -58,15 +60,21 @@ EXAMPLE:
 The connection is always encrypted and the certificate is always checked. There is no option to
 disable either: your payout address travels on this link.
 
-Your address is fully verified before mining starts, so a typo cannot silently send your rewards
-somewhere else.
+The address format and checksum are verified before mining starts, which catches typos. It cannot
+tell whether the address is yours: check that yourself, rewards cannot be recovered.
 
 This miner never switches to solo mining by itself. If the pool goes down it says so, waits, and
 reconnects.
 
-Stop with Ctrl+C or `systemctl stop`. Shares already accepted stay credited."
-    );
-    std::process::exit(2)
+Stop with Ctrl+C or `systemctl stop`. Shares already accepted stay credited.");
+    if code == 0 { println!("{texto}"); } else { eprintln!("{texto}"); }
+    std::process::exit(code)
+}
+
+fn argument_error(msg: &str) -> ! {
+    eprintln!("{msg}
+");
+    print_help(2)
 }
 
 /// Decodes a Brisvia address completely: bech32/bech32m form, checksum, our prefix, witness version
@@ -78,43 +86,36 @@ Stop with Ctrl+C or `systemctl stop`. Shares already accepted stay credited."
 /// rewards go to a stranger, with no way back. The checksum exists precisely to catch that, so it is
 /// checked here, before the first hash.
 fn check_address(addr: &str) -> Result<(), String> {
-    use bitcoin::bech32::primitives::decode::CheckedHrpstring;
-    use bitcoin::bech32::{Bech32, Bech32m};
+    use bitcoin::bech32::primitives::decode::SegwitHrpstring;
 
+    // SegwitHrpstring is the decoder meant for segwit addresses: it checks the checksum, reads the
+    // witness version, and returns the program with the version already removed.
+    //
+    // THE FIRST VERSION OF THIS FUNCTION USED THE GENERIC DECODER and treated the first byte of the
+    // payload as the witness version. That is not how a segwit address is encoded, and it REJECTED
+    // real Brisvia addresses: a user with a perfectly good address would have been told it was
+    // invalid and could not have mined at all. It only showed up by checking this against what the
+    // pool itself accepts, address by address.
     if addr.trim() != addr {
         return Err("the address has leading or trailing spaces".into());
     }
-    if addr.chars().any(|c| c.is_ascii_uppercase()) && addr.chars().any(|c| c.is_ascii_lowercase()) {
-        return Err("mixed upper and lower case is not valid in an address".into());
-    }
+    let parsed = SegwitHrpstring::new(addr).map_err(|_| {
+        "this is not a valid address — check it character by character (one wrong letter is enough)"
+            .to_string()
+    })?;
 
-    // Witness v0 uses bech32; v1 and up use bech32m. Try both and keep whichever verifies.
-    let (hrp, data) = match CheckedHrpstring::new::<Bech32>(addr) {
-        Ok(p) => (p.hrp(), p.byte_iter().collect::<Vec<u8>>()),
-        Err(_) => match CheckedHrpstring::new::<Bech32m>(addr) {
-            Ok(p) => (p.hrp(), p.byte_iter().collect::<Vec<u8>>()),
-            Err(_) => {
-                return Err("this is not a valid address — check it character by character \
-                            (one wrong letter is enough)"
-                    .into())
-            }
-        },
-    };
-
-    if hrp.to_lowercase() != HRP {
+    if parsed.hrp().to_lowercase() != HRP {
         return Err(format!(
             "this address is not a Brisvia address (it starts with '{}', ours start with '{HRP}')",
-            hrp.to_lowercase()
+            parsed.hrp().to_lowercase()
         ));
     }
-    if data.len() < 2 {
-        return Err("the address is too short".into());
-    }
-    let version = data[0];
-    let program = &data[1..];
-    if version > 16 {
-        return Err("unsupported address version".into());
-    }
+
+    // Same rule as the pool: witness v0 with a 20 or 32 byte program, or a later version with a
+    // program between 2 and 40 bytes. The CLI must accept exactly what the pool accepts — no more,
+    // so nobody mines to something that will be refused; no less, so nobody is locked out.
+    let version = parsed.witness_version().to_u8();
+    let program: Vec<u8> = parsed.byte_iter().collect();
     if version == 0 && program.len() != 20 && program.len() != 32 {
         return Err("this address has an invalid length".into());
     }
@@ -124,11 +125,14 @@ fn check_address(addr: &str) -> Result<(), String> {
     Ok(())
 }
 
+
 /// Strips control characters and truncates text that came from the server before it is printed.
 fn safe(text: &str) -> String {
     let mut s: String = text
         .chars()
-        .filter(|c| !c.is_control())
+        // Solo ASCII imprimible: los caracteres de control no alcanzan, porque hay caracteres
+        // Unicode que cambian el sentido de lectura y pueden usarse para disfrazar un registro.
+        .map(|c| if c.is_ascii_graphic() || c == ' ' { c } else { '?' })
         .take(MAX_SERVER_TEXT)
         .collect();
     if text.len() > MAX_SERVER_TEXT {
@@ -160,7 +164,7 @@ fn parse_args() -> Args {
                 Some(v) if !v.starts_with('-') => v.clone(),
                 _ => {
                     eprintln!("Missing value after {}\n", args[i]);
-                    usage()
+                    print_help(2)
                 }
             }
         };
@@ -181,15 +185,15 @@ fn parse_args() -> Args {
                 let v = value(i);
                 threads = Some(v.parse().unwrap_or_else(|_| {
                     eprintln!("--threads must be a whole number, got: {v}\n");
-                    usage()
+                    print_help(2)
                 }));
                 i += 1;
             }
             "--verbose-shares" => verbose_shares = true,
-            "-h" | "--help" => usage(),
+            "-h" | "--help" => print_help(0),
             other => {
                 eprintln!("Unknown option: {other}\n");
-                usage()
+                print_help(2)
             }
         }
         i += 1;
@@ -197,7 +201,7 @@ fn parse_args() -> Args {
 
     let address = address.unwrap_or_else(|| {
         eprintln!("Missing --address. Run with --help to see how to use this.\n");
-        usage()
+        print_help(2)
     });
     if let Err(why) = check_address(&address) {
         eprintln!("The payout address is not valid: {why}");
@@ -213,14 +217,14 @@ fn parse_args() -> Args {
         None => cores.saturating_sub(1).max(1),
         Some(0) => {
             eprintln!("--threads must be at least 1\n");
-            usage()
+            print_help(2)
         }
         Some(n) if n > cores => {
             eprintln!(
                 "--threads {n} is more than this machine's {cores} CPU threads. Using more than \
                  you have makes mining slower, not faster.\n"
             );
-            usage()
+            print_help(2)
         }
         Some(n) => n,
     };
@@ -235,7 +239,8 @@ fn main() {
 
     println!("Brisvia miner");
     println!("  pool     : {}  (encrypted, certificate checked)", a.pool);
-    println!("  address  : {}  (verified)", a.address);
+    println!("  address  : {}  (format and checksum verified)", a.address);
+    println!("             Check this is YOUR address: the miner cannot know whose it is.");
     println!("  threads  : {}", a.threads);
     println!("  Stop with Ctrl+C.\n");
 
@@ -269,7 +274,16 @@ fn main() {
             rej.fetch_add(1, Ordering::Relaxed);
             let motivo = safe(&reason);
             let mut m = rsn.lock().unwrap();
-            let n = m.entry(motivo.clone()).or_insert(0);
+            // Tope de causas distintas. `--pool` permite apuntar a cualquier servidor, asi que no se
+            // puede suponer que los motivos vengan de una lista corta: sin tope, una pool rota u
+            // hostil haria crecer este mapa sin limite.
+            let clave = if m.len() >= 24 && !m.contains_key(&motivo) {
+                "other".to_string()
+            } else {
+                motivo.clone()
+            };
+            let motivo = clave.clone();
+            let n = m.entry(clave).or_insert(0);
             *n += 1;
             // Solo el primero de cada tipo se muestra al instante: es el que avisa que algo pasa.
             if *n == 1 || verbose {
@@ -282,7 +296,7 @@ fn main() {
         PoolEvent::BlockFound => {
             blk.fetch_add(1, Ordering::Relaxed);
             println!(
-                "[{}] *** YOU FOUND A BLOCK *** the pool is submitting it",
+                "[{}] *** CANDIDATE BLOCK FOUND *** the pool is submitting it",
                 clock(started)
             );
         }
@@ -316,7 +330,7 @@ fn main() {
                     stl.load(Ordering::Relaxed)
                 );
                 if blk.load(Ordering::Relaxed) > 0 {
-                    line.push_str(&format!("   blocks {}", blk.load(Ordering::Relaxed)));
+                    line.push_str(&format!("   block candidates {}", blk.load(Ordering::Relaxed)));
                 }
                 if r > 0 {
                     let m = rsn.lock().unwrap();
@@ -334,7 +348,7 @@ fn main() {
     run_pool_worker(&a.pool, &a.address, &a.worker, a.threads, true, &should_stop, on_event);
 
     let resumen = format!(
-        "after {}. Accepted {}, rejected {}, late {}, blocks {}.",
+        "after {}. Accepted {}, rejected {}, late {}, block candidates {}.",
         clock(started),
         accepted.load(Ordering::Relaxed),
         rejected.load(Ordering::Relaxed),
