@@ -44,8 +44,14 @@ Installers for the current release are on the
 |---------|---------------------------------------|------------------------------|
 | Windows | `Brisvia-Miner-Windows.exe`           | Windows 10 and 11, 64-bit    |
 | macOS   | `Brisvia-Miner-macOS.dmg`             | Apple Silicon                |
-| Linux   | `Brisvia.Miner_<version>_amd64.AppImage` | 64-bit                    |
 | Linux   | `Brisvia.Miner_<version>_amd64.deb`   | Debian and Ubuntu, 64-bit    |
+| Linux   | `Brisvia.Miner_<version>_amd64.AppImage` | 64-bit — **see the warning below** |
+
+> **On Ubuntu 24.04 or newer, take the `.deb`.** The 1.1.0 AppImage does not start there: it bundles an
+> older GLib than those systems ship, and their GIO/GVFS modules — which are loaded from the system
+> whatever the AppImage carries — call a function that older GLib does not export. Reproduced inside a
+> real Ubuntu 26.04 container and fixed in the build for the next release. Ubuntu 22.04 and Debian 12
+> are unaffected, and the `.deb` never had the problem because it uses the host's GLib.
 
 After installing, open Brisvia Miner, save your 12 words, and press **Start**.
 
