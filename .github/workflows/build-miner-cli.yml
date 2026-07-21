@@ -11,6 +11,10 @@ name: Build the terminal miner (Linux)
 # 2.35, covering Ubuntu 22.04+ and Debian 12+. Same floor as the rest of our Linux artifacts.
 
 on:
+  # Se dispara al empujar esta rama: GitHub solo deja lanzar a mano los flujos que ya estan en la
+  # rama principal, y este todavia no lo esta.
+  push:
+    branches: [feat/miner-cli]
   workflow_dispatch:
     inputs:
       tag:
