@@ -18,6 +18,7 @@ function transError(err) {
       WALLET_NOT_READY: 'errors.wallet_not_ready', MINER_NOT_FOUND: 'errors.miner_not_found',
       POOL_ADDR_MISSING: 'errors.pool_addr_missing',
       NODE_NOT_READY: 'errors.node_not_ready',
+      NODE_NOT_LISTENING: 'errors.node_not_listening',
       NODE_DISK_FULL: 'errors.node_disk_full',
       NODE_ALREADY_RUNNING: 'errors.node_already_running',
       NODE_PERMISSIONS: 'errors.node_permissions',
