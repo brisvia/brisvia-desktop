@@ -43,6 +43,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+# The offending lines are Spanish, so by definition they carry accented characters. On a Windows console
+# the default encoding cannot represent them, and printing the report crashed with UnicodeEncodeError --
+# a guard that dies while describing what it found reports nothing at all, and looks like a tooling
+# error rather than a finding.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # Spanish function words: the small connectives that carry no meaning on their own, appear constantly
 # in Spanish prose, and are rare or impossible in English technical writing.
 #
@@ -83,6 +90,10 @@ EXENTOS = (
     "tools/check_english_only.py",      # this file has to name the words it looks for
     "tools/check_textos.py",            # same: it has to name the Spanish words it hunts in the HTML
 )
+# Release approvals quote the owner word for word, in the language he wrote them in. Translating a
+# quotation would make the record say something he did not say, which defeats the point of keeping it:
+# it exists so anyone can see who authorised a release and in what terms.
+EXENTOS_PREFIJO = ("owner-approval-v",)
 # Same idea, by path fragment: i18n bundles, and fixtures that assert on Spanish user-facing strings
 # (a test for "Billetera bloqueada" has to contain "Billetera bloqueada" -- that is the assertion).
 EXENTOS_PARCIALES = ("/i18n/", "/locales/", "locales.js", "/fixtures/es", ".es.json")
@@ -140,7 +151,8 @@ def marca_valida(ruta: str, linea: str):
 
 def revisar(p: Path) -> list:
     ruta = str(p).replace("\\", "/")
-    if ruta in EXENTOS or any(f in ruta for f in EXENTOS_PARCIALES) or p.suffix not in EXTENSIONES:
+    if (ruta in EXENTOS or any(f in ruta for f in EXENTOS_PARCIALES)
+            or ruta.startswith(EXENTOS_PREFIJO) or p.suffix not in EXTENSIONES):
         return []
     try:
         texto = p.read_text(encoding="utf-8", errors="replace")

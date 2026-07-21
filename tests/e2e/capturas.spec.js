@@ -1,11 +1,15 @@
-// Generates updated captures of the 1.0.9 renderer (same HTML/CSS as the installed app) for the website,
-// in ES and EN: the mining view (miner running) and the wallet. Uses the preview mock, hides the
-// countdown banner and shows the public version (1.0.8).
+// Generates website captures of the renderer (the same HTML/CSS the installed app runs) in ES and EN:
+// the mining view with the miner running, and the wallet. Uses the preview mock and hides the countdown
+// banner so the shots do not go stale the day the countdown ends.
 'use strict';
+const path = require('path');
 const { test } = require('@playwright/test');
 const { installMock } = require('./fixtures');
 
-const OUT = 'C:/Users/g43343/AppData/Local/Temp/claude/c--xampp-htdocs-crypto/1306dcf8-dc09-44e6-866c-189cf09beb65/scratchpad/shots-out';
+// Writes inside the repo by default so this runs on any machine. Point SHOTS_OUT somewhere else to
+// override. It used to be an absolute path from one developer's temp directory, which meant the file
+// published a local username and worked nowhere but that laptop.
+const OUT = process.env.SHOTS_OUT || path.join(__dirname, '..', '..', 'shots-out');
 
 test.use({ viewport: { width: 1024, height: 680 }, deviceScaleFactor: 2 });
 

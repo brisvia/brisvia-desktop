@@ -92,3 +92,14 @@ jobs:
 
       - name: Guard - errors (every program error arrives translated in ES and EN)
         run: python tools/check_error_contract.py
+
+      # This guard existed and was never wired into CI, which is the exact failure its own header warns
+      # about: a rule that lives in a document stops nothing, so a step has to fail when it is broken.
+      # It ran by hand once and found 133 lines of Spanish sitting in the public repository.
+      - name: Guard - English only (Spanish must not reach the public repository)
+        run: |
+          python tools/check_english_only.py --self-test
+          python tools/check_english_only.py
+
+      - name: Guard - no internal documents in the public repository
+        run: python tools/check_no_internal_docs.py

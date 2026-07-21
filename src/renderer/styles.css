@@ -162,7 +162,7 @@ h1, h2, h3 { margin: 0; }
 .badge.prep { color: var(--brand); border-color: rgba(53,191,197,.4); background: var(--brand-soft); }
 .badge.prep::before { background: var(--brand); box-shadow: 0 0 0 4px rgba(53,191,197,.16); animation: pulse 1s infinite; }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
-/* max-width of 18ch so the longest language titles (pt/ru) do not wrap to an extra line. */
+/* Capped at 18ch so the longer languages (pt/ru) do not wrap onto an extra line and push the view down. */
 h1 { font-size: 26px; line-height: 1.1; letter-spacing: -.02em; max-width: 18ch; }
 #hero-sub { margin: 0; max-width: 42ch; }
 .intensity { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
