@@ -62,10 +62,20 @@ unsafe impl Sync for Dataset {}
 
 impl Dataset {
     /// Allocates and initializes the dataset from `cache` using `threads` threads (non-overlapping ranges).
+    /// Panics if the ~2.1 GB allocation fails; prefer `try_new` when a light-mode fallback is possible.
     pub fn new(cache: &Cache, threads: usize) -> Arc<Dataset> {
+        Self::try_new(cache, threads).expect("randomx_alloc_dataset null (insufficient RAM?)")
+    }
+
+    /// Like `new`, but returns `None` if the ~2.1 GB dataset cannot be allocated (not enough free RAM)
+    /// instead of panicking, so the miner can fall back to light mode on a small machine. The build (fast
+    /// init across `threads`) is otherwise identical, and the resulting hashes match light/node exactly.
+    pub fn try_new(cache: &Cache, threads: usize) -> Option<Arc<Dataset>> {
         unsafe {
             let ptr = randomx_alloc_dataset(0);
-            assert!(!ptr.is_null(), "randomx_alloc_dataset null (insufficient RAM?)");
+            if ptr.is_null() {
+                return None; // not enough RAM for the 2.1 GB dataset -> caller uses light mode
+            }
             let count = randomx_dataset_item_count();
             let threads = threads.max(1) as c_ulong;
             let per = count / threads;
@@ -80,7 +90,7 @@ impl Dataset {
                     });
                 }
             });
-            Arc::new(Dataset { ptr })
+            Some(Arc::new(Dataset { ptr }))
         }
     }
 }

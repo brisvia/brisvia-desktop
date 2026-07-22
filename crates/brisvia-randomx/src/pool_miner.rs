@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::worksource::{MiningJob, Solution};
-use crate::{Cache, Vm};
+use crate::{Cache, Dataset, Vm};
 
 /// Returned when a pool asks to rebuild the RandomX seed cache more often than the policy allows.
 /// In Brisvia the seed rotates per epoch (not per job), so a legitimate pool never trips this; it only
@@ -21,7 +21,9 @@ pub struct SeedChurn;
 /// rebuilds so a hostile pool cannot force a rebuild loop. Lives in the miner loop; state persists across jobs
 /// and reconnections.
 pub struct SeedGuard {
-    current: Option<([u8; 32], Arc<Cache>)>,
+    // (seed, cache, dataset?) — the dataset is Some in fast mode (enough RAM for the ~2.1 GB build) and
+    // None in light mode (small machine); both produce the exact same hash.
+    current: Option<([u8; 32], Arc<Cache>, Option<Arc<Dataset>>)>,
     rebuilds: VecDeque<Instant>,
     max_rebuilds: usize,
     window: Duration,
@@ -47,12 +49,9 @@ impl SeedGuard {
     /// Return a Cache for `seed`, reusing the current one if the seed is unchanged. A new seed triggers a
     /// rate-limited rebuild; exceeding `max_rebuilds` within `window` returns `SeedChurn` and the caller must
     /// skip mining that job rather than rebuild.
-    pub fn cache_for(&mut self, seed: &[u8; 32]) -> Result<Arc<Cache>, SeedChurn> {
-        if let Some((cur_seed, cache)) = &self.current {
-            if cur_seed == seed {
-                return Ok(cache.clone());
-            }
-        }
+    /// Rate-limit gate shared by `engine_for`/`cache_for`: prunes rebuilds older than the window and, if the
+    /// count is still at the ceiling, refuses (SeedChurn) — otherwise records this rebuild and allows it.
+    fn allow_rebuild(&mut self) -> Result<(), SeedChurn> {
         let now = Instant::now();
         while let Some(&front) = self.rebuilds.front() {
             if now.duration_since(front) > self.window {
@@ -65,8 +64,42 @@ impl SeedGuard {
             return Err(SeedChurn);
         }
         self.rebuilds.push_back(now);
+        Ok(())
+    }
+
+    /// PRODUCTION path: return the (cache, dataset?) for `seed`, reusing the current pair if the seed is
+    /// unchanged. On a new seed it rebuilds (rate-limited): the cache always, and the ~2.1 GB FAST dataset
+    /// when there is enough RAM (built once per seed/epoch, `threads` in parallel), falling back to LIGHT
+    /// (dataset None) on a small machine. Both modes give the identical hash, so this is purely a speed
+    /// choice and never changes which shares the pool accepts.
+    pub fn engine_for(
+        &mut self,
+        seed: &[u8; 32],
+        threads: usize,
+    ) -> Result<(Arc<Cache>, Option<Arc<Dataset>>), SeedChurn> {
+        if let Some((cur_seed, cache, dataset)) = &self.current {
+            if cur_seed == seed {
+                return Ok((cache.clone(), dataset.clone()));
+            }
+        }
+        self.allow_rebuild()?;
         let cache = Cache::new(seed);
-        self.current = Some((*seed, cache.clone()));
+        let dataset = Dataset::try_new(&cache, threads);
+        self.current = Some((*seed, cache.clone(), dataset.clone()));
+        Ok((cache, dataset))
+    }
+
+    /// Light-only cache for `seed` (no 2.1 GB dataset). Same reuse + rate-limit as `engine_for`; used by tests
+    /// and any caller that only needs the cache. Never allocates the dataset.
+    pub fn cache_for(&mut self, seed: &[u8; 32]) -> Result<Arc<Cache>, SeedChurn> {
+        if let Some((cur_seed, cache, _)) = &self.current {
+            if cur_seed == seed {
+                return Ok(cache.clone());
+            }
+        }
+        self.allow_rebuild()?;
+        let cache = Cache::new(seed);
+        self.current = Some((*seed, cache.clone(), None));
         Ok(cache)
     }
 }
@@ -97,15 +130,20 @@ pub fn hash_meets_target(raw_hash: &[u8; 32], target_be: &[u8; 32]) -> bool {
     &be <= target_be
 }
 
-/// `mine_with_cache_counted` with no hash accounting — used by tests and callers that do not report speed.
+/// `mine_with_cache_counted` with no hash accounting and light mode — used by tests and callers that do not
+/// report speed or reuse a dataset.
 pub fn mine_with_cache(job: &MiningJob, cache: &Arc<Cache>, threads: usize, nonce_start: u64, max_nonces: u64, stop: &AtomicBool) -> Option<Solution> {
-    mine_with_cache_counted(job, cache, threads, nonce_start, max_nonces, stop, &AtomicU64::new(0))
+    mine_with_cache_counted(job, cache, None, threads, nonce_start, max_nonces, stop, &AtomicU64::new(0))
 }
 
 /// Same search, but every thread adds the hashes it computed to `hashes` (batched by 512 to avoid contention)
 /// so a watcher can report a real per-second speed in pool mode. Showing 0 H/s while the CPU is working reads
 /// as a failure, so the pool UI needs a real number.
-pub fn mine_with_cache_counted(job: &MiningJob, cache: &Arc<Cache>, threads: usize, nonce_start: u64, max_nonces: u64, stop: &AtomicBool, hashes: &AtomicU64) -> Option<Solution> {
+///
+/// `dataset`: `Some` → FAST mode (each thread's VM uses the shared ~2.1 GB dataset, ~10x faster); `None` →
+/// LIGHT mode (cache only, ~256 MB). The hash is identical either way, so the choice never affects which
+/// shares are valid — only how fast they are found.
+pub fn mine_with_cache_counted(job: &MiningJob, cache: &Arc<Cache>, dataset: Option<&Arc<Dataset>>, threads: usize, nonce_start: u64, max_nonces: u64, stop: &AtomicBool, hashes: &AtomicU64) -> Option<Solution> {
     if job.header80.len() != 80 {
         return None;
     }
@@ -114,9 +152,13 @@ pub fn mine_with_cache_counted(job: &MiningJob, cache: &Arc<Cache>, threads: usi
     let threads = threads.max(1);
     std::thread::scope(|s| {
         for t in 0..threads {
-            let (cache, found, winner, hashes) = (cache.clone(), &found, &winner, hashes);
+            let (cache, dataset, found, winner, hashes) = (cache.clone(), dataset.cloned(), &found, &winner, hashes);
             s.spawn(move || {
-                let vm = Vm::new_light(cache);
+                // Fast VM if a dataset is available, light otherwise — same hash, ~10x speed with the dataset.
+                let vm = match dataset {
+                    Some(ds) => Vm::new_fast(cache, ds),
+                    None => Vm::new_light(cache),
+                };
                 let mut local = job.header80.clone();
                 let mut nonce = nonce_start + t as u64; // sweep from where THIS job's previous round left off
                 let mut count = 0u64;

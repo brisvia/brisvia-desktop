@@ -283,15 +283,18 @@ where
                 let guard = guard.clone();
                 let hashes_mine = hashes.clone();
                 let mine = move |mj: &MiningJob, threads: usize, nonce_start: u64, max_nonces: u64, cancel: &AtomicBool| -> Option<Solution> {
-                    // Reuse the cache while the seed is unchanged; refuse a rebuild burst (returns None → skip).
-                    let cache = match guard.lock().unwrap().cache_for(&mj.seed_key) {
-                        Ok(c) => c,
+                    // Reuse the cache/dataset while the seed is unchanged; refuse a rebuild burst (None → skip).
+                    // engine_for builds the ~2.1 GB fast dataset once per seed when the RAM is there, and falls
+                    // back to light on a small machine — the miner runs fast where it can, everywhere else it
+                    // still mines (same hash), just slower.
+                    let (cache, dataset) = match guard.lock().unwrap().engine_for(&mj.seed_key, threads) {
+                        Ok(cd) => cd,
                         Err(_) => {
                             std::thread::sleep(Duration::from_millis(500)); // don't spin while churn is rate-limited
                             return None;
                         }
                     };
-                    crate::pool_miner::mine_with_cache_counted(mj, &cache, threads, nonce_start, max_nonces, cancel, &hashes_mine)
+                    crate::pool_miner::mine_with_cache_counted(mj, &cache, dataset.as_ref(), threads, nonce_start, max_nonces, cancel, &hashes_mine)
                 };
                 // Only a session that actually LOGGED IN counts as progress and resets the backoff. Resetting on
                 // the raw TCP connect was a bug: a pool that accepts the socket and then drops it (e.g. while
