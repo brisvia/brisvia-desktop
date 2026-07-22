@@ -128,6 +128,14 @@
     </div>
   </div>
 
+  <!-- Node-startup error strip: shown only when the node could NOT start (missing binary, disk full, another
+       instance, permissions). It stays up while the problem persists and hides itself the moment the node
+       connects. Without this the UI would sit on "connecting…" forever with no explanation. -->
+  <div id="node-error-banner" class="node-error-banner" data-testid="node-error-banner" hidden>
+    <span class="neb-text"><strong id="neb-title" data-i18n="node_err.title"></strong> <span id="neb-msg"></span></span>
+    <button class="btn xs" id="neb-retry" data-i18n="node_err.retry"></button>
+  </div>
+
   <main class="content">
 
     <!-- ---- Wallet view ---- -->
@@ -525,6 +533,18 @@
       <div class="row-gap">
         <button id="upd-later" class="btn ghost" data-i18n="update.later"></button>
         <button id="upd-ok" class="btn primary" data-i18n="update.install_now"></button>
+      </div>
+    </div>
+  </div>
+
+  <div id="modal-update-error" class="overlay" hidden>
+    <div class="card modal">
+      <button class="modal-x" data-close data-i18n-attr="aria-label:common.close">×</button>
+      <h2 data-i18n="update.error_title"></h2>
+      <p class="muted" id="upd-err-msg"></p>
+      <div class="row-gap">
+        <button id="upd-err-retry" class="btn ghost" data-i18n="update.retry"></button>
+        <button id="upd-err-download" class="btn primary" data-i18n="update.download_site"></button>
       </div>
     </div>
   </div>

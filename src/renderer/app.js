@@ -35,6 +35,11 @@ function transError(err) {
       POOL_ADDR_LOCAL: 'errors.pool_addr_local',
       NO_UPDATE: 'errors.no_update',
       NODE_STILL_RUNNING: 'errors.node_still_running',
+      UPDATE_UNREACHABLE: 'errors.update_unreachable',
+      UPDATE_METADATA_INVALID: 'errors.update_metadata_invalid',
+      UPDATE_DOWNLOAD_FAILED: 'errors.update_download_failed',
+      UPDATE_SIGNATURE_INVALID: 'errors.update_signature_invalid',
+      UPDATE_INSTALL_FAILED: 'errors.update_install_failed',
     };
     const key = map[err.slice(4)];
     if (key) return T(key);
@@ -1266,22 +1271,38 @@ let runningVersion = '';
 async function checkForUpdate(manual) {
   const btn = $('#set-update');
   if (manual && btn) { btn.disabled = true; btn.textContent = T('update.checking'); }
-  let res = null;
-  try { res = window.brisvia.checkUpdate ? await window.brisvia.checkUpdate() : null; } catch {}
+  let res = null, errCode = null;
+  // A rejected command carries a classified ERR:UPDATE_* code; a null/undefined rejection is treated as
+  // unreachable. This is what lets us tell "no update" (res with available:false) apart from a real failure.
+  try { res = window.brisvia.checkUpdate ? await window.brisvia.checkUpdate() : null; }
+  catch (e) { errCode = (e == null || e === '') ? 'ERR:UPDATE_UNREACHABLE' : String(e); }
+  if (btn) { btn.disabled = false; btn.textContent = T('update.check'); }
   if (res && res.available) {
     updatePendingVersion = res.version;
     const cur = runningVersion ? 'v' + runningVersion : '';
     if ($('#upd-ver')) $('#upd-ver').textContent = T('update.version_line', { v: res.version, cur });
     let dismissed = null; try { dismissed = localStorage.getItem('brv_update_dismissed'); } catch {}
     // On the automatic check, don't nag again if the user already chose "Later" for THIS version.
-    if (!manual && dismissed === res.version) { if (btn) { btn.disabled = false; btn.textContent = T('update.check'); } return; }
+    if (!manual && dismissed === res.version) return;
     openModal('modal-update'); // pop-up: OK installs, Later dismisses
-    if (btn) { btn.disabled = false; btn.textContent = T('update.check'); }
+  } else if (errCode) {
+    // A REAL error (not "no update"). The automatic check at startup stays SILENT so a temporary network
+    // hiccup never throws an intrusive modal in the user's face; only a MANUAL check opens the clear error
+    // window (with the message in the user's language + Retry + Download from brisvia.com).
+    if (manual) showUpdateError(errCode);
   } else if (manual && btn) {
-    btn.disabled = false;
-    btn.textContent = res ? T('update.none') : T('update.error');
+    // "No update available": brief inline note on the manual button, then back to normal.
+    btn.textContent = T('update.none');
     setTimeout(() => { btn.textContent = T('update.check'); }, 4000);
   }
+}
+
+// The clear update-error window: shows the failure explained in the user's language (via transError, which
+// maps ERR:UPDATE_* to a translated message), plus Retry and "Download from brisvia.com".
+function showUpdateError(errCode) {
+  const el = $('#upd-err-msg');
+  if (el) el.textContent = transError(errCode);
+  openModal('modal-update-error');
 }
 async function installUpdate() {
   const b = $('#upd-ok');
@@ -1289,7 +1310,14 @@ async function installUpdate() {
   // If mining now, remember it so mining resumes automatically after the app restarts with the new version.
   try { if (mining) localStorage.setItem('brv_resume_mining', '1'); } catch {}
   try { await window.brisvia.installUpdate(); } // downloads, verifies the signature, installs and restarts
-  catch { if (b) { b.disabled = false; b.textContent = T('update.install_now'); } }
+  catch (e) {
+    // Don't swallow it: a failed signature check, a failed download, or a node that is still running all
+    // come back classified from the backend. Reset the button and show the clear error window (in the
+    // user's language) instead of leaving them staring at a stuck "Installing…".
+    if (b) { b.disabled = false; b.textContent = T('update.install_now'); }
+    closeModal('modal-update');
+    showUpdateError((e == null || e === '') ? 'ERR:UPDATE_DOWNLOAD_FAILED' : String(e));
+  }
 }
 if ($('#set-update')) $('#set-update').addEventListener('click', () => checkForUpdate(true));
 if ($('#upd-ok')) $('#upd-ok').addEventListener('click', installUpdate);
@@ -1297,6 +1325,10 @@ if ($('#upd-later')) $('#upd-later').addEventListener('click', () => {
   try { if (updatePendingVersion) localStorage.setItem('brv_update_dismissed', updatePendingVersion); } catch {}
   closeModal('modal-update');
 });
+// Update-error window: Retry re-runs the manual check; Download opens the official downloads page (the one
+// place a user in a blocked network can still get the new version by hand). openUrl only allows brisvia.com.
+if ($('#upd-err-retry')) $('#upd-err-retry').addEventListener('click', () => { closeModal('modal-update-error'); checkForUpdate(true); });
+if ($('#upd-err-download')) $('#upd-err-download').addEventListener('click', () => { try { window.brisvia.openUrl('https://brisvia.com/'); } catch {} });
 
 // The tempting "view my 12 words" button was removed on purpose: the recovery phrase is shown ONLY once,
 // when the wallet is created (with a mandatory backup verification). To re-check a backup afterwards the user
@@ -1373,6 +1405,30 @@ function setNet(connected, key) {
   const lbl = $('#net-label');
   if (lbl) lbl.textContent = T(key);
 }
+// Node-startup error strip. `code` is an ERR:NODE_* string when the node failed to start, or null/empty when it
+// is fine (or still spinning up). transError turns the code into a message in the user's language.
+function updateNodeErrorBanner(code) {
+  const banner = $('#node-error-banner');
+  if (!banner) return;
+  if (code) {
+    const msg = $('#neb-msg');
+    if (msg) msg.textContent = transError(code);
+    banner.hidden = false;
+  } else {
+    banner.hidden = true;
+  }
+}
+// "Try again" re-runs the node startup (start_node keeps its own repair/anti-loop logic). Hide the strip right
+// away; pollNet re-shows it within a second if it fails again, so a resolved problem (freed disk, closed other
+// instance) clears the banner and a persisting one brings it back — no false "fixed".
+if ($('#neb-retry')) $('#neb-retry').addEventListener('click', async () => {
+  const btn = $('#neb-retry');
+  if (btn) btn.disabled = true;
+  try { await window.brisvia.nodeRetry(); } catch {}
+  const banner = $('#node-error-banner');
+  if (banner) banner.hidden = true;
+  setTimeout(() => { if (btn) btn.disabled = false; }, 2500);
+});
 let syncing = false, syncProgress = 0;
 // Whether THIS build targets the real network (mainnet). Read from the node's reported network
 // (node_info().network === 'brisvia'), which comes from the compile-time build, so it is right even
@@ -1394,6 +1450,10 @@ async function pollNet() {
   // even before the node connects. Drives the wait mode + the launch notice below.
   if (info && info.network) { isMainnetBuild = info.network === 'brisvia'; netInfoReceived = true; }
   const connected = !!(info && info.connected);
+  // Node-startup error (missing binary / disk full / another instance / permissions): show the reason in the
+  // user's language instead of an endless "connecting…". node_status only fills nodeError on a REAL start
+  // failure, so while the node is merely still spinning up this stays null and no banner appears.
+  updateNodeErrorBanner(!connected ? (st && st.nodeError) : null);
   const walletReady = !!(st && st.walletReady);
   // Wait mode (real-network build, before launch): the node may still be catching up, but we must NOT show
   // "Syncing" — before the launch date the honest state is "waiting for launch", not a sync in progress.

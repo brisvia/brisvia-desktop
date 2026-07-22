@@ -324,6 +324,11 @@ h1 { font-size: 26px; line-height: 1.1; letter-spacing: -.02em; max-width: 18ch;
 .update-banner strong { color: #2FC7D4; font-weight: 700; }
 .update-banner .ub-text { display: inline; }
 .update-banner .btn.xs { padding: 4px 13px; font-size: 12px; line-height: 1.25; min-height: 0; }
+/* Node-startup error strip: sober red warning below the top bar. Persistent while the node cannot start. */
+.node-error-banner { display: flex; align-items: center; justify-content: center; gap: 10px 14px; flex-wrap: wrap; padding: 8px 16px; font-size: 12.5px; line-height: 1.35; background: rgba(224,90,90,.12); border-bottom: 1px solid rgba(224,90,90,.32); color: var(--text); text-align: center; }
+.node-error-banner strong { color: #e05a5a; font-weight: 700; }
+.node-error-banner .neb-text { display: inline; }
+.node-error-banner .btn.xs { padding: 4px 13px; font-size: 12px; line-height: 1.25; min-height: 0; }
 
 @media (max-width: 720px) {
   .mine-grid { grid-template-columns: 1fr; }

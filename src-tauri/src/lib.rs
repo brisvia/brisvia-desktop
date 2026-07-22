@@ -127,6 +127,14 @@ struct AppState {
     // poll would be wasteful, so the expensive scan is reused for a few seconds; the unlocked/notified logic on
     // top of it is always evaluated fresh.
     ach_cache: Arc<Mutex<Option<(Instant, WalletMetrics)>>>,
+    // Last node-startup failure, so it reaches the UI instead of dying in an eprintln the user never sees.
+    // The node starts on a background thread; if it cannot start (missing binary, disk full, another instance,
+    // permissions, a repair that keeps failing) the UI would otherwise stay on "connecting…" forever. We stash
+    // the ERR:NODE_* code here and node_status surfaces it. Cleared once the node actually connects.
+    node_error: Arc<Mutex<Option<String>>>,
+    // Monotonic start-attempt counter. A slow failing attempt must not clobber a newer one that already
+    // succeeded: each attempt captures its number and only writes node_error if it is still the current one.
+    node_attempt: Arc<AtomicU64>,
 }
 
 // Real-mining start on the main network: 2026-08-01 15:00:00 UTC (12:00 Argentina). Kept in sync with the
@@ -939,19 +947,65 @@ fn node_status(state: State<AppState>) -> Value {
         .map(|v| v["wallets"].as_array().map(|a| a.iter().any(|w| w["name"] == WALLET_NAME)).unwrap_or(false))
         .unwrap_or(false);
     match rpc(&state.datadir, None, "getblockchaininfo", json!([])) {
-        Ok(info) => json!({
-            "connected": true,
-            "blocks": info["blocks"],
-            "headers": info["headers"],
-            "chain": info["chain"],
-            // true = still syncing the shared chain (the UI disables "Mine" until it finishes).
-            "ibd": info["initialblockdownload"],
-            "verificationprogress": info["verificationprogress"],
-            "walletReady": state.wallet_loaded.load(Ordering::SeqCst),
-            "walletOnDisk": on_disk
+        Ok(info) => {
+            // The node answered: it is up. Clear any stale startup error so a past failure (from a repair that
+            // has since succeeded) does not keep haunting the UI.
+            *state.node_error.lock().unwrap() = None;
+            json!({
+                "connected": true,
+                "blocks": info["blocks"],
+                "headers": info["headers"],
+                "chain": info["chain"],
+                // true = still syncing the shared chain (the UI disables "Mine" until it finishes).
+                "ibd": info["initialblockdownload"],
+                "verificationprogress": info["verificationprogress"],
+                "walletReady": state.wallet_loaded.load(Ordering::SeqCst),
+                "walletOnDisk": on_disk
+            })
+        }
+        // Not connected. If the background start actually FAILED, hand the UI the reason (ERR:NODE_*) so it can
+        // explain it in the user's language instead of a forever "connecting…". While the node is merely still
+        // spinning up (no error stashed yet) nodeError is null and the UI keeps showing "connecting…".
+        Err(_) => json!({
+            "connected": false,
+            "walletReady": false,
+            "walletOnDisk": false,
+            "nodeError": state.node_error.lock().unwrap().clone()
         }),
-        Err(_) => json!({ "connected": false, "walletReady": false, "walletOnDisk": false }),
     }
+}
+
+// Records a start attempt's outcome, but ONLY if it is still the current attempt. A slow attempt that fails
+// late (e.g. the initial start racing a user-triggered retry) must not overwrite a newer attempt that already
+// succeeded — that would flash a stale error over a working node. The newest attempt always wins; RPC success
+// in node_status is the final safety net that clears any error the moment the node actually answers.
+fn record_node_start(state: &AppState, epoch: u64, result: Result<(), String>) {
+    if state.node_attempt.load(Ordering::SeqCst) != epoch {
+        return; // a newer start attempt superseded this one; let it own node_error
+    }
+    match result {
+        Ok(()) => { *state.node_error.lock().unwrap() = None; }
+        Err(e) => {
+            eprintln!("[brisvia] could not start the node: {}", e);
+            *state.node_error.lock().unwrap() = Some(e);
+        }
+    }
+}
+
+// Manual "try again" from the node-error banner: bump the attempt counter, clear the stashed error (so the UI
+// hides the banner while retrying) and re-run the startup on a background thread. start_node has its own
+// repair/anti-loop logic, so this is a user-driven single retry, not a loop.
+#[tauri::command]
+fn node_retry(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    let epoch = state.node_attempt.fetch_add(1, Ordering::SeqCst) + 1;
+    *state.node_error.lock().unwrap() = None;
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        let state = app2.state::<AppState>();
+        let r = start_node(&app2, &state);
+        record_node_start(&state, epoch, r);
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -3444,45 +3498,89 @@ fn set_language(app: AppHandle, state: State<AppState>, lang: String) {
 // don't have to re-download it when real mining starts. Updates are signed (minisign);
 // the download step verifies the signature before anything is installed.
 
-// Builds an Updater. Honors BRISVIA_UPDATE_ENDPOINT (end-to-end testing only); otherwise
-// uses the endpoint from tauri.conf (GitHub Releases).
-fn build_updater(app: &tauri::AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
+// Update endpoints, tried IN ORDER by `find_update`: GitHub FIRST (its global CDN is the robust common
+// path), with a SHORT timeout so a user on a network that blocks GitHub (e.g. China's Great Firewall) waits
+// only those few seconds before falling back to the Brisvia mirror instead of hanging forever. The Brisvia
+// mirror (our VPS) is the SECOND, backup endpoint. The fallback is done EXPLICITLY here (two separate checks)
+// rather than relying on the plugin's multi-endpoint behavior, which is ambiguous across plugin versions.
+// Both serve the SAME signed artifact; the minisign signature is verified before install regardless of which
+// endpoint answered. The short GitHub timeout is the whole reason this doesn't reproduce the China hang.
+const GITHUB_ENDPOINT: &str =
+    "https://github.com/brisvia/brisvia-desktop/releases/latest/download/latest.json";
+const MIRROR_ENDPOINT: &str = "https://brisvia.com/updates/latest.json";
+// Short first-endpoint timeout: long enough for a slow-but-working connection, short enough that a blocked
+// GitHub falls back to the mirror quickly. The mirror gets a slightly longer window as the last resort.
+const GITHUB_TIMEOUT_SECS: u64 = 8;
+const MIRROR_TIMEOUT_SECS: u64 = 12;
+
+// Maps an updater failure to one of the ERR:UPDATE_* codes the UI knows. UNREACHABLE (timeout/connect/dns/
+// tls) is the default; a reachable-but-broken feed is METADATA_INVALID; a bad signature is its own code.
+fn classify_update_error(e: &str) -> &'static str {
+    let el = e.to_lowercase();
+    if el.contains("signature") || el.contains("minisign") {
+        "ERR:UPDATE_SIGNATURE_INVALID"
+    } else if el.contains("json") || el.contains("parse") || el.contains("deserialize")
+        || el.contains("expected value") || el.contains("metadata")
+    {
+        "ERR:UPDATE_METADATA_INVALID"
+    } else {
+        "ERR:UPDATE_UNREACHABLE"
+    }
+}
+
+// Checks ONE endpoint for a signed update, with a bounded timeout so a black-holed connection (a firewall
+// that silently drops packets, not just a DNS failure) can't hang forever. `test_certs` relaxes TLS only for
+// the local self-test server (BRISVIA_UPDATE_ENDPOINT); production keeps full validation.
+async fn check_at(app: &tauri::AppHandle, endpoint: &str, timeout_secs: u64, test_certs: bool)
+    -> Result<Option<tauri_plugin_updater::Update>, String> {
     use tauri_plugin_updater::UpdaterExt;
-    match std::env::var("BRISVIA_UPDATE_ENDPOINT") {
-        Ok(ep) if !ep.is_empty() => {
-            let url = tauri::Url::parse(&ep).map_err(|e| e.to_string())?;
-            // Test-only: when the override endpoint is set (local end-to-end/self-test), accept the
-            // self-signed TLS cert of the local HTTPS server. This only affects the transport of the
-            // controlled test endpoint; the minisign signature check on the artifact is untouched.
-            // Production uses app.updater() (below), which keeps full TLS validation.
-            app.updater_builder()
-                .endpoints(vec![url])
-                .map_err(|e| e.to_string())?
-                .configure_client(|c| {
-                    c.danger_accept_invalid_certs(true)
-                        .danger_accept_invalid_hostnames(true)
-                })
-                .build()
-                .map_err(|e| e.to_string())
+    let url = tauri::Url::parse(endpoint).map_err(|e| e.to_string())?;
+    let mut builder = app
+        .updater_builder()
+        .endpoints(vec![url])
+        .map_err(|e| e.to_string())?
+        .timeout(std::time::Duration::from_secs(timeout_secs));
+    if test_certs {
+        builder = builder.configure_client(|c| {
+            c.danger_accept_invalid_certs(true).danger_accept_invalid_hostnames(true)
+        });
+    }
+    let updater = builder.build().map_err(|e| e.to_string())?;
+    updater.check().await.map_err(|e| e.to_string())
+}
+
+// Finds a signed update: GitHub first (short timeout), the Brisvia mirror second. Only when BOTH fail do we
+// return a classified error (typically ERR:UPDATE_UNREACHABLE). A test override short-circuits to one endpoint.
+async fn find_update(app: &tauri::AppHandle) -> Result<Option<tauri_plugin_updater::Update>, String> {
+    if let Ok(ep) = std::env::var("BRISVIA_UPDATE_ENDPOINT") {
+        if !ep.is_empty() {
+            return check_at(app, &ep, 15, true)
+                .await
+                .map_err(|e| classify_update_error(&e).to_string());
         }
-        _ => app.updater().map_err(|e| e.to_string()),
+    }
+    // GitHub first (short timeout), then the Brisvia mirror. Only when BOTH fail do we classify and report.
+    match check_at(app, GITHUB_ENDPOINT, GITHUB_TIMEOUT_SECS, false).await {
+        Ok(u) => Ok(u),
+        Err(_github) => match check_at(app, MIRROR_ENDPOINT, MIRROR_TIMEOUT_SECS, false).await {
+            Ok(u) => Ok(u),
+            Err(mirror) => Err(classify_update_error(&mirror).to_string()),
+        },
     }
 }
 
 async fn check_update_inner(app: &tauri::AppHandle) -> Result<serde_json::Value, String> {
-    let updater = build_updater(app)?;
-    match updater.check().await {
-        Ok(Some(u)) => Ok(json!({
+    match find_update(app).await? {
+        Some(u) => Ok(json!({
             "available": true,
             "version": u.version,
             "currentVersion": u.current_version,
             "notes": u.body,
         })),
-        Ok(None) => Ok(json!({
+        None => Ok(json!({
             "available": false,
             "currentVersion": app.package_info().version.to_string(),
         })),
-        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -3495,11 +3593,8 @@ async fn check_update(app: tauri::AppHandle) -> Result<serde_json::Value, String
 // Frontend: download the newer version (verifies signature), install it and relaunch.
 #[tauri::command]
 async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
-    let updater = build_updater(&app)?;
-    let update = updater
-        .check()
-        .await
-        .map_err(|e| e.to_string())?
+    let update = find_update(&app)
+        .await?
         .ok_or_else(|| "ERR:NO_UPDATE".to_string())?;
     // The node has to be COMPLETELY gone before the installer touches a single file.
     //
@@ -3520,10 +3615,23 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
             return Err("ERR:NODE_STILL_RUNNING".to_string());
         }
     }
+    // Tauri verifies the minisign signature of the downloaded artifact before installing it; a bad or
+    // altered package is rejected here. Classify the failure so the UI can tell the user whether it was a
+    // download problem (retry / bad network), a signature problem (do not trust the file), or an install
+    // problem, instead of a raw error string.
     update
         .download_and_install(|_chunk, _total| {}, || {})
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            let sl = e.to_string().to_lowercase();
+            if sl.contains("signature") || sl.contains("minisign") || sl.contains("verify") {
+                "ERR:UPDATE_SIGNATURE_INVALID".to_string()
+            } else if sl.contains("install") || sl.contains("extract") || sl.contains("permission") {
+                "ERR:UPDATE_INSTALL_FAILED".to_string()
+            } else {
+                "ERR:UPDATE_DOWNLOAD_FAILED".to_string()
+            }
+        })?;
     app.restart();
 }
 
@@ -3592,6 +3700,8 @@ pub fn run() {
         miner_threads: Arc::new(AtomicU64::new(0)),
         total_mined_secs: Arc::new(Mutex::new(total_secs_initial)),
         ach_cache: Arc::new(Mutex::new(None)),
+        node_error: Arc::new(Mutex::new(None)),
+        node_attempt: Arc::new(AtomicU64::new(0)),
     };
 
     let mut builder = tauri::Builder::default();
@@ -3627,19 +3737,18 @@ pub fn run() {
                 let h = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     let mut out = String::new();
-                    match build_updater(&h) {
-                        Ok(updater) => match updater.check().await {
-                            Ok(Some(update)) => {
-                                out.push_str(&format!("SELFTEST_CHECK available version={} current={}\n", update.version, update.current_version));
-                                match update.download(|_c, _t| {}, || {}).await {
-                                    Ok(bytes) => out.push_str(&format!("SELFTEST_DOWNLOAD ok signature_valid bytes={}\n", bytes.len())),
-                                    Err(e) => out.push_str(&format!("SELFTEST_DOWNLOAD fail {}\n", e)),
-                                }
+                    // Exercise the SAME path the app uses (find_update: GitHub then the Brisvia mirror, with the
+                    // BRISVIA_UPDATE_ENDPOINT test override), so the self-test covers the real fallback logic.
+                    match find_update(&h).await {
+                        Ok(Some(update)) => {
+                            out.push_str(&format!("SELFTEST_CHECK available version={} current={}\n", update.version, update.current_version));
+                            match update.download(|_c, _t| {}, || {}).await {
+                                Ok(bytes) => out.push_str(&format!("SELFTEST_DOWNLOAD ok signature_valid bytes={}\n", bytes.len())),
+                                Err(e) => out.push_str(&format!("SELFTEST_DOWNLOAD fail {}\n", e)),
                             }
-                            Ok(None) => out.push_str("SELFTEST_CHECK none already_latest\n"),
-                            Err(e) => out.push_str(&format!("SELFTEST_CHECK error {}\n", e)),
-                        },
-                        Err(e) => out.push_str(&format!("SELFTEST_UPDATER error {}\n", e)),
+                        }
+                        Ok(None) => out.push_str("SELFTEST_CHECK none already_latest\n"),
+                        Err(e) => out.push_str(&format!("SELFTEST_CHECK error {}\n", e)),
                     }
                     print!("{}", out);
                     if let Ok(p) = std::env::var("BRISVIA_SELFTEST_OUT") { let _ = std::fs::write(&p, &out); }
@@ -3655,9 +3764,11 @@ pub fn run() {
                 std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_millis(700));
                     let state = node_handle.state::<AppState>();
-                    if let Err(e) = start_node(&node_handle, &state) {
-                        eprintln!("[brisvia] could not start the node: {}", e);
-                    }
+                    // Claim this attempt's number so a later retry can supersede us. record_node_start surfaces
+                    // the ERR:NODE_* code to the UI (via node_status) instead of leaving an endless "connecting…".
+                    let epoch = state.node_attempt.fetch_add(1, Ordering::SeqCst) + 1;
+                    let r = start_node(&node_handle, &state);
+                    record_node_start(&state, epoch, r);
                 });
             }
             let state = app.state::<AppState>();
@@ -3742,6 +3853,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             node_status,
+            node_retry,
             wallet_exists,
             wallet_seed_on_disk,
             wallet_validate_phrase,
