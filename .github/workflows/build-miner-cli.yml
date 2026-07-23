@@ -119,12 +119,35 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           sha256sum brisvia-miner-linux-x86_64 | tee brisvia-miner-linux-x86_64.sha256
 
+      - name: Sign the binary with the updater's key (standard minisign .minisig) and verify it here
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          # The terminal miner is a standalone binary people download by hand; a .sha256 alone does not prove
+          # authorship, so it gets its OWN signature. We reuse the SAME key as the auto-updater — one root of
+          # trust the app already carries. Tauri signs with minisign but wraps the signature in an extra
+          # base64 layer; we decode it to the standard .minisig that Linux users verify with plain `minisign`.
+          sudo apt-get install -y --no-install-recommends minisign
+          npm ci >/dev/null 2>&1 || npm install >/dev/null 2>&1
+          npm run tauri -- signer sign "brisvia-miner-linux-x86_64"
+          base64 --decode brisvia-miner-linux-x86_64.sig > brisvia-miner-linux-x86_64.minisig
+          # Standard public key derived from the SAME key the app trusts (the tauri.conf string is base64-wrapped).
+          PK=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['plugins']['updater']['pubkey'])")
+          echo "$PK" | base64 --decode > brisvia-miner-minisign.pub
+          # Verify RIGHT HERE with the standard tool, exactly as a user would; fail the build if it does not check.
+          minisign -V -p brisvia-miner-minisign.pub -m brisvia-miner-linux-x86_64 -x brisvia-miner-linux-x86_64.minisig
+          echo "OK: the .minisig verifies with the same public key the app already trusts"
+
       - name: Keep the build
         uses: actions/upload-artifact@v4
         with:
           name: brisvia-miner-linux
           path: |
             brisvia-miner-linux-x86_64
+            brisvia-miner-linux-x86_64.minisig
             brisvia-miner-linux-x86_64.sha256
 
       - name: Attach to the existing DRAFT release (only if a tag is given; never changes its state)
@@ -142,7 +165,7 @@ jobs:
             exit 1
           fi
           gh release upload "${{ inputs.tag }}" \
-            brisvia-miner-linux-x86_64 brisvia-miner-linux-x86_64.sha256 \
+            brisvia-miner-linux-x86_64 brisvia-miner-linux-x86_64.minisig brisvia-miner-linux-x86_64.sha256 \
             --repo "${{ github.repository }}" --clobber
           echo "OK: terminal miner attached to draft ${{ inputs.tag }} (release state untouched)."
           echo "NEXT (ceremony): add both files to release-go-${{ inputs.tag }}.json (name+size+sha256)"
