@@ -155,6 +155,7 @@ jobs:
           ES_USERNAME: ${{ secrets.ES_USERNAME }}
           ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
           ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
         run: |
           # Pinned version of SSL.com's CodeSignTool (bundles its own Java). The wrapper invokes it per file.
           $url = "https://github.com/SSLcom/CodeSignTool/releases/download/v1.3.2/CodeSignTool-v1.3.2-windows.zip"
@@ -176,6 +177,15 @@ jobs:
           # Validate the credentials WITHOUT building the release (credential_info needs no TOTP). Fail loud if wrong.
           & "$cstHome/CodeSignTool.bat" credential_info -username="$env:ES_USERNAME" -password="$env:ES_PASSWORD" -credential_id="$env:ES_CREDENTIAL_ID"
           if ($LASTEXITCODE -ne 0) { throw "eSigner credential_info failed — check the ES_* secrets" }
+          # CRITICAL: Tauri's signCommand spawns the wrapper WITHOUT this step's `env:` vars — only job-level
+          # env (GITHUB_ENV) reaches it. That is why CODESIGNTOOL_HOME arrived at the wrapper but the ES_* did
+          # NOT, so the wrapper aborted with "env ES_USERNAME is not set" — which Tauri surfaces only as its
+          # opaque "failed to run powershell". Promote the eSigner credentials to job-level env so the wrapper
+          # Tauri spawns can read them. GitHub keeps masking these values in logs (they come from secrets).
+          "ES_USERNAME=$env:ES_USERNAME"           | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ES_PASSWORD=$env:ES_PASSWORD"           | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ES_CREDENTIAL_ID=$env:ES_CREDENTIAL_ID" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ES_TOTP_SECRET=$env:ES_TOTP_SECRET"     | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Build the Tauri app and sign (miner + installer) via eSigner
         run: npm run tauri build -- --features mainnet
