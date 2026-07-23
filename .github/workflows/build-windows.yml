@@ -205,19 +205,43 @@ jobs:
           if (Test-Path $log) { Write-Host "===== sign-wrapper.log ====="; Get-Content $log }
           else { Write-Host "no sign-wrapper.log — the wrapper never ran or failed before logging" }
 
-      - name: Verify Authenticode signatures (app binary + installer)
+      - name: Verify Authenticode signatures (installer + the app binary INSIDE it)
         shell: pwsh
+        env:
+          EXPECT_THUMBPRINT: ${{ secrets.ES_CERT_THUMBPRINT }}
+          EXPECT_SERIAL: ${{ secrets.ES_CERT_SERIAL }}
         run: |
-          $miner = Get-ChildItem -Path src-tauri/target/release -Filter brisvia-miner.exe -Recurse | Select-Object -First 1
-          $setup = Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter *-setup.exe | Select-Object -First 1
-          foreach ($f in @($miner, $setup)) {
-            if (-not $f) { throw "cannot find a signed file to verify" }
-            $sig = Get-AuthenticodeSignature $f.FullName
-            Write-Host "$($f.Name): $($sig.Status) — $($sig.SignerCertificate.Subject)"
-            if ($sig.Status -ne 'Valid') { throw "FAIL: $($f.Name) is not validly signed (status $($sig.Status))" }
-            if ($sig.SignerCertificate.Subject -notmatch 'Fernando Del Collado') { throw "FAIL: $($f.Name) signed by an unexpected publisher" }
+          $ErrorActionPreference = 'Stop'
+          # Verify the two things a user actually runs: the NSIS installer, and the brisvia-miner.exe that is
+          # INSIDE it (extracted from the finished installer, the same way the packaged-node guard does).
+          # We deliberately do NOT verify src-tauri/target/release/brisvia-miner.exe: a -Recurse there can
+          # pick up an unsigned build artifact from deps/ and give a false "NotSigned".
+          # Identity is checked by certificate THUMBPRINT + SERIAL (a name like "Fernando Del Collado" can be
+          # forged; a thumbprint cannot), plus a valid status and a present timestamp.
+          function Assert-Signed($path, $label) {
+            $sig = Get-AuthenticodeSignature $path
+            $c = $sig.SignerCertificate
+            $tp = if ($c) { "$($c.Thumbprint)" } else { '' }
+            $sn = if ($c) { "$($c.SerialNumber)" } else { '' }
+            $hasTs = $sig.TimeStamperCertificate -ne $null
+            Write-Host "$label : status=$($sig.Status) thumb=$tp serial=$sn timestamp=$hasTs subject=$($c.Subject)"
+            if ($sig.Status -ne 'Valid') { throw "FAIL: $label is not validly signed (status $($sig.Status))" }
+            if ($tp -ne "$env:EXPECT_THUMBPRINT") { throw "FAIL: $label thumbprint '$tp' != expected '$env:EXPECT_THUMBPRINT'" }
+            if ($sn -ne "$env:EXPECT_SERIAL") { throw "FAIL: $label serial '$sn' != expected '$env:EXPECT_SERIAL'" }
+            if (-not $hasTs) { throw "FAIL: $label has no timestamp (the signature would stop being valid when the cert expires)" }
           }
-          Write-Host "OK: app binary and installer carry a valid Authenticode signature by Fernando Del Collado"
+          # 1) the installer itself
+          $setup = Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter *-setup.exe | Select-Object -First 1
+          if (-not $setup) { throw 'FAIL: cannot find the installer to verify' }
+          Assert-Signed $setup.FullName 'installer'
+          # 2) the app binary that is actually shipped inside the installer
+          $out = Join-Path $env:RUNNER_TEMP 'verify-unpack'
+          Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue
+          & 7z x "$($setup.FullName)" "-o$out" -y | Out-Null
+          $inner = Get-ChildItem -Path $out -Recurse -Filter brisvia-miner.exe | Select-Object -First 1
+          if (-not $inner) { throw 'FAIL: the installer does not contain brisvia-miner.exe' }
+          Assert-Signed $inner.FullName 'packaged brisvia-miner.exe'
+          Write-Host "OK: the installer and the brisvia-miner.exe inside it are validly signed by the expected certificate (thumbprint + serial + timestamp)."
 
       - name: Stage the installer with a fixed (versionless) name for a permanent link
         shell: pwsh
