@@ -1281,6 +1281,9 @@ async function checkForUpdate(manual) {
     updatePendingVersion = res.version;
     const cur = runningVersion ? 'v' + runningVersion : '';
     if ($('#upd-ver')) $('#upd-ver').textContent = T('update.version_line', { v: res.version, cur });
+    // Show the release's patch notes if it provided any (plain text; newlines preserved, no HTML injected).
+    { const box = $('#upd-notes-box'), body = $('#upd-notes'); const n = (res.notes || '').trim();
+      if (box && body) { if (n) { body.textContent = n; box.hidden = false; } else { box.hidden = true; } } }
     let dismissed = null; try { dismissed = localStorage.getItem('brv_update_dismissed'); } catch {}
     // On the automatic check, don't nag again if the user already chose "Later" for THIS version.
     if (!manual && dismissed === res.version) return;
