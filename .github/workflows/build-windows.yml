@@ -149,11 +149,24 @@ jobs:
       - name: Install frontend dependencies
         run: npm install
 
-      - name: Build the Tauri app (NSIS installer + signed updater artifact)
+      - name: Build the Tauri app (SIGN DRY-RUN — record what the wrapper would sign, no signing)
         run: npm run tauri build -- --features mainnet
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          SIGN_DRYRUN: "1"
+          SIGN_DRYRUN_LOG: ${{ runner.temp }}/sign-dryrun.log
+
+      - name: Show what the sign wrapper would sign (dry-run)
+        shell: pwsh
+        run: |
+          $log = "$env:RUNNER_TEMP/sign-dryrun.log"
+          if (Test-Path $log) {
+            Write-Host "=== files Tauri handed to signCommand (dry-run) ==="
+            Get-Content $log
+          } else {
+            Write-Host "dry-run log is empty: Tauri did not call signCommand for any file."
+          }
 
       - name: Stage the installer with a fixed (versionless) name for a permanent link
         shell: pwsh
