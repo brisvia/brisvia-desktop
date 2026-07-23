@@ -31,6 +31,10 @@ $sidecars = @('bitcoind.exe', 'bitcoin-cli.exe', 'brisvia-worker.exe')
 $log = if ($env:RUNNER_TEMP) { Join-Path $env:RUNNER_TEMP 'sign-wrapper.log' } else { Join-Path ([IO.Path]::GetTempPath()) 'sign-wrapper.log' }
 function Log($m) { try { Add-Content -Path $log -Value $m } catch { } }
 Log "--- called for: $name  (FilePath=$FilePath) ---"
+# Any terminating error jumps here: record the exact line + message before dying, then re-throw. Tauri only
+# shows "failed to run powershell", so this is the only way to see WHY the wrapper aborted in CI.
+trap { Log ("TRAP line $($_.InvocationInfo.ScriptLineNumber): $($_.Exception.Message)"); break }
+Log ("env seen -> CST=" + [bool]$env:CODESIGNTOOL_HOME + " USER=" + [bool]$env:ES_USERNAME + " PASS=" + [bool]$env:ES_PASSWORD + " CID=" + [bool]$env:ES_CREDENTIAL_ID + " TOTP=" + [bool]$env:ES_TOTP_SECRET)
 
 # Dry-run: only log the path Tauri handed us, so we can see exactly what the pinned Tauri version
 # tries to sign before we ever spend a signing operation.
