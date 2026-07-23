@@ -33,9 +33,12 @@ if ($env:SIGN_DRYRUN -eq '1') {
     exit 0
 }
 
-# Sidecars: never sign (their hash must stay identical for the packaged-node guard).
-if ($sidecars -contains $name) {
-    Write-Host "skip sidecar (keep hash): $name"
+# Do not sign: the three node sidecars (their hash must stay identical for the packaged-node guard),
+# the NSIS plugin DLLs and NSIS temp files. The dry-run showed Tauri also hands these to signCommand,
+# but only the app binary and the final installer need an Authenticode signature; NSIS plugins live
+# inside the installer and Windows never checks them on their own.
+if ($sidecars -contains $name -or $name -like '*.dll' -or $name -like '*.tmp') {
+    Write-Host "skip (not signed - sidecar / NSIS plugin / temp): $name"
     exit 0
 }
 

@@ -149,24 +149,49 @@ jobs:
       - name: Install frontend dependencies
         run: npm install
 
-      - name: Build the Tauri app (SIGN DRY-RUN — record what the wrapper would sign, no signing)
+      - name: Set up CodeSignTool (SSL.com eSigner) and validate credentials
+        shell: pwsh
+        env:
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
+        run: |
+          # Pinned version of SSL.com's CodeSignTool (bundles its own Java). The wrapper invokes it per file.
+          $url = "https://github.com/SSLcom/CodeSignTool/releases/download/v1.3.2/CodeSignTool-v1.3.2-windows.zip"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP/cst.zip"
+          Expand-Archive "$env:RUNNER_TEMP/cst.zip" -DestinationPath "$env:RUNNER_TEMP/codesigntool" -Force
+          $bat = Get-ChildItem "$env:RUNNER_TEMP/codesigntool" -Recurse -Filter CodeSignTool.bat | Select-Object -First 1
+          if (-not $bat) { throw "CodeSignTool.bat not found after extracting the zip" }
+          $cstHome = $bat.Directory.FullName
+          "CODESIGNTOOL_HOME=$cstHome" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "CODESIGNTOOL_HOME=$cstHome"
+          # Validate the credentials WITHOUT building the release (credential_info needs no TOTP). Fail loud if wrong.
+          & "$cstHome/CodeSignTool.bat" credential_info -username="$env:ES_USERNAME" -password="$env:ES_PASSWORD" -credential_id="$env:ES_CREDENTIAL_ID"
+          if ($LASTEXITCODE -ne 0) { throw "eSigner credential_info failed — check the ES_* secrets" }
+
+      - name: Build the Tauri app and sign (miner + installer) via eSigner
         run: npm run tauri build -- --features mainnet
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-          SIGN_DRYRUN: "1"
-          SIGN_DRYRUN_LOG: ${{ runner.temp }}/sign-dryrun.log
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
 
-      - name: Show what the sign wrapper would sign (dry-run)
+      - name: Verify Authenticode signatures (app binary + installer)
         shell: pwsh
         run: |
-          $log = "$env:RUNNER_TEMP/sign-dryrun.log"
-          if (Test-Path $log) {
-            Write-Host "=== files Tauri handed to signCommand (dry-run) ==="
-            Get-Content $log
-          } else {
-            Write-Host "dry-run log is empty: Tauri did not call signCommand for any file."
+          $miner = Get-ChildItem -Path src-tauri/target/release -Filter brisvia-miner.exe -Recurse | Select-Object -First 1
+          $setup = Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter *-setup.exe | Select-Object -First 1
+          foreach ($f in @($miner, $setup)) {
+            if (-not $f) { throw "cannot find a signed file to verify" }
+            $sig = Get-AuthenticodeSignature $f.FullName
+            Write-Host "$($f.Name): $($sig.Status) — $($sig.SignerCertificate.Subject)"
+            if ($sig.Status -ne 'Valid') { throw "FAIL: $($f.Name) is not validly signed (status $($sig.Status))" }
+            if ($sig.SignerCertificate.Subject -notmatch 'Fernando Del Collado') { throw "FAIL: $($f.Name) signed by an unexpected publisher" }
           }
+          Write-Host "OK: app binary and installer carry a valid Authenticode signature by Fernando Del Collado"
 
       - name: Stage the installer with a fixed (versionless) name for a permanent link
         shell: pwsh
