@@ -9,16 +9,27 @@ name: Build the terminal miner (Linux)
 # Built on the machine that produced our first attempt (Ubuntu 24.04) it required glibc 2.38, so it
 # would not start on Ubuntu 22.04 — which is what a large share of servers run. 22.04 gives glibc
 # 2.35, covering Ubuntu 22.04+ and Debian 12+. Same floor as the rest of our Linux artifacts.
+#
+# THIS WORKFLOW NEVER PUBLISHES. It does not create releases and never touches latest.json, draft,
+# prerelease or make_latest. The ONLY authority that publishes is publish-approved-release.yml, which
+# checks the draft's assets byte-for-byte against an approved manifest. The most this workflow does is
+# ATTACH the built binary to an EXISTING DRAFT (when a tag is given), so the terminal miner can ship
+# INSIDE the same byte-exact v1.1.1 release. The binary must then be added to release-go-v1.1.1.json
+# (name+size+sha256) BEFORE the manifest is frozen and the ceremony runs.
 
 on:
-  # Triggered by pushing this branch: GitHub only lets you manually launch workflows that already exist
-  # on the main branch, and this one is not there yet.
+  # Pushing this branch keeps the workflow available (GitHub only lets you manually launch workflows
+  # that already exist on main, and this one is not there yet). On push it only builds and tests.
   push:
     branches: [feat/miner-cli]
   workflow_dispatch:
     inputs:
+      ref:
+        description: "Exact commit SHA to build from (empty = branch HEAD). Use the FROZEN 1.1.1 SHA for release."
+        required: false
+        default: ""
       tag:
-        description: "Tag to publish the binary under (leave empty to only build)"
+        description: "Existing DRAFT tag to attach the binary to (e.g. v1.1.1). Empty = only build, do not attach."
         required: false
         default: ""
 
@@ -31,11 +42,20 @@ jobs:
     steps:
       - name: Check out the app
         uses: actions/checkout@v4
+        with:
+          # For a release build pass the exact frozen 1.1.1 SHA so the CLI comes from the same commit as
+          # the desktop app, not from the moving branch HEAD. Empty falls back to the branch (for testing).
+          ref: ${{ inputs.ref }}
 
       - name: Check out the node (for the RandomX sources)
         uses: actions/checkout@v4
         with:
           repository: brisvia/brisvia
+          # Pin the SAME core commit the desktop builds use (build-windows.yml / build-linux.yml), so the
+          # RandomX compiled into this miner is byte-identical to the one in the packaged node. A different
+          # core could change the hashes and the pool would reject every share this miner sends. Keep in
+          # sync with the desktop builds; drop all three pins together when mainnet-ports lands in core main.
+          ref: 69c48b2dfcf20fba70f6b5aef6958786e61ab7ed
           submodules: recursive
           path: core
 
@@ -107,31 +127,23 @@ jobs:
             brisvia-miner-linux-x86_64
             brisvia-miner-linux-x86_64.sha256
 
-      - name: Publish, only if a tag was given
+      - name: Attach to the existing DRAFT release (only if a tag is given; never changes its state)
         if: inputs.tag != ''
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ inputs.tag }}
-          name: Brisvia terminal miner (Linux)
-          prerelease: true
-          body: |
-            Command-line miner for Linux servers with no desktop.
-
-            This is the same mining engine as the desktop app, without the interface, the wallet or
-            the bundled node. It takes a payout address and mines to the official pool. A payout
-            address can only receive: no private key is involved.
-
-            **Runs on** Ubuntu 22.04+ and Debian 12+ (64-bit).
-
-            ```
-            chmod +x brisvia-miner-linux-x86_64
-            ./brisvia-miner-linux-x86_64 --address brv1your-address-here
-            ```
-
-            `--help` lists every option. The connection is always encrypted and the certificate is
-            always checked. It never switches to solo mining on its own.
-
-            Verify what you downloaded against the `.sha256` file before running it.
-          files: |
-            brisvia-miner-linux-x86_64
-            brisvia-miner-linux-x86_64.sha256
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # HARD RULE: only ever add the CLI to a DRAFT. Refuse if the release is already published — the
+          # byte-exact ceremony (publish-approved-release.yml) must approve the FINAL asset set, and we must
+          # never mutate a live release, latest.json, draft, prerelease or make_latest.
+          DRAFT=$(gh release view "${{ inputs.tag }}" --repo "${{ github.repository }}" --json isDraft --jq .isDraft)
+          if [ "$DRAFT" != "true" ]; then
+            echo "REFUSING: ${{ inputs.tag }} is not a draft (isDraft=$DRAFT). The CLI is only added before approval."
+            exit 1
+          fi
+          gh release upload "${{ inputs.tag }}" \
+            brisvia-miner-linux-x86_64 brisvia-miner-linux-x86_64.sha256 \
+            --repo "${{ github.repository }}" --clobber
+          echo "OK: terminal miner attached to draft ${{ inputs.tag }} (release state untouched)."
+          echo "NEXT (ceremony): add both files to release-go-${{ inputs.tag }}.json (name+size+sha256)"
+          echo "      BEFORE freezing the manifest and running publish-approved-release.yml."
