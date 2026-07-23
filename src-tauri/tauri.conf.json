@@ -46,8 +46,8 @@
     ],
     "windows": {
       "signCommand": {
-        "cmd": "pwsh",
-        "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/sign-wrapper.ps1", "%1"]
+        "cmd": "powershell",
+        "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "../scripts/sign-wrapper.ps1", "%1"]
       },
       "nsis": {
         "installerIcon": "icons/installer_icon.ico",
