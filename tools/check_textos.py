@@ -2,7 +2,7 @@
 """Text contract: the app must never mix languages or show untranslated text.
 
 Why this exists: the owner opened the app with the language set to English and found a field reading
-"host:puerto · ej: pool.ejemplo.com:3333" -- Spanish, hard-coded in the HTML the same day. A 20-agent audit
+"host:puerto · ej: pool.ejemplo.com:3333" -- Spanish, hard-coded in the HTML the same day. An earlier review
 had reviewed the logic and missed it, because the i18n system only sees elements marked with data-i18n:
 anything typed straight into the HTML is invisible to it. This check looks at the product, not the logic.
 

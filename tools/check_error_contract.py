@@ -2,7 +2,7 @@
 """Contract check: every error the backend can emit must reach the user as readable text, in BOTH languages.
 
 Why this exists: the owner opened the app and got a raw English "node is not ready yet" on screen, in a
-Spanish UI. The 20-agent audit had reviewed the logic and never looked at this, because each half is fine on
+Spanish UI. An earlier review had gone over the logic and never looked at this, because each half is fine on
 its own -- Rust returns a string, the frontend shows a string. The bug only exists in the SEAM between them.
 
 It fails the build when:

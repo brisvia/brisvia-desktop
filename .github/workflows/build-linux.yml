@@ -33,7 +33,7 @@ jobs:
           echo "OK: version and tag in sync ($TC)"
 
       # PRODUCT guards (not logic). They exist because of real bugs the owner found in 2 minutes and
-      # a 20-agent audit missed: a Spanish text with the language set to English, and a raw node error
+      # an earlier review missed: a Spanish text with the language set to English, and a raw node error
       # on screen. They look at the product as people see it, not at the code in isolation.
       - name: Guard - texts (complete languages, no mixes, no hardcoded text in the HTML)
         shell: bash
