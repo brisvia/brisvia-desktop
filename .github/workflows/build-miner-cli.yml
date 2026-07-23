@@ -133,7 +133,9 @@ jobs:
           # minisign is NOT in Ubuntu's repos; fetch the official static binary (pinned version).
           mkdir -p /tmp/msdir
           curl -sSL https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz | tar xz -C /tmp/msdir
-          MINISIGN=$(find /tmp/msdir -name minisign -type f | head -1)
+          # The tarball ships several architectures; pick the x86_64 one (the runner is x86_64).
+          MINISIGN=$(find /tmp/msdir -type f -name minisign -path "*x86_64*" | head -1)
+          [ -n "$MINISIGN" ] || MINISIGN=$(find /tmp/msdir -type f -name minisign | head -1)
           [ -n "$MINISIGN" ] || { echo "FAIL: minisign binary not found in the tarball"; exit 1; }
           sudo install "$MINISIGN" /usr/local/bin/minisign
           npm ci >/dev/null 2>&1 || npm install >/dev/null 2>&1
