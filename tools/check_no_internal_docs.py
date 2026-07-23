@@ -29,7 +29,7 @@ import subprocess
 import sys
 
 # Named one by one, each with the reason it does not belong to the public.
-PROHIBIDOS = {
+FORBIDDEN = {
     "INCIDENT_PATTERNS.md": "internal incident log: mistakes, procedures and team patterns",
     "PENDIENTES-SIN-PUBLICAR.md": "internal list of unreleased work; its own name says it is not public",
     "MEJORAS-PENDIENTES.md": "internal backlog",
@@ -47,20 +47,20 @@ def tracked() -> set:
     return {l.replace("\\", "/") for l in r.stdout.splitlines() if l}
 
 
-def scan(archivos: set) -> list:
+def scan(files: set) -> list:
     """Match by basename, anywhere in the tree, ignoring case.
 
     An internal document does not stop being internal by sitting in docs/, and Windows would happily
     let `plan.md` through a check that only knew about `PLAN.md`. Both were holes in the first
     version of this: it compared exact top-level paths.
     """
-    malos = []
-    for f in archivos:
+    bad = []
+    for f in files:
         base = f.rsplit("/", 1)[-1].lower()
-        for prohibido, porque in PROHIBIDOS.items():
-            if base == prohibido.lower():
-                malos.append((f, porque))
-    return sorted(malos)
+        for forbidden, reason in FORBIDDEN.items():
+            if base == forbidden.lower():
+                bad.append((f, reason))
+    return sorted(bad)
 
 
 def self_test() -> int:
@@ -95,14 +95,14 @@ def self_test() -> int:
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--self-test"]:
         sys.exit(self_test())
-    malos = scan(tracked())
-    if malos:
+    bad = scan(tracked())
+    if bad:
         print("REJECTED: internal documents in a public repository.\n")
-        for f, por in malos:
-            print(f"  {f}\n      {por}")
+        for f, reason in bad:
+            print(f"  {f}\n      {reason}")
         print("\nBrisvia's repository is read by strangers. These are for us, not for them.")
         print("Keep them outside any git repository, or in a private one.")
         print("If a rule in one of them matters to outside contributors, extract that rule -- in")
         print("English and sanitised -- into CONTRIBUTING.md or SECURITY.md instead.")
         sys.exit(1)
-    print(f"OK: none of the {len(PROHIBIDOS)} internal documents are in the public tree.")
+    print(f"OK: none of the {len(FORBIDDEN)} internal documents are in the public tree.")

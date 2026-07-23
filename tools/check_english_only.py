@@ -50,26 +50,29 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-# Spanish function words: the small connectives that carry no meaning on their own, appear constantly
-# in Spanish prose, and are rare or impossible in English technical writing.
+# DETECTION DATA -- DO NOT TRANSLATE. The Spanish words below are the payload this checker exists to
+# hunt, not prose to localize: they are the small connectives that carry no meaning on their own, appear
+# constantly in Spanish prose, and are rare or impossible in English technical writing. Translating them
+# would blind the detector. This file is exempt from itself (see EXEMPT) precisely so this list can name
+# the words it looks for.
 #
 # Deliberately NOT here, and each for a reason learned by getting it wrong:
 #   - "de", "en", "no", "a": collide with English, or with code.
 #   - "version", "error", "firma", "prueba", "guardian": these are English words too. With a threshold
 #     of two, a line like `let version = tmpl["version"]` scored two hits and got flagged. A checker
 #     that rejects correct code is worse than none: it teaches people to switch it off.
-PALABRAS = r"\b(que|para|porque|cuando|desde|hasta|donde|aunque|entonces|tambien|todavia|siempre|nunca|" \
-           r"puede|tiene|hace|esta|estan|este|esto|esa|ese|eso|los|las|del|una|uno|con|sin|por|" \
-           r"sobre|entre|antes|despues|mismo|misma|cada|otro|otra|todo|toda|nada|algo|" \
-           r"nodo|billetera|actualizador|actualizacion|candado|verificador|maquina|archivo|" \
-           r"arbol|compuerta|borrador|paquete|fallo|usuario|carpeta|" \
-           r"cierra|cerrar|devuelve|espera|esperar|mata|matar|falla|fallar|abre|abrir|corre|correr|" \
-           r"lanza|lanzar|guarda|guardar|revisa|revisar|probar|busca|buscar|arma|armar|sigue|seguir|" \
-           r"queda|quedar|pide|pedir|dice|decir|sale|salir|entra|entrar|vuelve|volver|tarda|tardar)\b"
+SPANISH_WORDS = r"\b(que|para|porque|cuando|desde|hasta|donde|aunque|entonces|tambien|todavia|siempre|nunca|" \
+                r"puede|tiene|hace|esta|estan|este|esto|esa|ese|eso|los|las|del|una|uno|con|sin|por|" \
+                r"sobre|entre|antes|despues|mismo|misma|cada|otro|otra|todo|toda|nada|algo|" \
+                r"nodo|billetera|actualizador|actualizacion|candado|verificador|maquina|archivo|" \
+                r"arbol|compuerta|borrador|paquete|fallo|usuario|carpeta|" \
+                r"cierra|cerrar|devuelve|espera|esperar|mata|matar|falla|fallar|abre|abrir|corre|correr|" \
+                r"lanza|lanzar|guarda|guardar|revisa|revisar|probar|busca|buscar|arma|armar|sigue|seguir|" \
+                r"queda|quedar|pide|pedir|dice|decir|sale|salir|entra|entrar|vuelve|volver|tarda|tardar)\b"
 
-# Characters that in this repo only appear in Spanish. Accented vowels are included because English
-# technical prose here does not use them.
-SOLO_ESPANOL = re.compile(r"[ñÑ¿¡áéíóúÁÉÍÓÚ]")
+# DETECTION DATA -- DO NOT TRANSLATE. Characters that in this repo only appear in Spanish. Accented vowels
+# are included because English technical prose here does not use them.
+SPANISH_ONLY_CHARS = re.compile(r"[ñÑ¿¡áéíóúÁÉÍÓÚ]")
 
 # Verbs are in the list above for a reason: without them, an identifier like
 # `si_el_nodo_no_cierra_devuelve_false` hits only one word ("nodo") and slips under the threshold --
@@ -77,15 +80,15 @@ SOLO_ESPANOL = re.compile(r"[ñÑ¿¡áéíóúÁÉÍÓÚ]")
 
 # Two hits on one line is prose, not a coincidence. One is not enough: "para" appears in "parameter"
 # boundaries, "esta" in data, "version" and "error" are English words too -- that is why the bar is two.
-UMBRAL = 2
+THRESHOLD = 2
 
-EXTENSIONES = {".rs", ".py", ".js", ".ts", ".yml", ".yaml", ".md", ".nsh", ".ps1", ".sh", ".toml",
-               ".json", ".html", ".css"}
+EXTENSIONS = {".rs", ".py", ".js", ".ts", ".yml", ".yaml", ".md", ".nsh", ".ps1", ".sh", ".toml",
+              ".json", ".html", ".css"}
 
 # Files whose job is to hold Spanish, or to talk to the owner rather than ship.
 # Spanish is not banned from the repository -- it is banned from the technical layer. These places hold
 # Spanish ON PURPOSE, and a checker that broke them would be breaking the product to satisfy a rule:
-EXENTOS = (
+EXEMPT = (
     "src/renderer/locales.js",          # the user-facing Spanish. That IS the file's purpose.
     "tools/check_english_only.py",      # this file has to name the words it looks for
     "tools/check_textos.py",            # same: it has to name the Spanish words it hunts in the HTML
@@ -93,27 +96,27 @@ EXENTOS = (
 # Release approvals quote the owner word for word, in the language he wrote them in. Translating a
 # quotation would make the record say something he did not say, which defeats the point of keeping it:
 # it exists so anyone can see who authorised a release and in what terms.
-EXENTOS_PREFIJO = ("owner-approval-v",)
+EXEMPT_PREFIX = ("owner-approval-v",)
 # Same idea, by path fragment: i18n bundles, and fixtures that assert on Spanish user-facing strings
 # (a test for "Billetera bloqueada" has to contain "Billetera bloqueada" -- that is the assertion).
-EXENTOS_PARCIALES = ("/i18n/", "/locales/", "locales.js", "/fixtures/es", ".es.json")
+EXEMPT_SUBSTRINGS = ("/i18n/", "/locales/", "locales.js", "/fixtures/es", ".es.json")
 
 # Untranslatable proper nouns that legitimate localization shows in their own form: the language selector
 # renders each language IN ITS OWN LANGUAGE ("Español" / "English"). This is NOT a global amnesty for the
 # word -- it is stripped before scanning ONLY in the files where that word legitimately belongs: the
 # selector itself and the doc that describes it. Anywhere else, "Español" is Spanish like any other word.
-PERMITIDO_INLINE = ("Español",)
-PERMITIDO_INLINE_ARCHIVOS = ("src/renderer/index.html", "PRODUCT_CONTRACTS.md")
+INLINE_ALLOWED = ("Español",)
+INLINE_ALLOWED_FILES = ("src/renderer/index.html", "PRODUCT_CONTRACTS.md")
 
 # Marker for locale (es) text that must live in code: the native tray menu/tooltip are built in Rust, not
 # in locales.js, so they localize with `if lang == "es" { ... }`. It is NOT a free "ignore this line".
-# It is honored ONLY when ALL of these hold (enforced in marca_valida, proven by the self-test):
+# It is honored ONLY when ALL of these hold (enforced in locale_marker_valid, proven by the self-test):
 #   - the file is in the authorized list below (the marker anywhere else FAILS);
 #   - the line carries a real string literal (the thing being localized);
 #   - the line actually contains Spanish (a marker with no Spanish is a stray leftover and FAILS);
 #   - there is NO Spanish OUTSIDE that literal (a Spanish comment next to it still FAILS).
-MARCA_LOCALE = "i18n-es"
-MARCA_LOCALE_ARCHIVOS = ("src-tauri/src/lib.rs",)
+LOCALE_MARKER = "i18n-es"
+LOCALE_MARKER_FILES = ("src-tauri/src/lib.rs",)
 
 # String literals ("..." / '...'), to tell Spanish INSIDE a localized literal from Spanish loose in code
 # or a comment on the same line.
@@ -125,69 +128,69 @@ def tracked():
     return [Path(l) for l in r.stdout.splitlines() if l]
 
 
-def _es_score(texto: str):
+def _es_score(text: str):
     """(function-word hits, Spanish-only characters) for one line."""
-    hits = len(re.findall(PALABRAS, texto.replace("_", " "), re.IGNORECASE))
-    raros = SOLO_ESPANOL.findall(texto)
-    return hits, raros
+    hits = len(re.findall(SPANISH_WORDS, text.replace("_", " "), re.IGNORECASE))
+    rare = SPANISH_ONLY_CHARS.findall(text)
+    return hits, rare
 
 
-def marca_valida(ruta: str, linea: str):
-    """A line carries MARCA_LOCALE. Return None if it is a legitimate locale literal, else why it is not."""
-    if ruta not in MARCA_LOCALE_ARCHIVOS:
+def locale_marker_valid(path: str, line: str):
+    """A line carries LOCALE_MARKER. Return None if it is a legitimate locale literal, else why it is not."""
+    if path not in LOCALE_MARKER_FILES:
         return "i18n-es marker used outside the authorized files"
-    if not _LITERAL.search(linea):
+    if not _LITERAL.search(line):
         return "i18n-es marker without a string literal to localize"
-    if not any(_es_score(linea)):
+    if not any(_es_score(line)):
         return "i18n-es marker on a line with no Spanish (stray marker)"
     # Spanish must live INSIDE the literal only. Blank out the literals; any Spanish left over was loose in
     # code or a comment. One hit is enough here -- a marked line must carry nothing but the localized text.
-    resto = _LITERAL.sub('""', linea)
-    r_hits, r_raros = _es_score(resto)
-    if r_hits >= 1 or r_raros:
+    rest = _LITERAL.sub('""', line)
+    r_hits, r_rare = _es_score(rest)
+    if r_hits >= 1 or r_rare:
         return "Spanish outside the localized literal on an i18n-es line"
     return None
 
 
-def revisar(p: Path) -> list:
-    ruta = str(p).replace("\\", "/")
-    if (ruta in EXENTOS or any(f in ruta for f in EXENTOS_PARCIALES)
-            or ruta.startswith(EXENTOS_PREFIJO) or p.suffix not in EXTENSIONES):
+def check_file(p: Path) -> list:
+    path = str(p).replace("\\", "/")
+    if (path in EXEMPT or any(f in path for f in EXEMPT_SUBSTRINGS)
+            or path.startswith(EXEMPT_PREFIX) or p.suffix not in EXTENSIONS):
         return []
     try:
-        texto = p.read_text(encoding="utf-8", errors="replace")
+        text = p.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
-    malas = []
-    for n, linea in enumerate(texto.splitlines(), 1):
-        if MARCA_LOCALE in linea:
-            motivo = marca_valida(ruta, linea)
-            if motivo is None:
+    bad = []
+    for n, line in enumerate(text.splitlines(), 1):
+        if LOCALE_MARKER in line:
+            reason = locale_marker_valid(path, line)
+            if reason is None:
                 continue                     # a legitimate locale literal, tightly scoped
-            malas.append((n, linea.strip()[:96], 0, motivo))
+            bad.append((n, line.strip()[:96], 0, reason))
             continue
-        if len(linea.strip()) < 12:
+        if len(line.strip()) < 12:
             continue
         # "Español" is whitelisted ONLY in the files where the language selector legitimately shows it.
-        scan = linea
-        if ruta in PERMITIDO_INLINE_ARCHIVOS:
-            for w in PERMITIDO_INLINE:
+        scan = line
+        if path in INLINE_ALLOWED_FILES:
+            for w in INLINE_ALLOWED:
                 scan = scan.replace(w, "")
-        # Underscores have to break words, or identifiers slip through. `` does not split on `_`
+        # Underscores have to break words, or identifiers slip through. `\b` does not split on `_`
         # (it is a word character), so `si_el_nodo_no_cierra` reads as one unknown token and passes.
         # That is not hypothetical: it is exactly how nine Spanish test names reached a public tag,
         # and the self-test caught it on the first run of this checker.
-        hits, raros = _es_score(scan)
-        if hits >= UMBRAL or raros:
-            malas.append((n, linea.strip()[:96], hits, "".join(sorted(set(raros)))))
-    return malas
+        hits, rare = _es_score(scan)
+        if hits >= THRESHOLD or rare:
+            bad.append((n, line.strip()[:96], hits, "".join(sorted(set(rare)))))
+    return bad
 
 
 def self_test() -> int:
     """A checker that cannot catch the thing it exists to catch is decoration."""
     import tempfile
     print("=== self-test: does it still catch Spanish? ===")
-    casos = [
+    cases = [
         ("# el nodo tiene que cerrar antes de que el instalador toque un archivo", True),
         ("// Wait for the node to exit before the installer touches a single file", False),
         ("    # verificar que el paquete no este mezclado con otro candidato", True),
@@ -204,40 +207,40 @@ def self_test() -> int:
     ]
     ok = True
     d = Path(tempfile.mkdtemp())
-    for i, (linea, deberia) in enumerate(casos):
+    for i, (line, should) in enumerate(cases):
         f = d / f"c{i}.py"
-        f.write_text(linea, encoding="utf-8")
-        pego = bool(revisar(f))
-        bien = pego == deberia
-        ok &= bien
-        print(f"  {'OK ' if bien else 'BAD'}  {'catches' if deberia else 'allows ':<8}  {linea[:62]}")
+        f.write_text(line, encoding="utf-8")
+        matched = bool(check_file(f))
+        good = matched == should
+        ok &= good
+        print(f"  {'OK ' if good else 'BAD'}  {'catches' if should else 'allows ':<8}  {line[:62]}")
 
-    # The marker's guard rails, checked directly (revisar keys on the real path, so a temp file cannot
+    # The marker's guard rails, checked directly (check_file keys on the real path, so a temp file cannot
     # stand in for the authorized route). True = accepted as locale, False = rejected with a reason.
-    LIB = MARCA_LOCALE_ARCHIVOS[0]
-    marca_casos = [
+    LIB = LOCALE_MARKER_FILES[0]
+    marker_cases = [
         (LIB, '  format!("Brisvia — Minando al {}% de {} núcleos", p, c) // i18n-es (tray tooltip)', True),
         (LIB, '  if lang == "es" { ("Abrir Brisvia", "Salir de Brisvia") } else { ("Open", "Exit") } // i18n-es', True),
         (LIB, '  let n = threads; // i18n-es', False),                              # stray: no Spanish
         (LIB, '  let x = "Abrir Brisvia"; // no lo mates nunca i18n-es', False),    # Spanish loose in a comment
         ("tools/foo.py", '  s = "Abrir Brisvia" # i18n-es', False),                # unauthorized file
     ]
-    for ruta, linea, esperado_ok in marca_casos:
-        acepta = marca_valida(ruta, linea) is None
-        bien = acepta == esperado_ok
-        ok &= bien
-        print(f"  {'OK ' if bien else 'BAD'}  marker {'accepts' if esperado_ok else 'rejects':<8} {linea[:52]}")
+    for path, line, expected_ok in marker_cases:
+        accepts = locale_marker_valid(path, line) is None
+        good = accepts == expected_ok
+        ok &= good
+        print(f"  {'OK ' if good else 'BAD'}  marker {'accepts' if expected_ok else 'rejects':<8} {line[:52]}")
 
     # "Español" is stripped (allowed) only in its authorized files; kept (caught) anywhere else.
-    for ruta, esperado_pego in (("src/renderer/index.html", False), ("tools/other.py", True)):
+    for path, expected_match in (("src/renderer/index.html", False), ("tools/other.py", True)):
         scan = '<button data-lang="es">Español</button>'
-        if ruta in PERMITIDO_INLINE_ARCHIVOS:
-            for w in PERMITIDO_INLINE:
+        if path in INLINE_ALLOWED_FILES:
+            for w in INLINE_ALLOWED:
                 scan = scan.replace(w, "")
-        pego = any(_es_score(scan))
-        bien = pego == esperado_pego
-        ok &= bien
-        print(f"  {'OK ' if bien else 'BAD'}  Español@{ruta.split('/')[-1]:<18} {'caught' if pego else 'allowed'}")
+        matched = any(_es_score(scan))
+        good = matched == expected_match
+        ok &= good
+        print(f"  {'OK ' if good else 'BAD'}  Español@{path.split('/')[-1]:<18} {'caught' if matched else 'allowed'}")
 
     print("\n" + ("OK: it catches Spanish and allows only scoped localization." if ok
                   else "BAD: the checker is wrong. Fix it before trusting it."))
@@ -248,10 +251,10 @@ if __name__ == "__main__":
     args = sys.argv[1:]
     if args and args[0] == "--self-test":
         sys.exit(self_test())
-    archivos = [Path(a) for a in args] if args else tracked()
+    files = [Path(a) for a in args] if args else tracked()
     total = 0
-    for p in sorted(archivos):
-        if (m := revisar(p)):
+    for p in sorted(files):
+        if (m := check_file(p)):
             print(f"\n{p}  ({len(m)} lines)")
             for n, l, h, r in m[:6]:
                 print(f"  {n:>5}: {l}")

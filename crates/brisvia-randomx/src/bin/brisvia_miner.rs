@@ -40,7 +40,7 @@ const MAX_SERVER_TEXT: usize = 120;
 const PROTOCOL_VERSION: &str = "brisvia-stratum-1";
 
 fn print_version() -> ! {
-    // Cuando alguien reporta un problema, esto dice EXACTAMENTE que binario esta corriendo.
+    // When someone reports a problem, this says EXACTLY which binary is running.
     println!("brisvia-miner {}", env!("CARGO_PKG_VERSION"));
     println!("  build     : {}", option_env!("BRISVIA_BUILD").unwrap_or("dev"));
     println!("  platform  : {} {}", std::env::consts::OS, std::env::consts::ARCH);
@@ -49,9 +49,9 @@ fn print_version() -> ! {
 }
 
 fn print_help(code: i32) -> ! {
-    // La ayuda pedida a proposito va por la salida normal y con codigo 0. Un error de argumentos va
-    // por la salida de errores y con codigo 2: asi un guion puede distinguirlos.
-    let texto = format!(
+    // Help asked for on purpose goes to stdout with exit code 0. An argument error goes to stderr
+    // with exit code 2: that way a script can tell them apart.
+    let text = format!(
         "Brisvia terminal miner
 
 USAGE:
@@ -79,7 +79,7 @@ This miner never switches to solo mining by itself. If the pool goes down it say
 reconnects.
 
 Stop with Ctrl+C or `systemctl stop`. Shares already accepted stay credited.");
-    if code == 0 { println!("{texto}"); } else { eprintln!("{texto}"); }
+    if code == 0 { println!("{text}"); } else { eprintln!("{text}"); }
     std::process::exit(code)
 }
 
@@ -142,8 +142,8 @@ fn check_address(addr: &str) -> Result<(), String> {
 fn safe(text: &str) -> String {
     let mut s: String = text
         .chars()
-        // Solo ASCII imprimible: los caracteres de control no alcanzan, porque hay caracteres
-        // Unicode que cambian el sentido de lectura y pueden usarse para disfrazar un registro.
+        // Printable ASCII only: stripping control characters is not enough, because there are Unicode
+        // characters that change reading direction and can be used to disguise a log line.
         .map(|c| if c.is_ascii_graphic() || c == ' ' { c } else { '?' })
         .take(MAX_SERVER_TEXT)
         .collect();
@@ -247,9 +247,9 @@ fn parse_args() -> Args {
     {
         argument_error("--worker must be 1 to 64 characters, letters, numbers, '.', '_' or '-'");
     }
-    // El destino se revisa formalmente: sin esquema (nada de http://), sin espacios ni controles, y
-    // con host y puerto separables. TLS y la validacion del certificado son siempre obligatorios, asi
-    // que un destino cualquiera no baja la seguridad, pero un formato roto debe avisarse claro.
+    // The target is checked formally: no scheme (no http://), no spaces or control characters, and
+    // with a separable host and port. TLS and certificate validation are always mandatory, so an
+    // arbitrary target does not lower security, but a broken format must be reported clearly.
     if pool.contains("://") || pool.contains(char::is_whitespace)
         || pool.chars().any(|c| c.is_control()) || pool.len() > 255
     {
@@ -306,22 +306,22 @@ fn main() {
         }
         PoolEvent::ShareRejected { reason } => {
             rej.fetch_add(1, Ordering::Relaxed);
-            let motivo = safe(&reason);
+            let clean_reason = safe(&reason);
             let mut m = rsn.lock().unwrap();
-            // Tope de causas distintas. `--pool` permite apuntar a cualquier servidor, asi que no se
-            // puede suponer que los motivos vengan de una lista corta: sin tope, una pool rota u
-            // hostil haria crecer este mapa sin limite.
-            let clave = if m.len() >= 24 && !m.contains_key(&motivo) {
+            // Cap on the number of distinct causes. `--pool` allows pointing at any server, so the
+            // reasons cannot be assumed to come from a short list: without a cap, a broken or hostile
+            // pool would grow this map without bound.
+            let key = if m.len() >= 24 && !m.contains_key(&clean_reason) {
                 "other".to_string()
             } else {
-                motivo.clone()
+                clean_reason.clone()
             };
-            let motivo = clave.clone();
-            let n = m.entry(clave).or_insert(0);
+            let clean_reason = key.clone();
+            let n = m.entry(key).or_insert(0);
             *n += 1;
-            // Solo el primero de cada tipo se muestra al instante: es el que avisa que algo pasa.
+            // Only the first of each kind is shown instantly: it is the one that warns something is wrong.
             if *n == 1 || verbose {
-                println!("[{}] share rejected: {motivo}", clock(started));
+                println!("[{}] share rejected: {clean_reason}", clock(started));
             }
         }
         PoolEvent::ShareStale => {
@@ -368,17 +368,17 @@ fn main() {
                 }
                 if r > 0 {
                     let m = rsn.lock().unwrap();
-                    let detalle: Vec<String> =
+                    let detail: Vec<String> =
                         m.iter().map(|(k, v)| format!("{k} x{v}")).collect();
-                    line.push_str(&format!("   [{}]", detalle.join(", ")));
+                    line.push_str(&format!("   [{}]", detail.join(", ")));
                 }
                 println!("{line}");
             }
         }
-        // Estos dos se ignoran A PROPOSITO, no por descuido: el envio de una share es un paso
-        // intermedio (el veredicto llega en ShareAccepted/Rejected), y el cambio de objetivo a mitad
-        // de trabajo lo maneja el motor. Se nombran para que, si el enum crece, el compilador obligue
-        // a decidir que hacer con lo nuevo en vez de tragarlo en silencio.
+        // These two are ignored ON PURPOSE, not by oversight: submitting a share is an intermediate
+        // step (the verdict arrives in ShareAccepted/Rejected), and a target change mid-work is
+        // handled by the engine. They are named so that, if the enum grows, the compiler forces a
+        // decision about the new variant instead of swallowing it silently.
         PoolEvent::ShareSubmitted { .. } => {}
         PoolEvent::TargetChangeIgnored => {}
     };
@@ -386,7 +386,7 @@ fn main() {
     // tls = true, always. There is deliberately no way to ask for anything else.
     run_pool_worker(&a.pool, &a.address, &a.worker, a.threads, true, &should_stop, on_event);
 
-    let resumen = format!(
+    let summary = format!(
         "after {}. Accepted {}, rejected {}, late {}, block candidates {}.",
         clock(started),
         accepted.load(Ordering::Relaxed),
@@ -398,10 +398,10 @@ fn main() {
     // If the worker came back on its own, this was NOT a clean stop. Exiting 0 here would make a
     // service manager believe the miner finished its job and leave the machine idle.
     if !should_stop.load(Ordering::SeqCst) {
-        eprintln!("\nThe mining worker stopped unexpectedly {resumen}");
+        eprintln!("\nThe mining worker stopped unexpectedly {summary}");
         std::process::exit(1);
     }
-    println!("\nStopped {resumen}");
+    println!("\nStopped {summary}");
 }
 
 fn clock(since: Instant) -> String {

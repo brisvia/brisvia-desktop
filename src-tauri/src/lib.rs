@@ -2633,15 +2633,14 @@ mod wallet_key_tests {
     }
 }
 
-// Update the notification-area tooltip so it always matches the current language and mining state.
-// Called on start/stop/intensity change AND on language change, so it never gets stuck in the wrong language.
+// Update the notification-area tooltip so it always matches the current mining state.
+// Called on start/stop/intensity change, so it never gets stuck showing the wrong state.
 fn refresh_tooltip(state: &AppState) {
     let tray_guard = state.tray.lock().unwrap();
     let tray = match tray_guard.as_ref() {
         Some(t) => t,
         None => return,
     };
-    let lang = state.lang.lock().unwrap().clone();
     let tip = if state.mining.load(Ordering::SeqCst) {
         let pct = match state.intensity.lock().unwrap().as_str() {
             "suave" => 25usize,
@@ -2652,11 +2651,7 @@ fn refresh_tooltip(state: &AppState) {
         .clamp(1, 100);
         let threads = state.miner_threads.load(Ordering::SeqCst);
         let cores = state.cores;
-        if lang == "es" {
-            format!("Brisvia — Minando al {}% · {} de {} núcleos", pct, threads, cores) // i18n-es (native tray tooltip, localized in code)
-        } else {
-            format!("Brisvia — Mining at {}% · {} of {} cores", pct, threads, cores)
-        }
+        format!("Brisvia — Mining at {}% · {} of {} cores", pct, threads, cores)
     } else {
         "Brisvia".to_string()
     };

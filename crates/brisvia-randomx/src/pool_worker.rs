@@ -538,16 +538,16 @@ mod tests {
     fn a_permanent_rejection_stops_the_worker_instead_of_reconnecting() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
-        let intentos = Arc::new(AtomicU64::new(0));
-        let intentos_c = intentos.clone();
+        let attempts = Arc::new(AtomicU64::new(0));
+        let attempts_c = attempts.clone();
         // Non-blocking accept loop: count every reconnection for 2s. A correct worker connects ONCE and gives up.
         listener.set_nonblocking(true).unwrap();
         let server = std::thread::spawn(move || {
-            let hasta = std::time::Instant::now() + Duration::from_secs(2);
-            while std::time::Instant::now() < hasta {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
                 match listener.accept() {
                     Ok((sock, _)) => {
-                        intentos_c.fetch_add(1, Ordering::SeqCst);
+                        attempts_c.fetch_add(1, Ordering::SeqCst);
                         sock.set_nonblocking(false).unwrap();
                         let mut reader = BufReader::new(sock.try_clone().unwrap());
                         let mut writer = sock;
@@ -561,18 +561,18 @@ mod tests {
             }
         });
         let stop = AtomicBool::new(false);
-        let mut errores = Vec::new();
+        let mut errors = Vec::new();
         // run_pool_worker blocks; a correct one returns on its own after the permanent rejection.
         run_pool_worker(&addr, "brv1qbad", "rig1", 1, false, &stop, |e| {
             if let PoolEvent::Disconnected(m) = e {
-                errores.push(m);
+                errors.push(m);
             }
         });
         server.join().unwrap(); // let the 2s counting window finish: a buggy worker would reconnect within it
-        assert_eq!(intentos.load(Ordering::SeqCst), 1, "must connect ONCE, not retry a definitive answer");
-        assert_eq!(errores.len(), 1);
-        assert!(!errores[0].starts_with(PERMANENT_PREFIX), "the user must read the reason, not the marker");
-        assert!(errores[0].contains("rejected"), "the reason must reach the user, got: {:?}", errores[0]);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "must connect ONCE, not retry a definitive answer");
+        assert_eq!(errors.len(), 1);
+        assert!(!errors[0].starts_with(PERMANENT_PREFIX), "the user must read the reason, not the marker");
+        assert!(errors[0].contains("rejected"), "the reason must reach the user, got: {:?}", errors[0]);
     }
 
     // A TEMPORARY drop (server closes without answering the login) must announce a reconnect countdown with an

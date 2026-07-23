@@ -37,7 +37,7 @@ import argparse
 import pathlib
 import sys
 
-PROHIBIDOS = {
+FORBIDDEN = {
     "TaskDialogIndirect": (
         "Common Controls v6 only. A manifest-less cargo test binary gets comctl32 5.82, which does not "
         "export it: 0xC0000139 before main, zero tests run."
@@ -46,109 +46,109 @@ PROHIBIDOS = {
 }
 
 # comctl32 in the test binary means Tauri's GUI runtime got linked in, which is the coupling itself.
-DLL_PROHIBIDAS = {"comctl32.dll"}
+FORBIDDEN_DLLS = {"comctl32.dll"}
 
 
-def leer_texto(ruta):
+def read_text(path):
     """Decode a file whichever way it was written. The false negative that let this bug hide.
 
     The comparison that was supposed to catch the missing symbol read dumpbin's output as UTF-8. PowerShell's
     Out-File writes UTF-16 LE with a BOM, so it searched mojibake, found nothing, and reported 'no symbol
     is missing'. It was there the whole time.
     """
-    b = pathlib.Path(ruta).read_bytes()
+    b = pathlib.Path(path).read_bytes()
     for bom, enc in ((b"\xff\xfe\x00\x00", "utf-32"), (b"\x00\x00\xfe\xff", "utf-32"),
                      (b"\xff\xfe", "utf-16-le"), (b"\xfe\xff", "utf-16-be"), (b"\xef\xbb\xbf", "utf-8-sig")):
         if b.startswith(bom):
             return b.decode(enc, errors="replace")
     # No BOM. UTF-16 without one still gives itself away: ASCII text becomes alternating NUL bytes.
-    muestra = b[:400]
-    if muestra.count(b"\x00") > len(muestra) // 4:
-        pares = muestra[:40]
-        return b.decode("utf-16-le" if pares[1::2].count(0) > pares[0::2].count(0) else "utf-16-be",
+    sample = b[:400]
+    if sample.count(b"\x00") > len(sample) // 4:
+        pairs = sample[:40]
+        return b.decode("utf-16-le" if pairs[1::2].count(0) > pairs[0::2].count(0) else "utf-16-be",
                         errors="replace")
     return b.decode("utf-8", errors="replace")
 
 
-def imports_de(exe):
+def imports_of(exe):
     """The PE import table, by name and by ordinal. Reuses the reader that proved the root cause."""
     import importlib.util
-    aqui = pathlib.Path(__file__).parent / "check_imports_deep.py"
-    spec = importlib.util.spec_from_file_location("deep", aqui)
+    here = pathlib.Path(__file__).parent / "check_imports_deep.py"
+    spec = importlib.util.spec_from_file_location("deep", here)
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m.PE(pathlib.Path(exe).read_bytes()).imports()
 
 
-def revisar(exe):
+def check(exe):
     """Returns a list of failures. Empty means clean."""
-    fallos = []
+    failures = []
     p = pathlib.Path(exe)
     if not p.exists():
         return [f"no such executable: {exe}. Fail-closed: nothing was inspected."]
     try:
-        imp = imports_de(exe)
+        imp = imports_of(exe)
     except Exception as e:
         return [f"could not read the PE import table ({e}). Fail-closed: nothing was proven."]
     if not imp:
         return [f"{p.name} has no import table at all. Fail-closed: that is not a normal test binary."]
 
-    for dll, simbolos in imp:
-        nombres = {v for k, v in simbolos if k == "name"}
-        if dll.lower() in DLL_PROHIBIDAS:
-            fallos.append(
+    for dll, symbols in imp:
+        names = {v for k, v in symbols if k == "name"}
+        if dll.lower() in FORBIDDEN_DLLS:
+            failures.append(
                 f"{p.name} imports {dll}. In the TEST executable that means Tauri's GUI runtime got "
                 f"linked in -- the coupling that caused 0xC0000139. (The app itself may use it; this "
                 f"gate is only about cargo's test binary.)")
-        for prohibido, porque in PROHIBIDOS.items():
-            if prohibido in nombres:
-                fallos.append(f"{p.name} imports {prohibido} from {dll}. {porque}")
-    return fallos
+        for forbidden, reason in FORBIDDEN.items():
+            if forbidden in names:
+                failures.append(f"{p.name} imports {forbidden} from {dll}. {reason}")
+    return failures
 
 
 def self_test():
     """A gate nobody has seen fail is not a gate."""
-    fallos = 0
+    failures = 0
 
-    for ruta, porque in (("no-existe-en-ningun-lado.exe", "a missing file"),
+    for path, reason in (("does-not-exist-anywhere.exe", "a missing file"),
                          (__file__, "a file that is not a PE")):
-        if not revisar(ruta):
-            print(f"  FAIL  passed on {porque} -- fail-closed means the opposite")
-            fallos += 1
+        if not check(path):
+            print(f"  FAIL  passed on {reason} -- fail-closed means the opposite")
+            failures += 1
         else:
-            print(f"  PASS  fails-closed-on-{porque.replace(' ', '-')}")
+            print(f"  PASS  fails-closed-on-{reason.replace(' ', '-')}")
 
     # A real binary that imports none of the forbidden things must pass, or the gate is just noise.
-    limpio = r"C:\Windows\System32\cmd.exe"
-    if pathlib.Path(limpio).exists():
-        r = revisar(limpio)
+    clean = r"C:\Windows\System32\cmd.exe"
+    if pathlib.Path(clean).exists():
+        r = check(clean)
         if r:
             print(f"  FAIL  rejected a clean binary: {r[0][:70]}")
-            fallos += 1
+            failures += 1
         else:
             print("  PASS  accepts-a-clean-binary")
 
     # THE encoding false negative, pinned. UTF-16 LE with a BOM is what Out-File writes.
     import tempfile
-    for enc, nombre in (("utf-16-le", "utf-16-le-with-bom"), ("utf-16-be", "utf-16-be-with-bom"),
-                        ("utf-8-sig", "utf-8-with-bom"), ("utf-8", "plain-utf-8")):
+    for enc, name in (("utf-16-le", "utf-16-le-with-bom"), ("utf-16-be", "utf-16-be-with-bom"),
+                      ("utf-8-sig", "utf-8-with-bom"), ("utf-8", "plain-utf-8")):
         with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
-            texto = "  ordinal hint RVA      name\n  120  TaskDialogIndirect\n"
+            text = "  ordinal hint RVA      name\n  120  TaskDialogIndirect\n"
             bom = {"utf-16-le": b"\xff\xfe", "utf-16-be": b"\xfe\xff"}.get(enc, b"")
-            f.write(bom + texto.encode(enc if enc != "utf-8-sig" else "utf-8-sig"))
-            ruta = f.name
-        leido = leer_texto(ruta)
-        pathlib.Path(ruta).unlink()
-        if "TaskDialogIndirect" not in leido:
-            print(f"  FAIL  {nombre}: TaskDialogIndirect was there and the reader did not see it -- "
+            f.write(bom + text.encode(enc if enc != "utf-8-sig" else "utf-8-sig"))
+            path = f.name
+        read_content = read_text(path)
+        pathlib.Path(path).unlink()
+        if "TaskDialogIndirect" not in read_content:
+            print(f"  FAIL  {name}: TaskDialogIndirect was there and the reader did not see it -- "
                   f"exactly the false negative that hid this bug")
-            fallos += 1
+            failures += 1
         else:
-            print(f"  PASS  reads-{nombre}")
+            print(f"  PASS  reads-{name}")
 
     print()
-    if fallos:
-        print(f"SELF-TEST FAILED ({fallos})")
+    if failures:
+        print(f"SELF-TEST FAILED ({failures})")
         return 1
     print("self-test OK: the gate fails closed and reads every encoding")
     return 0
@@ -164,10 +164,10 @@ def main():
     if not a.exe:
         return ap.error("an executable is required")
 
-    fallos = revisar(a.exe)
-    if fallos:
+    failures = check(a.exe)
+    if failures:
         print(f"FAIL: {a.exe}")
-        for f in fallos:
+        for f in failures:
             print(f"  {f}")
         return 1
     print(f"OK: {pathlib.Path(a.exe).name} imports nothing forbidden.")

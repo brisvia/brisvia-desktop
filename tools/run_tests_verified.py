@@ -42,40 +42,40 @@ def main():
     t0 = time.time()
     r = subprocess.run(cmd, capture_output=True, text=True)
     dur = time.time() - t0
-    salida = r.stdout + r.stderr
-    print(salida[-4000:] if len(salida) > 4000 else salida)
+    output = r.stdout + r.stderr
+    print(output[-4000:] if len(output) > 4000 else output)
 
     # cargo test: "test result: ok. 29 passed; 0 failed; 0 ignored; ..."
-    corridos = failed = 0
-    for m in re.finditer(r"test result: \w+\. (\d+) passed; (\d+) failed", salida):
-        corridos += int(m.group(1))
+    ran = failed = 0
+    for m in re.finditer(r"test result: \w+\. (\d+) passed; (\d+) failed", output):
+        ran += int(m.group(1))
         failed += int(m.group(2))
 
-    fallos = []
+    failures = []
     if r.returncode != 0:
-        fallos.append(f"the command failed (code {r.returncode})")
+        failures.append(f"the command failed (code {r.returncode})")
     if failed > 0:
-        fallos.append(f"{failed} test(s) failed")
-    if corridos == 0:
-        fallos.append(
+        failures.append(f"{failed} test(s) failed")
+    if ran == 0:
+        failures.append(
             "RAN ZERO TESTS. The command may have 'passed' without testing anything: a filter that matches none, "
             "a renamed module, a feature that hides them. Green without testing anything is worse than red."
         )
-    elif corridos < a.min:
-        fallos.append(
-            f"ran {corridos} tests but at least {a.min} were expected. Either tests were lost, or a suite "
+    elif ran < a.min:
+        failures.append(
+            f"ran {ran} tests but at least {a.min} were expected. Either tests were lost, or a suite "
             f"stopped being discovered. If you deleted them on purpose, lower the minimum in the workflow and say why."
         )
-    if a.min_seconds and dur < a.min_seconds and not fallos:
-        fallos.append(f"finished in {dur:.1f}s, suspiciously fast (expected >{a.min_seconds}s)")
+    if a.min_seconds and dur < a.min_seconds and not failures:
+        failures.append(f"finished in {dur:.1f}s, suspiciously fast (expected >{a.min_seconds}s)")
 
-    print(f"\n== {a.name}: {corridos} tests run, {failed} failed, in {dur:.1f}s (minimum required: {a.min})")
-    if fallos:
+    print(f"\n== {a.name}: {ran} tests run, {failed} failed, in {dur:.1f}s (minimum required: {a.min})")
+    if failures:
         print("\nEXECUTION VERIFICATION FAILED:\n")
-        for f in fallos:
+        for f in failures:
             print("  - " + f)
         sys.exit(1)
-    print(f"OK: {a.name} really ran ({corridos} tests, all green).")
+    print(f"OK: {a.name} really ran ({ran} tests, all green).")
 
 
 if __name__ == "__main__":

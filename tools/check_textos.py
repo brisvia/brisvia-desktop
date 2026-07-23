@@ -25,7 +25,7 @@ LOC = ROOT / "src" / "renderer" / "locales.js"
 HTML = ROOT / "src" / "renderer" / "index.html"
 
 # Text that must NOT be translated. Each entry is a decision, not an oversight:
-PERMITIDO = {
+ALLOWED = {
     "Brisvia",   # the brand
     "BRVA",      # the ticker
     "Español",   # the language buttons show each language in ITS OWN language, on purpose
@@ -38,7 +38,7 @@ PERMITIDO = {
     "H/s",       # hashes per second: a unit, like km/h. The same in every language.
 }
 
-fallos = []
+failures = []
 loc = LOC.read_text(encoding="utf-8")
 html = HTML.read_text(encoding="utf-8")
 
@@ -51,9 +51,9 @@ i_en_end = min(_nexts) if _nexts else len(loc)
 blk_es, blk_en = loc[i_es:i_en], loc[i_en:i_en_end]
 
 
-def claves(bloque):
+def keys_of(block):
     out, sec = {}, None
-    for line in bloque.splitlines():
+    for line in block.splitlines():
         m = re.match(r"\s{4}(\w+):\s*\{", line)
         if m:
             sec = m.group(1)
@@ -64,29 +64,33 @@ def claves(bloque):
     return out
 
 
-kes, ken = claves(blk_es), claves(blk_en)
-print(f"ES keys: {len(kes)} | EN keys: {len(ken)}")
+keys_es, keys_en = keys_of(blk_es), keys_of(blk_en)
+print(f"ES keys: {len(keys_es)} | EN keys: {len(keys_en)}")
 
 # ---------- 1) missing keys ----------
-for k in sorted(set(kes) - set(ken)):
-    fallos.append(f"key '{k}' exists in SPANISH but is missing in ENGLISH.")
-for k in sorted(set(ken) - set(kes)):
-    fallos.append(f"key '{k}' exists in ENGLISH but is missing in SPANISH.")
+for k in sorted(set(keys_es) - set(keys_en)):
+    failures.append(f"key '{k}' exists in SPANISH but is missing in ENGLISH.")
+for k in sorted(set(keys_en) - set(keys_es)):
+    failures.append(f"key '{k}' exists in ENGLISH but is missing in SPANISH.")
 
 # ---------- 2) mixed languages ----------
-for k, v in sorted(ken.items()):
+# DETECTION DATA -- DO NOT TRANSLATE. The Spanish and English word lists below are the payload this
+# check hunts for: Spanish leaking into the English dictionary, or English into the Spanish one.
+# Translating them would blind the check. This file is whitelisted from check_english_only.py so the
+# words can be named here.
+for k, v in sorted(keys_en.items()):
     if re.search(r"[áéíóúñ¿¡]", v, re.I) or re.search(
         r"\b(puedes|billetera|contraseña|puerto|ejemplo|computadora|minado|guardar)\b", v, re.I
     ):
-        fallos.append(f"Spanish text inside the ENGLISH dictionary: {k} = \"{v[:70]}\"")
-for k, v in sorted(kes.items()):
+        failures.append(f"Spanish text inside the ENGLISH dictionary: {k} = \"{v[:70]}\"")
+for k, v in sorted(keys_es.items()):
     if re.search(r"\b(you can|your wallet|the pool|password|mining|please|not ready)\b", v, re.I):
-        fallos.append(f"English text inside the SPANISH dictionary: {k} = \"{v[:70]}\"")
+        failures.append(f"English text inside the SPANISH dictionary: {k} = \"{v[:70]}\"")
 
 # ---------- 3) hard-coded text in the HTML ----------
 for m in re.finditer(r'<(input|textarea)[^>]*placeholder="([^"]+)"[^>]*>', html):
-    if "data-i18n" not in m.group(0) and m.group(2) not in PERMITIDO:
-        fallos.append(
+    if "data-i18n" not in m.group(0) and m.group(2) not in ALLOWED:
+        failures.append(
             f'hard-coded HTML text that never gets translated: placeholder "{m.group(2)}" '
             f"-- use data-i18n-attr=\"placeholder:section.key\"."
         )
@@ -94,13 +98,13 @@ for m in re.finditer(
     r'<(span|div|p|h[1-4]|button|label)(?![^>]*data-i18n)[^>]*>([^<>{]{2,60})</\1>', html
 ):
     txt = m.group(2).strip()
-    if not txt or re.fullmatch(r"[\W\d\s·—…]+", txt) or txt.startswith("&") or txt in PERMITIDO:
+    if not txt or re.fullmatch(r"[\W\d\s·—…]+", txt) or txt.startswith("&") or txt in ALLOWED:
         continue
-    fallos.append(f'hard-coded HTML text that never gets translated: <{m.group(1)}>"{txt[:50]}"')
+    failures.append(f'hard-coded HTML text that never gets translated: <{m.group(1)}>"{txt[:50]}"')
 
-if fallos:
+if failures:
     print("\nTEXT CONTRACT FAILED:\n")
-    for f in fallos:
+    for f in failures:
         print("  - " + f)
     sys.exit(1)
 print("OK: both languages are complete, no mixing, and the HTML has no hard-coded untranslated text.")
