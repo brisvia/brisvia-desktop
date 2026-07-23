@@ -130,6 +130,7 @@ jobs:
           # authorship, so it gets its OWN signature. We reuse the SAME key as the auto-updater — one root of
           # trust the app already carries. Tauri signs with minisign but wraps the signature in an extra
           # base64 layer; we decode it to the standard .minisig that Linux users verify with plain `minisign`.
+          sudo apt-get update
           sudo apt-get install -y --no-install-recommends minisign
           npm ci >/dev/null 2>&1 || npm install >/dev/null 2>&1
           npm run tauri -- signer sign "brisvia-miner-linux-x86_64"
