@@ -58,6 +58,9 @@ elseif ($name -notlike '*-setup.exe') {
 
 # --- Real signing with CodeSignTool, into a temp dir, then atomic replace ---
 if (-not $env:CODESIGNTOOL_HOME) { throw 'sign-wrapper: CODESIGNTOOL_HOME is not set' }
+# CodeSignTool.bat finds its bundled Java/jar via CODE_SIGN_TOOL_PATH; without it, it uses paths relative
+# to the current directory and fails ("The system cannot find the path specified") when called from here.
+$env:CODE_SIGN_TOOL_PATH = $env:CODESIGNTOOL_HOME
 foreach ($v in @('ES_USERNAME', 'ES_PASSWORD', 'ES_CREDENTIAL_ID', 'ES_TOTP_SECRET')) {
     if (-not (Get-Item "env:$v" -ErrorAction SilentlyContinue)) { throw "sign-wrapper: env $v is not set" }
 }

@@ -163,7 +163,15 @@ jobs:
           $bat = Get-ChildItem "$env:RUNNER_TEMP/codesigntool" -Recurse -Filter CodeSignTool.bat | Select-Object -First 1
           if (-not $bat) { throw "CodeSignTool.bat not found after extracting the zip" }
           $cstHome = $bat.Directory.FullName
+          # CodeSignTool.bat resolves its bundled Java and jar RELATIVE to the current directory unless
+          # CODE_SIGN_TOOL_PATH is set. Invoking it by absolute path from another folder makes it look for
+          # .\jdk-11.0.2\bin\java in the wrong place and fail with "The system cannot find the path specified".
+          # Setting CODE_SIGN_TOOL_PATH makes the .bat use absolute paths. We export two names to later steps:
+          # CODESIGNTOOL_HOME is what the sign wrapper uses to locate the .bat; CODE_SIGN_TOOL_PATH is what the
+          # .bat itself reads to find its own Java and jar.
+          $env:CODE_SIGN_TOOL_PATH = $cstHome
           "CODESIGNTOOL_HOME=$cstHome" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CODE_SIGN_TOOL_PATH=$cstHome" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "CODESIGNTOOL_HOME=$cstHome"
           # Validate the credentials WITHOUT building the release (credential_info needs no TOTP). Fail loud if wrong.
           & "$cstHome/CodeSignTool.bat" credential_info -username="$env:ES_USERNAME" -password="$env:ES_PASSWORD" -credential_id="$env:ES_CREDENTIAL_ID"
