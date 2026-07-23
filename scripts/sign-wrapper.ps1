@@ -25,6 +25,13 @@ $ErrorActionPreference = 'Stop'
 $name = Split-Path $FilePath -Leaf
 $sidecars = @('bitcoind.exe', 'bitcoin-cli.exe', 'brisvia-worker.exe')
 
+# Log to a file that survives even a failed bundle. Tauri does NOT surface this script's output when the
+# sign command fails (it only prints "failed to run powershell"), so without this the real error is invisible.
+# An always() CI step prints this file after the build.
+$log = if ($env:RUNNER_TEMP) { Join-Path $env:RUNNER_TEMP 'sign-wrapper.log' } else { Join-Path ([IO.Path]::GetTempPath()) 'sign-wrapper.log' }
+function Log($m) { try { Add-Content -Path $log -Value $m } catch { } }
+Log "--- called for: $name  (FilePath=$FilePath) ---"
+
 # Dry-run: only log the path Tauri handed us, so we can see exactly what the pinned Tauri version
 # tries to sign before we ever spend a signing operation.
 if ($env:SIGN_DRYRUN -eq '1') {
@@ -73,14 +80,21 @@ if (-not (Test-Path $tool)) { throw "sign-wrapper: CodeSignTool.bat not found at
 
 # eSigner signs in the cloud; the TOTP secret lets CodeSignTool generate the OTP non-interactively.
 # Output goes to a fresh dir so the original is never half-overwritten on failure. Args are not echoed.
-& $tool sign `
+# CAPTURE the output (do NOT pipe to Out-Host: in the console-less process Tauri spawns, Out-Host can throw
+# and abort the whole sign — surfacing only as Tauri's opaque "failed to run powershell"). Everything is
+# written to the log so an always() CI step can show exactly what CodeSignTool said.
+Log "signing $name  (CODE_SIGN_TOOL_PATH=$env:CODE_SIGN_TOOL_PATH tool=$tool)"
+$signOut = & $tool sign `
     -username="$env:ES_USERNAME" `
     -password="$env:ES_PASSWORD" `
     -credential_id="$env:ES_CREDENTIAL_ID" `
     -totp_secret="$env:ES_TOTP_SECRET" `
     -input_file_path="$FilePath" `
-    -output_dir_path="$outDir" | Out-Host
-if ($LASTEXITCODE -ne 0) { throw "sign-wrapper: CodeSignTool failed for '$name' (exit $LASTEXITCODE)" }
+    -output_dir_path="$outDir" 2>&1
+$signExit = $LASTEXITCODE
+Log "CodeSignTool exit=$signExit"
+Log ($signOut | Out-String)
+if ($signExit -ne 0) { throw "sign-wrapper: CodeSignTool failed for '$name' (exit $signExit): $($signOut | Out-String)" }
 
 $signed = Join-Path $outDir $name
 if (-not (Test-Path $signed)) { throw "sign-wrapper: signed output not found for '$name' in $outDir" }

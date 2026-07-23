@@ -187,6 +187,14 @@ jobs:
           ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
           ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
 
+      - name: Show the sign-wrapper log (what signing actually did)
+        if: always()
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'sign-wrapper.log'
+          if (Test-Path $log) { Write-Host "===== sign-wrapper.log ====="; Get-Content $log }
+          else { Write-Host "no sign-wrapper.log — the wrapper never ran or failed before logging" }
+
       - name: Verify Authenticode signatures (app binary + installer)
         shell: pwsh
         run: |
