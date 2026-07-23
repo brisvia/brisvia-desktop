@@ -540,8 +540,8 @@ mod tests {
         // Non-blocking accept loop: count every reconnection for 2s. A correct worker connects ONCE and gives up.
         listener.set_nonblocking(true).unwrap();
         let server = std::thread::spawn(move || {
-            let hasta = std::time::Instant::now() + Duration::from_secs(2);
-            while std::time::Instant::now() < hasta {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
                 match listener.accept() {
                     Ok((sock, _)) => {
                         intentos_c.fetch_add(1, Ordering::SeqCst);

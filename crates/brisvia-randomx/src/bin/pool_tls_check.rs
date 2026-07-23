@@ -52,9 +52,9 @@ fn main() {
             // A confirmed login is not enough: the work must arrive afterwards, or the miner stays
             // connected without mining. We wait for the first job just like the real session does.
             println!("3) waiting for the first job ...");
-            let hasta = std::time::Instant::now() + Duration::from_secs(30);
-            let mut llego = false;
-            while std::time::Instant::now() < hasta && !llego {
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            let mut arrived = false;
+            while std::time::Instant::now() < deadline && !arrived {
                 match c.poll_message(Duration::from_millis(500)) {
                     Ok(Poll::Message(Incoming::Job(j))) => {
                         println!("   OK: work arrived -> job_id={} height={}", j.job_id, j.height);
@@ -65,7 +65,7 @@ fn main() {
                                 std::process::exit(1);
                             }
                         }
-                        llego = true;
+                        arrived = true;
                     }
                     Ok(Poll::Closed) => {
                         eprintln!("   FAIL: the pool closed the connection without sending work");
@@ -78,7 +78,7 @@ fn main() {
                     }
                 }
             }
-            if !llego {
+            if !arrived {
                 eprintln!("   FAIL: the pool confirmed the login but sent no work in 30s");
                 std::process::exit(1);
             }

@@ -87,7 +87,7 @@ function startPassStep(mode) {
 // Strength 0..4: length + variety. A visual guide, not a hard block (the real backup is the 12 words).
 function passStrength(p) {
   let s = 0;
-  if (p.length >= 6) s++;   // minimo permitido
+  if (p.length >= 6) s++;   // minimum allowed
   if (p.length >= 12) s++;
   if (/[A-Z]/.test(p) && /[a-z]/.test(p)) s++;
   if (/\d/.test(p)) s++;
