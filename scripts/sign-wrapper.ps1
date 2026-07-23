@@ -53,17 +53,12 @@ if ($sidecars -contains $name -or $name -like '*.dll' -or $name -like '*.tmp') {
     exit 0
 }
 
-# The app binary is signed in a dedicated step before bundling. If it is already validly signed, skip.
-if ($name -eq 'brisvia-miner.exe') {
-    $sig = Get-AuthenticodeSignature -FilePath $FilePath
-    if ($sig.Status -eq 'Valid') {
-        Write-Host "skip already-signed: $name"
-        exit 0
-    }
-    Write-Host "note: $name is not signed yet; signing it here as a fallback"
-}
-elseif ($name -notlike '*-setup.exe') {
-    # Anything that is neither a sidecar, nor the app binary, nor the NSIS installer is unexpected.
+# Only the app binary (brisvia-miner.exe) and the NSIS installer (*-setup.exe) get signed here; anything
+# else is unexpected. We do NOT call Get-AuthenticodeSignature: in the console-less process Tauri spawns it
+# aborts while loading the ACL type data ("member ... is already present"), which surfaces only as Tauri's
+# opaque "failed to run powershell". The app binary is signed exactly once during the build (nothing to
+# skip), and the dedicated 'Verify Authenticode' step re-checks every signature afterwards in a clean shell.
+if ($name -ne 'brisvia-miner.exe' -and $name -notlike '*-setup.exe') {
     throw "sign-wrapper: refusing to sign unexpected file '$name'. If this is legitimate, add it explicitly."
 }
 
@@ -103,9 +98,9 @@ if ($signExit -ne 0) { throw "sign-wrapper: CodeSignTool failed for '$name' (exi
 $signed = Join-Path $outDir $name
 if (-not (Test-Path $signed)) { throw "sign-wrapper: signed output not found for '$name' in $outDir" }
 
-$sig = Get-AuthenticodeSignature -FilePath $signed
-if ($sig.Status -ne 'Valid') { throw "sign-wrapper: signature is not valid for '$name' (status $($sig.Status))" }
-
+# Trust CodeSignTool's exit code (checked above) — do NOT verify with Get-AuthenticodeSignature here: in
+# Tauri's spawned process it aborts loading the ACL type data. The 'Verify Authenticode' step re-checks
+# every signature afterwards in a clean shell (Status=Valid + Subject = Fernando Del Collado).
 Move-Item -Force -Path $signed -Destination $FilePath
 Remove-Item -Recurse -Force -Path $outDir -ErrorAction SilentlyContinue
 Write-Host "signed OK: $name"
