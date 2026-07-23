@@ -1,0 +1,47 @@
+name: Guard - no automated co-authors
+
+# Hard barrier: reject any commit whose message carries an automated co-author
+# trailer (Claude / Cloud Code / Anthropic / Copilot / other bots). The public
+# repositories are the face of the project; authorship belongs to the project,
+# not to the tools used to write it. This runs on every push and pull request
+# to main and fails the check if a forbidden trailer is found in the new commits.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  no-automated-coauthors:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reject Co-Authored-By from automated identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Determine which commits are NEW in this event; scan only those.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+            HEAD="${{ github.sha }}"
+          fi
+          if [ -z "${BASE:-}" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            RANGE="$HEAD"          # first push / force reset: scan the pushed tip's history head
+          else
+            RANGE="$BASE..$HEAD"
+          fi
+          echo "Scanning commit range: $RANGE"
+          BAD=$(git log --format='%H %B' $RANGE \
+                | grep -iE 'co-authored-by:.*(claude|cloud[ -]?code|anthropic|copilot|\[bot\])' || true)
+          if [ -n "$BAD" ]; then
+            echo "::error::A commit carries a forbidden automated co-author trailer. Remove it (git rebase / amend) before merging."
+            echo "$BAD"
+            exit 1
+          fi
+          echo "OK: no forbidden automated co-author trailers in the new commits."
