@@ -130,8 +130,12 @@ jobs:
           # authorship, so it gets its OWN signature. We reuse the SAME key as the auto-updater — one root of
           # trust the app already carries. Tauri signs with minisign but wraps the signature in an extra
           # base64 layer; we decode it to the standard .minisig that Linux users verify with plain `minisign`.
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends minisign
+          # minisign is NOT in Ubuntu's repos; fetch the official static binary (pinned version).
+          mkdir -p /tmp/msdir
+          curl -sSL https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz | tar xz -C /tmp/msdir
+          MINISIGN=$(find /tmp/msdir -name minisign -type f | head -1)
+          [ -n "$MINISIGN" ] || { echo "FAIL: minisign binary not found in the tarball"; exit 1; }
+          sudo install "$MINISIGN" /usr/local/bin/minisign
           npm ci >/dev/null 2>&1 || npm install >/dev/null 2>&1
           npm run tauri -- signer sign "brisvia-miner-linux-x86_64"
           base64 --decode brisvia-miner-linux-x86_64.sig > brisvia-miner-linux-x86_64.minisig
