@@ -23,6 +23,9 @@ on:
         required: true
         default: "v1.1.0"
 
+permissions:
+  contents: write        # draft releases are only visible to write-level tokens
+
 jobs:
   reproduce:
     runs-on: ubuntu-latest
@@ -35,22 +38,30 @@ jobs:
           set -eux
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            curl ca-certificates file xvfb \
+            curl ca-certificates file xvfb jq \
             libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 \
             gvfs libglib2.0-0 libglib2.0-bin zstd
           # 26.04 renamed the package (the 64-bit time_t transition), so do not query one fixed name.
           echo "host GLib package:"; dpkg -l | grep -E 'libglib2\.0-0' || true
           echo "host GLib soname:"; ls -l /usr/lib/x86_64-linux-gnu/libglib-2.0.so.0* || true
 
-      - name: Download the published AppImage
+      - name: Download the AppImage (authenticated API — resolves draft releases too)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
         run: |
           set -eux
           V="${TAG#v}"
-          curl -fsSL -o app.AppImage \
-            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/Brisvia.Miner_${V}_amd64.AppImage"
+          NAME="Brisvia.Miner_${V}_amd64.AppImage"
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          # A draft release has no public releases/download/<tag>/ URL (that 404s), so resolve the asset id
+          # through the API with the token and pull the bytes with Accept: octet-stream. This works for draft
+          # and published releases alike, so the smoke can run against the sealed candidate before it ships.
+          AID=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "$API/releases/tags/${TAG}" | jq -r --arg N "$NAME" '.assets[] | select(.name==$N) | .id')
+          test -n "$AID" || { echo "asset $NAME not found in release $TAG"; exit 1; }
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" \
+            -o app.AppImage "$API/releases/assets/${AID}"
           chmod +x app.AppImage
           sha256sum app.AppImage
 

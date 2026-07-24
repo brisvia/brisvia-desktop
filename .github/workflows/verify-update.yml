@@ -36,9 +36,11 @@ on:
         required: true
         default: "1.0.9"
       from_win_sha:
-        description: "Known SHA-256 of the published FROM Windows setup.exe"
+        # Fail-closed: no baked-in default. Whoever runs the ceremony must pass the SHA-256 of the exact
+        # published FROM setup.exe, taken from the frozen release-go-v<from>.json manifest, so a stale hash
+        # can never silently pass or fail the base check. For v1.1.0 that is 230b85a2c076...229ab37a.
+        description: "SHA-256 of the published FROM Windows setup.exe (from release-go-v<from>.json)"
         required: true
-        default: "04456725a24cd7ed860d53c2d13f8ccc8108bd9b1b8435baab23d336229ab37a"
 
 permissions:
   contents: write # draft releases are only visible to write-level tokens
