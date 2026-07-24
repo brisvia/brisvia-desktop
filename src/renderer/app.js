@@ -456,6 +456,12 @@ function refreshPowLabel() {
 }
 // Which named preset the slider value maps to (Light/Balanced/High/Max), by nearest range.
 function nearestPreset(pct) { return pct <= 37 ? 25 : pct <= 62 ? 50 : pct <= 87 ? 75 : 100; }
+// The label of the CPU preset currently active in the Mining-tab slider (Light/Balanced/High/Max), already
+// translated. The auto-start summary reuses it so "CPU: …" always mirrors what the slider actually shows.
+function activePresetLabel() {
+  const b = $('.mine-grid .seg-btn.active');
+  return b ? b.textContent.trim() : '';
+}
 function setPower(pct, apply) {
   pct = Math.max(1, Math.min(100, parseInt(pct, 10) || 50));
   const r = $('#pow-range'); if (r) r.value = pct;
@@ -468,7 +474,16 @@ function setPower(pct, apply) {
     window.brisvia.settings.set('defaultIntensity', String(pct)); // remember as the default too
     try { localStorage.setItem('brv_intensity', String(pct)); } catch {} // persist across restarts (audit N7/N8)
     if (mining) suppressPreparingUntil = Date.now() + 6000; // hide the brief "Preparing…" flash during the relaunch
+    // If auto-start is armed, re-capture the chosen CPU so the scheduled launch uses THIS preset, not the one
+    // picked when the toggle was first armed (real bug: summary said Balanced while the slider was on High).
+    if (autoArmed) {
+      autoIntensity = currentIntensity();
+      try { window.brisvia.mining.setAutoStart(true, autoIntensity); } catch {}
+    }
   }
+  // The auto-start summary ("CPU: …") must always mirror the preset shown in the slider, apply or not.
+  const cpuEl = $('#auto-start-cpu');
+  if (cpuEl) cpuEl.textContent = activePresetLabel() || cpuEl.textContent;
 }
 $$('.mine-grid .seg-btn').forEach((b) => b.addEventListener('click', () => setPower(b.dataset.pct, true)));
 {
@@ -843,10 +858,22 @@ async function loadSettings() {
 $('#set-autostart').addEventListener('change', (e) => window.brisvia.settings.set('autostart', e.target.checked));
 $('#set-tray').addEventListener('change', (e) => window.brisvia.settings.set('tray', e.target.checked));
 $$('#set-intensity .seg-btn').forEach((b) => b.addEventListener('click', () => setPower(parseInt(b.dataset.pct, 10), true)));
+// Static text (data-i18n) is re-applied by I18N.setLang. Text PAINTED BY JS (the auto-start summary, the
+// power label, the balances) is NOT, so a live language change would leave it in the old language until the
+// next refresh. Re-render those explicitly. Same class of bug as the CPU-summary one.
+function reRenderForLanguage() {
+  try { refreshPowLabel(); } catch {}
+  // refreshMine and loadWallet are async: a sync try/catch would NOT swallow a rejected promise (locked
+  // wallet, node down, slow backend), so catch on the promise itself. T() always reads the CURRENT
+  // language, so a late-arriving response can never repaint the previous language.
+  refreshMine().catch(() => {});    // mine tab + auto-start summary (#auto-start-cpu / mode / status)
+  loadWallet().catch(() => {});     // balances + movements
+}
 // Language selector
 $$('#set-language .seg-btn').forEach((b) => b.addEventListener('click', () => {
   window.I18N.setLang(b.dataset.lang);
   if (window.brisvia.setLanguage) window.brisvia.setLanguage(b.dataset.lang); // rebuilds the tray menu
+  reRenderForLanguage();
 }));
 // Mining mode selector (solo / grouped). The Brisvia pool is being set up; until it is live, choosing "grouped"
 // reveals the pool row with a "being set up" status and mining keeps running solo. When the pool is live this
@@ -1032,7 +1059,7 @@ function renderAutoStart(s) {
   const modeEl = $('#auto-start-mode');
   if (modeEl) modeEl.textContent = T('settings.mode_' + (currentMiningMode === 'pool' ? 'pool' : 'solo')).toUpperCase();
   const cpuEl = $('#auto-start-cpu');
-  if (cpuEl) cpuEl.textContent = T('autostart.cpu_' + (autoIntensity || 'equilibrado'));
+  if (cpuEl) cpuEl.textContent = activePresetLabel() || T('autostart.cpu_' + (autoIntensity || 'equilibrado'));
   const retry = $('#auto-start-retry'); if (retry) retry.hidden = autoState !== 'failed';
   const cancel = $('#auto-start-cancel'); if (cancel) cancel.hidden = !autoArmed;
 }

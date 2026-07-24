@@ -235,37 +235,87 @@ jobs:
         run: |
           set -euo pipefail
           BUNDLE=src-tauri/target/release/bundle/appimage
-          ORIG=$(ls "$BUNDLE"/*.AppImage | head -1)
+          # Exactly one AppImage must exist, otherwise we could repack the wrong file.
+          shopt -s nullglob
+          APPIMAGES=("$BUNDLE"/*.AppImage)
+          if [ "${#APPIMAGES[@]}" -ne 1 ]; then
+            echo "FAIL: expected exactly one AppImage in $BUNDLE, found ${#APPIMAGES[@]}"; exit 1
+          fi
+          ORIG="$(realpath "${APPIMAGES[0]}")"
           echo "repacking $ORIG"
-          WORK=$(mktemp -d)
-          ( cd "$WORK" && "$OLDPWD/$ORIG" --appimage-extract >/dev/null )
-          echo "::group::removing the bundled GLib family"
-          find "$WORK/squashfs-root" -type f \( -name 'libglib-2.0.so*' -o -name 'libgio-2.0.so*' \
-               -o -name 'libgobject-2.0.so*' -o -name 'libgmodule-2.0.so*' \) -print -delete
+          WORK="$(mktemp -d)"
+          trap 'rm -rf "$WORK"' EXIT
+          ( cd "$WORK" && "$ORIG" --appimage-extract >/dev/null )
+          echo "::group::removing the bundled GLib family (files and symlinks)"
+          find "$WORK/squashfs-root" \( -type f -o -type l \) \( -name 'libglib-2.0.so*' \
+               -o -name 'libgio-2.0.so*' -o -name 'libgobject-2.0.so*' -o -name 'libgmodule-2.0.so*' \) \
+               -print -delete
           echo "::endgroup::"
+          # Pin appimagetool by SHA-256: the `continuous` URL is mutable and must not change the build silently.
+          APPIMAGETOOL_SHA256=a6d71e2b6cd66f8e8d16c37ad164658985e0cf5fcaa950c90a482890cb9d13e0
           curl -fsSL -o "$WORK/appimagetool" \
             https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          echo "${APPIMAGETOOL_SHA256}  ${WORK}/appimagetool" | sha256sum -c - \
+            || { echo "FAIL: appimagetool sha256 mismatch — the pinned tool changed, review before building"; exit 1; }
           chmod +x "$WORK/appimagetool"
-          ( cd "$WORK" && ./appimagetool --appimage-extract >/dev/null && \
-            ARCH=x86_64 ./squashfs-root/AppRun "$WORK/squashfs-root" "$WORK/out.AppImage" >/dev/null )
+          # Extract appimagetool in ITS OWN directory. The old code ran `./appimagetool --appimage-extract`
+          # with cwd=$WORK, where Brisvia's squashfs-root already lived, so appimagetool extracted ON TOP of it
+          # and its AppRun overwrote Brisvia's. The repacked AppImage then ran appimagetool ("SOURCE is
+          # missing") instead of the app. Keeping the tool under $WORK/tool avoids the collision.
+          mkdir "$WORK/tool"
+          ( cd "$WORK/tool" && "$WORK/appimagetool" --appimage-extract >/dev/null )
+          ( cd "$WORK" && ARCH=x86_64 "$WORK/tool/squashfs-root/AppRun" \
+            "$WORK/squashfs-root" "$WORK/out.AppImage" >/dev/null )
           mv -f "$WORK/out.AppImage" "$ORIG"
           chmod +x "$ORIG"
           rm -f "$ORIG.sig"
-          npm run tauri signer sign -- "$(realpath "$ORIG")"
+          npm run tauri signer sign -- "$ORIG"
           test -s "$ORIG.sig" || { echo "FAIL: the repacked AppImage was not signed"; exit 1; }
-          rm -rf "$WORK"
 
       - name: Guard - the AppImage must not carry GLib
         run: |
           set -euo pipefail
           BUNDLE=src-tauri/target/release/bundle/appimage
-          A=$(ls "$BUNDLE"/*.AppImage | head -1)
-          WORK=$(mktemp -d); ( cd "$WORK" && "$OLDPWD/$A" --appimage-extract >/dev/null )
-          HITS=$(find "$WORK/squashfs-root" -type f \( -name 'libglib-2.0.so*' -o -name 'libgio-2.0.so*' \
-                 -o -name 'libgobject-2.0.so*' -o -name 'libgmodule-2.0.so*' \) | wc -l)
-          rm -rf "$WORK"
+          shopt -s nullglob
+          APPIMAGES=("$BUNDLE"/*.AppImage)
+          A="$(realpath "${APPIMAGES[0]}")"
+          WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+          ( cd "$WORK" && "$A" --appimage-extract >/dev/null )
+          HITS=$(find "$WORK/squashfs-root" \( -type f -o -type l \) \( -name 'libglib-2.0.so*' \
+                 -o -name 'libgio-2.0.so*' -o -name 'libgobject-2.0.so*' -o -name 'libgmodule-2.0.so*' \) | wc -l)
           [ "$HITS" -eq 0 ] || { echo "FAIL: the AppImage still bundles $HITS GLib files; it will not start on Ubuntu 24.04+"; exit 1; }
           echo "OK: no bundled GLib — the host's copy will be used"
+
+      # The guard that would have caught the collision bug BEFORE it reached the draft. The previous build
+      # produced an AppImage that ran appimagetool ("SOURCE is missing") and still went green because nothing
+      # opened it. Here we open the EXACT repacked AppImage headless and confirm the app stays alive.
+      - name: Guard - the repacked AppImage actually opens Brisvia (not appimagetool)
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y xvfb >/dev/null 2>&1 || true
+          BUNDLE=src-tauri/target/release/bundle/appimage
+          shopt -s nullglob
+          APPIMAGES=("$BUNDLE"/*.AppImage)
+          ORIG="$(realpath "${APPIMAGES[0]}")"
+          WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+          # Structural: the inner AppRun must be Brisvia's, not appimagetool's.
+          ( cd "$WORK" && "$ORIG" --appimage-extract >/dev/null )
+          test -x "$WORK/squashfs-root/AppRun" || { echo "FAIL: no executable AppRun inside the AppImage"; exit 1; }
+          if grep -aqi 'appimagetool' "$WORK/squashfs-root/AppRun"; then
+            echo "FAIL: the AppImage's AppRun looks like appimagetool, not Brisvia"; exit 1
+          fi
+          # Execution: run it headless and confirm it does not die and is not appimagetool.
+          APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a "$ORIG" > "$WORK/smoke.log" 2>&1 &
+          PID=$!
+          sleep 20
+          if ! kill -0 "$PID" 2>/dev/null; then
+            echo "FAIL: the AppImage died on open"; cat "$WORK/smoke.log"; exit 1
+          fi
+          if grep -aiE 'SOURCE is missing|appimagetool, continuous|error while loading shared libraries|cannot open shared object|undefined symbol' "$WORK/smoke.log"; then
+            echo "FAIL: the AppImage did not start the app cleanly"; cat "$WORK/smoke.log"; exit 1
+          fi
+          kill -TERM "$PID" 2>/dev/null || true
+          echo "OK: the repacked AppImage opens Brisvia and stays alive"
 
       - name: Stage the .AppImage with a fixed (versionless) name for a permanent download link
         # Keeps releases/latest/download/Brisvia-Miner-Linux.AppImage working across every version.

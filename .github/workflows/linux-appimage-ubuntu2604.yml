@@ -24,7 +24,7 @@ on:
         default: "v1.1.0"
 
 jobs:
-  probar:
+  reproduce:
     runs-on: ubuntu-latest
     container:
       image: ubuntu:26.04
@@ -76,26 +76,26 @@ jobs:
       - name: Run both, and see how far each one gets
         run: |
           set -x
-          probar () {
-            DIR="$1"; NOMBRE="$2"
-            echo "::group::$NOMBRE"
+          run_case () {
+            DIR="$1"; NAME="$2"
+            echo "::group::$NAME"
             # 20s is plenty: the failures we are hunting happen during start-up, not later.
-            timeout 20 xvfb-run -a "$DIR/AppRun" > "$NOMBRE.out" 2> "$NOMBRE.err" || true
-            echo "--- stderr ---"; tail -40 "$NOMBRE.err" || true
-            if grep -q "g_task_set_static_name" "$NOMBRE.err"; then
-              echo "RESULT[$NOMBRE]: GLib clash PRESENT"
+            timeout 20 xvfb-run -a "$DIR/AppRun" > "$NAME.out" 2> "$NAME.err" || true
+            echo "--- stderr ---"; tail -40 "$NAME.err" || true
+            if grep -q "g_task_set_static_name" "$NAME.err"; then
+              echo "RESULT[$NAME]: GLib clash PRESENT"
             else
-              echo "RESULT[$NOMBRE]: no GLib clash"
+              echo "RESULT[$NAME]: no GLib clash"
             fi
-            if grep -qi "EGL_BAD_PARAMETER\|Could not create default EGL display" "$NOMBRE.err"; then
-              echo "RESULT[$NOMBRE]: EGL failure PRESENT"
+            if grep -qi "EGL_BAD_PARAMETER\|Could not create default EGL display" "$NAME.err"; then
+              echo "RESULT[$NAME]: EGL failure PRESENT"
             else
-              echo "RESULT[$NOMBRE]: no EGL failure"
+              echo "RESULT[$NAME]: no EGL failure"
             fi
             echo "::endgroup::"
           }
-          probar original as-published
-          probar repacked without-bundled-glib
+          run_case original as-published
+          run_case repacked without-bundled-glib
 
       - name: Verdict
         run: |

@@ -68,7 +68,9 @@ SPANISH_WORDS = r"\b(que|para|porque|cuando|desde|hasta|donde|aunque|entonces|ta
                 r"arbol|compuerta|borrador|paquete|fallo|usuario|carpeta|" \
                 r"cierra|cerrar|devuelve|espera|esperar|mata|matar|falla|fallar|abre|abrir|corre|correr|" \
                 r"lanza|lanzar|guarda|guardar|revisa|revisar|probar|busca|buscar|arma|armar|sigue|seguir|" \
-                r"queda|quedar|pide|pedir|dice|decir|sale|salir|entra|entrar|vuelve|volver|tarda|tardar)\b"
+                r"queda|quedar|pide|pedir|dice|decir|sale|salir|entra|entrar|vuelve|volver|tarda|tardar|" \
+                r"procesos|estado|evidencia|corrida|vivos|diapositiva|pantalla|ventana|mensaje|minado|" \
+                r"saldo|movimiento|semilla|palabra|contrasena|bloque|recompensa|direccion|corte)\b"
 
 # DETECTION DATA -- DO NOT TRANSLATE. Characters that in this repo only appear in Spanish. Accented vowels
 # are included because English technical prose here does not use them.
@@ -198,6 +200,8 @@ def self_test() -> int:
         ("fn si_el_nodo_no_cierra_devuelve_false() {", True),
         ("fn node_still_running_returns_false() {", False),
         ("# la señal nunca se termina", True),
+        # Regression: this exact shape slipped past the checker in harness.js (nouns not on the old list).
+        ("        // procesos vivos + estado del RPC, bajo la carpeta de evidencia", True),
         ("SHA-256 of the downloaded package, not of the local copy", False),
         # Locale text in code is caught. The i18n-es marker does NOT rescue it in an unauthorized file
         # (this temp .py is not the authorized lib.rs), and "Español" is not whitelisted here either.

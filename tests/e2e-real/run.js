@@ -44,6 +44,9 @@ const PLAN = [
   { file: '13-reentry.spec.js', app: harness.APP_E2E, regtest: true },
   // Real money path on regtest: fund the wallet by mining, send to an external address, confirm.
   { file: '14-transaction.spec.js', app: harness.APP_E2E, regtest: true },
+  // Regression guards for the two UI-propagation bugs found and fixed on 2026-07-24.
+  { file: '15-language-dynamic.spec.js', app: harness.APP_E2E, regtest: true },
+  { file: '16-intensity-propagation.spec.js', app: harness.APP_MAINNET_E2E, regtest: true, nowUnix: BEFORE_LAUNCH },
 ];
 
 // Optional filter --only <substr,substr>
