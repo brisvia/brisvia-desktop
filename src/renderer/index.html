@@ -111,6 +111,9 @@
         <button class="hsocial" data-url="https://discord.gg/ZF4MExMJn4" data-name="Discord" aria-label="Discord"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189z"/></svg></button>
         <button class="hsocial" data-url="https://www.reddit.com/r/Brisvia" data-name="Reddit · r/Brisvia" aria-label="Reddit"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M24 11.779c0-1.459-1.192-2.645-2.657-2.645-.715 0-1.363.286-1.84.746-1.81-1.191-4.259-1.949-6.971-2.046l1.483-4.669 4.016.941-.006.058c0 1.193.975 2.163 2.174 2.163 1.198 0 2.172-.97 2.172-2.163s-.974-2.163-2.172-2.163c-.92 0-1.704.574-2.021 1.379l-4.329-1.015c-.189-.046-.381.063-.44.249l-1.654 5.207c-2.758.052-5.245.813-7.075 2.03-.478-.462-1.128-.747-1.844-.747-1.465 0-2.657 1.186-2.657 2.645 0 1.045.61 1.944 1.494 2.377-.037.264-.057.531-.057.799 0 4.06 4.724 7.352 10.552 7.352 5.83 0 10.554-3.292 10.554-7.352 0-.268-.02-.535-.056-.799.884-.433 1.494-1.332 1.494-2.377zm-17.24 2.646c0-.917.746-1.663 1.663-1.663.917 0 1.663.746 1.663 1.663 0 .916-.746 1.662-1.663 1.662-.917 0-1.663-.746-1.663-1.662zm9.457 4.152c-1.157 1.157-3.373 1.244-4.022 1.244-.649 0-2.865-.087-4.022-1.244-.171-.171-.171-.449 0-.619.169-.169.449-.169.619 0 .729.729 2.294.987 3.403.987 1.109 0 2.674-.258 3.403-.987.169-.169.449-.169.619 0 .171.17.171.448 0 .619zm-.516-2.489c-.917 0-1.663-.746-1.663-1.662 0-.917.746-1.663 1.663-1.663.917 0 1.663.746 1.663 1.663 0 .916-.746 1.662-1.663 1.662z"/></svg></button>
       </div>
+      <!-- Live mining indicator: visible from ANY tab (the topbar is sticky). Pulses while mining is on, so the
+           user can tell it is working without opening the Mine tab. Toggled by refreshMine (runs every 1s). -->
+      <div class="mining-ind" id="mining-ind" data-testid="mining-ind" hidden><span class="mining-dot" aria-hidden="true"></span><span data-i18n="mine.mining_live"></span></div>
       <div class="net" data-tip-key="net"><span class="net-dot"></span> <span id="net-label"></span></div>
     </div>
   </header>
@@ -205,6 +208,9 @@
             <div class="seg small-seg" id="mine-mode-seg" role="group" data-i18n-attr="aria-label:mine.mode_active">
               <button class="seg-btn active" data-mode="solo" data-testid="mode-solo" data-i18n="settings.mode_solo"></button>
               <button class="seg-btn" data-mode="pool" data-testid="mode-pool" data-i18n="settings.mode_pool"></button>
+              <!-- Reflects a custom/other pool picked in Settings (owner's call 24-jul). Disabled here: the pool
+                   address is entered in Settings; Mining only shows it as the active mode. -->
+              <button class="seg-btn" data-mode="custom" data-testid="mode-custom" data-i18n="settings.mode_custom" disabled></button>
             </div>
             <p id="mine-mode-soon" class="muted small pool-soon" data-i18n="settings.pool_soon" hidden></p>
             <p id="mine-mode-status" class="mode-confirm small" data-testid="mode-confirm" hidden></p>
@@ -218,12 +224,14 @@
                 <span class="small" data-i18n="autostart.label"></span>
               </label>
               <div id="auto-start-panel" class="auto-start-panel" hidden>
-                <p id="auto-start-status" class="small brand-fg" data-testid="auto-start-status"></p>
-                <div class="auto-start-detail muted small">
+                <!-- Owner's call (24-jul): these three repeat the checkbox + the mode/CPU controls above, so they
+                     are hidden. Kept in the DOM (JS still fills them, e2e still reads them) but never shown. -->
+                <p id="auto-start-status" class="small brand-fg" data-testid="auto-start-status" hidden></p>
+                <div class="auto-start-detail muted small" hidden>
                   <span data-i18n="autostart.detail_mode"></span> <strong id="auto-start-mode" data-testid="auto-start-mode"></strong>
                   · <span data-i18n="autostart.detail_cpu"></span> <strong id="auto-start-cpu" data-testid="auto-start-cpu"></strong>
                 </div>
-                <p class="muted xsmall" data-i18n="autostart.hint"></p>
+                <p class="muted xsmall" data-i18n="autostart.hint" hidden></p>
                 <div class="auto-start-actions">
                   <button id="auto-start-retry" class="btn ghost small" data-testid="auto-start-retry" data-i18n="autostart.retry" hidden></button>
                   <button id="auto-start-cancel" class="btn ghost small" data-testid="auto-start-cancel" data-i18n="autostart.cancel" hidden></button>

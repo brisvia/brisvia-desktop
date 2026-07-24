@@ -2651,9 +2651,9 @@ fn refresh_tooltip(state: &AppState) {
         .clamp(1, 100);
         let threads = state.miner_threads.load(Ordering::SeqCst);
         let cores = state.cores;
-        format!("Brisvia — Mining at {}% · {} of {} cores", pct, threads, cores)
+        format!("Brisvia v{} — Mining at {}% · {} of {} cores", env!("CARGO_PKG_VERSION"), pct, threads, cores)
     } else {
-        "Brisvia".to_string()
+        format!("Brisvia v{}", env!("CARGO_PKG_VERSION"))
     };
     let _ = tray.set_tooltip(Some(&tip));
 }

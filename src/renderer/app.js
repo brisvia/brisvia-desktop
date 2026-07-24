@@ -295,6 +295,8 @@ function fmtDuration(secs) {
 async function refreshMine() {
   const s = await window.brisvia.getStatus();
   mining = s.mining;
+  // Live mining indicator in the topbar (visible from any tab): show it only while mining is on.
+  const miningInd = $('#mining-ind'); if (miningInd) miningInd.hidden = !mining;
   // Single source of truth from the backend: the canonical launch instant and the persisted auto-start choice
   // (re-armed after a restart). We do not overwrite the local armed flag while a start is mid-flight.
   if (typeof s.mainnetStartMs === 'number') backendMainnetMs = s.mainnetStartMs;
@@ -934,8 +936,11 @@ function renderMineMode(s) {
   const poolEnabled = !!(s && s.pool && s.pool.enabled);
   // The mode the backend is REALLY running (normalised: never "pool" while POOL_ENABLED is off).
   const active = (s && (s.mode === 'pool' || s.mode === 'custom')) ? 'pool' : 'solo';
+  // Label shows the REAL active mode, including a custom/other pool (owner's call 24-jul): Mining must read
+  // "OTHER POOL" when the user picked one in Settings, not be flattened to "official pool".
+  const rawMode = (s && s.mode) === 'custom' ? 'custom' : active;
   const activeEl = $('#mine-mode-active');
-  if (activeEl) activeEl.textContent = T('settings.mode_' + active).toUpperCase();
+  if (activeEl) activeEl.textContent = T('settings.mode_' + rawMode).toUpperCase();
   // The per-mode explanation lives in Settings now; the Mining screen stays uncluttered (owner's call).
   const desc = $('#mine-mode-desc');
   if (desc) desc.hidden = true;

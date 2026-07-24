@@ -31,8 +31,13 @@ h1, h2, h3 { margin: 0; }
 .logo.lg { width: 62px; height: 62px; margin: 0 auto 6px; }
 
 /* Topbar + nav */
-.topbar { display: flex; align-items: center; gap: 18px; padding: 12px 22px; border-bottom: 1px solid var(--border); }
+.topbar { display: flex; align-items: center; gap: 18px; padding: 12px 22px; border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 50; background: var(--bg); }
 .brand { display: flex; align-items: center; gap: 10px; }
+/* Live "mining" indicator in the topbar: a pulsing dot + label, shown only while mining is on. */
+.mining-ind { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 700; color: var(--brand); white-space: nowrap; }
+.mining-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--brand); animation: mining-pulse 1.4s ease-out infinite; }
+@keyframes mining-pulse { 0% { box-shadow: 0 0 0 0 rgba(53,191,197,.5); } 70% { box-shadow: 0 0 0 8px rgba(53,191,197,0); } 100% { box-shadow: 0 0 0 0 rgba(53,191,197,0); } }
+@media (prefers-reduced-motion: reduce) { .mining-dot { animation: none; } }
 .brand-name { font-weight: 700; letter-spacing: .01em; }
 .nav { display: flex; gap: 4px; margin-left: 6px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 4px; }
 .nav-btn { font: inherit; font-weight: 600; color: var(--muted); background: transparent; border: 0; border-radius: 9px; padding: 7px 16px; cursor: pointer; transition: all .15s ease; }

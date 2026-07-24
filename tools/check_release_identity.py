@@ -35,7 +35,7 @@ P2P_PORT = "9342"
 # The exact frozen version this release ships the pool ON with. A future pool-enabled release must bump this
 # HERE, in the same commit, with the reason. It is NOT ">=": a future version does not silently inherit the
 # authorisation to enable the pool — that is the whole point of pinning it.
-POOL_RELEASE_VERSION = "1.0.9"
+POOL_RELEASE_VERSION = "1.1.1"
 SEEDS = ["187.77.240.145:9342", "129.80.250.36:9342", "129.159.108.102:9342"]
 
 
