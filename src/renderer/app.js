@@ -1265,10 +1265,16 @@ function showAchievementToast(id) {
 // On startup (and every 6 h) it checks for a newer signed version; if there is one, it shows a pop-up with a button
 // that downloads it, verifies its signature, installs and restarts. It can also be checked manually from Settings.
 let updatePendingVersion = null;
+let updateBusy = false; // single-flight: only ONE update operation (check or install) runs at a time
 // The version actually running, read once from the app itself (app_version). Anything that needs to show
 // the current version reads THIS, never the text on screen.
 let runningVersion = '';
 async function checkForUpdate(manual) {
+  if (updateBusy) return;                 // single-flight: ignore overlapping checks (startup + manual + 6h timer)
+  updateBusy = true;
+  try { await _checkForUpdate(manual); } finally { updateBusy = false; }
+}
+async function _checkForUpdate(manual) {
   const btn = $('#set-update');
   if (manual && btn) { btn.disabled = true; btn.textContent = T('update.checking'); }
   let res = null, errCode = null;
@@ -1281,8 +1287,12 @@ async function checkForUpdate(manual) {
     updatePendingVersion = res.version;
     const cur = runningVersion ? 'v' + runningVersion : '';
     if ($('#upd-ver')) $('#upd-ver').textContent = T('update.version_line', { v: res.version, cur });
-    // Show the release's patch notes if it provided any (plain text; newlines preserved, no HTML injected).
-    { const box = $('#upd-notes-box'), body = $('#upd-notes'); const n = (res.notes || '').trim();
+    // Show the release's patch notes if it provided any. They come from the REMOTE latest.json, so treat them
+    // as untrusted: strip control chars (keep tab/newline), cap the length so oversized notes can't distort
+    // or freeze the modal, and render as PLAIN TEXT (textContent, never HTML).
+    { const box = $('#upd-notes-box'), body = $('#upd-notes');
+      let n = (res.notes || '').split('').filter(c => { const x = c.charCodeAt(0); return x >= 32 || x === 9 || x === 10 || x === 13; }).join('').trim();
+      if (n.length > 1500) n = n.slice(0, 1500) + '…';
       if (box && body) { if (n) { body.textContent = n; box.hidden = false; } else { box.hidden = true; } } }
     let dismissed = null; try { dismissed = localStorage.getItem('brv_update_dismissed'); } catch {}
     // On the automatic check, don't nag again if the user already chose "Later" for THIS version.
@@ -1308,6 +1318,11 @@ function showUpdateError(errCode) {
   openModal('modal-update-error');
 }
 async function installUpdate() {
+  if (updateBusy) return;                 // single-flight: never start a second check/install concurrently
+  updateBusy = true;
+  try { await _installUpdate(); } finally { updateBusy = false; }
+}
+async function _installUpdate() {
   const b = $('#upd-ok');
   if (b) { b.disabled = true; b.textContent = T('update.installing'); }
   // If mining now, remember it so mining resumes automatically after the app restarts with the new version.
