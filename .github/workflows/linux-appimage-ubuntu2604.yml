@@ -1,4 +1,4 @@
-name: Linux - does the AppImage open on Ubuntu 26.04?
+name: Linux - does the AppImage open on Ubuntu 24.04 / 26.04?
 
 # A user on Ubuntu 26.04 (ThinkPad T430, Intel HD 4000, Wayland) reported the AppImage never opening.
 # Two causes were diagnosed by hand and only one of them was ever fixed:
@@ -29,8 +29,13 @@ permissions:
 jobs:
   reproduce:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false               # a failure on one Ubuntu must not cancel the other — we want both verdicts
+      matrix:
+        ubuntu: ["24.04", "26.04"]
+    name: does the AppImage open on Ubuntu ${{ matrix.ubuntu }}
     container:
-      image: ubuntu:26.04
+      image: ubuntu:${{ matrix.ubuntu }}
       options: --privileged        # the AppImage runtime wants FUSE; we extract instead, but keep it permissive
     steps:
       - name: Install what a desktop Ubuntu would already have
