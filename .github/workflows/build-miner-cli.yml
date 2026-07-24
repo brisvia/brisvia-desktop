@@ -130,9 +130,12 @@ jobs:
           # authorship, so it gets its OWN signature. We reuse the SAME key as the auto-updater — one root of
           # trust the app already carries. Tauri signs with minisign but wraps the signature in an extra
           # base64 layer; we decode it to the standard .minisig that Linux users verify with plain `minisign`.
-          # minisign is NOT in Ubuntu's repos; fetch the official static binary (pinned version).
-          mkdir -p /tmp/msdir
-          curl -sSL https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz | tar xz -C /tmp/msdir
+          # minisign is NOT in Ubuntu's repos; fetch the official static binary, pinned by version AND SHA-256.
+          # Fail closed if the download does not match, so a swapped/tampered tool can never sign our releases.
+          MS_SHA=9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73
+          curl -sSL https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz -o /tmp/ms.tar.gz
+          echo "$MS_SHA  /tmp/ms.tar.gz" | sha256sum -c - || { echo "FAIL: minisign tarball SHA-256 mismatch (expected $MS_SHA)"; exit 1; }
+          mkdir -p /tmp/msdir && tar xzf /tmp/ms.tar.gz -C /tmp/msdir
           # The tarball ships several architectures; pick the x86_64 one (the runner is x86_64).
           MINISIGN=$(find /tmp/msdir -type f -name minisign -path "*x86_64*" | head -1)
           [ -n "$MINISIGN" ] || MINISIGN=$(find /tmp/msdir -type f -name minisign | head -1)
