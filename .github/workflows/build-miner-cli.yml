@@ -41,14 +41,14 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Check out the app
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # For a release build pass the exact frozen 1.1.1 SHA so the CLI comes from the same commit as
           # the desktop app, not from the moving branch HEAD. Empty falls back to the branch (for testing).
           ref: ${{ inputs.ref }}
 
       - name: Check out the node (for the RandomX sources)
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: brisvia/brisvia
           # Pin the SAME core commit the desktop builds use (build-windows.yml / build-linux.yml), so the
@@ -152,7 +152,7 @@ jobs:
           echo "OK: the .minisig verifies with the same public key the app already trusts"
 
       - name: Keep the build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: brisvia-miner-linux
           path: |
