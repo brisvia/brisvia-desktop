@@ -629,12 +629,18 @@ fn repair_blocked(datadir: &Path) -> bool {
 /// always replaced. A user can never be silently stranded on an old port. It sets ONLY the RPC port; the P2P
 /// port is the chainparams default (9342 mainnet) and is deliberately never written here, so no stale P2P port
 /// can linger either. `peers.dat` may still hold old-port peers, but the addnode seeds bootstrap recovery.
-fn node_conf(chain: &str, net_lines: &str, rpc_port: u16, seeds: &str) -> String {
+fn node_conf(chain: &str, net_lines: &str, rpc_port: u16, seeds: &str, walletdir: &str) -> String {
     format!(
         // The node connects to the network on its own (dnsseed + fixed seed), accepts inbound if the router
         // allows it (natpmp tries to open the port), and validates everything locally. RPC stays on 127.0.0.1 only.
-        "chain={chain}\nserver=1\n{net_lines}rpcthreads=16\nrpcworkqueue=128\n[{chain}]\nrpcport={port}\nrpcbind=127.0.0.1\nrpcallowip=127.0.0.1\n{seeds}",
+        // walletdir is pinned to one fixed, absolute path (global, before the [chain] section) so Core never
+        // silently changes where it looks for the wallet between versions. See prepare_wallet_layout.
+        // prune=0 is pinned on purpose: a leftover prune setting from any older config must never quietly delete
+        // blocks, which would then make a restore-from-seed rescan impossible. The chain is new; there is nothing
+        // to prune, and we do not offer pruned nodes yet.
+        "chain={chain}\nserver=1\nwalletdir={walletdir}\nprune=0\n{net_lines}rpcthreads=16\nrpcworkqueue=128\n[{chain}]\nrpcport={port}\nrpcbind=127.0.0.1\nrpcallowip=127.0.0.1\n{seeds}",
         chain = chain,
+        walletdir = walletdir,
         net_lines = net_lines,
         port = rpc_port,
         seeds = seeds
@@ -671,7 +677,15 @@ fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
         "listen=1\ndiscover=1\ndnsseed=1\nnatpmp=1\nfallbackfee=0.02\nminrelaytxfee=0.01\nincrementalrelayfee=0.01\ndustrelayfee=0.03\nblockmintxfee=0.01\nmaxmempool=50\nmempoolexpiry=24\npersistmempool=1\n"
     };
     let seeds = if isolated { "" } else { seeds };
-    let conf = node_conf(&chain, net_lines, rpc_port(), seeds);
+    // Pin the wallet directory to one fixed, absolute path so Core never drifts between <chain>/ and
+    // <chain>/wallets across versions (the drift is exactly what orphaned wallets from older builds). Then, while
+    // the node is still stopped, rescue any wallet left in the old location into this directory.
+    let walletdir = state.datadir.join(net_subdir()).join("wallets");
+    std::fs::create_dir_all(&walletdir).map_err(|e| e.to_string())?; // -walletdir must point at an existing dir
+    prepare_wallet_layout(&state.datadir);
+    // bitcoin.conf reads paths with forward slashes on every platform; backslashes would need escaping.
+    let walletdir_str = walletdir.display().to_string().replace('\\', "/");
+    let conf = node_conf(&chain, net_lines, rpc_port(), seeds, &walletdir_str);
     // Write atomically (temp file + rename). The app fully owns this file — it rewrites the whole thing on every
     // start and there are no user-set options to preserve — but a crash MID-WRITE must never leave the node a
     // half-written conf to read. rename() over the target is atomic on the same filesystem (Windows included).
@@ -757,6 +771,12 @@ fn spawn_node(bitcoind: &Path, datadir: &Path, repair_flag: Option<&str>) -> Res
         // still reported "syncing". The first attempt failed exactly there. This has to keep working years
         // from now, so the window is far wider than the gap it must span.
         cmd.arg("-maxtipage=3153600000");
+    } else {
+        // Mainnet: pin the 24 h window explicitly instead of inheriting Core's default. The whole launch design
+        // depends on this exact value (the genesis is stamped at the launch instant so the chain becomes minable
+        // at 15:00 UTC); if a future Core changed DEFAULT_MAX_TIP_AGE, the window must NOT move with it. 86400 s
+        // = the current default, so this changes nothing today and freezes the behaviour for the future.
+        cmd.arg("-maxtipage=86400");
     }
     if let Some(f) = repair_flag {
         cmd.arg(f);
@@ -1126,6 +1146,107 @@ fn wallet_new_address(state: State<AppState>) -> Result<Value, String> {
     *state.receive_addr.lock().unwrap() = a.clone();
     append_address(&state.datadir, &a);
     Ok(json!({ "address": a }))
+}
+
+// ---- wallet directory: keep it stable across versions, and rescue wallets from the old layout ----
+//
+// The bug this solves: the app used to let Bitcoin Core pick the wallet directory. Core's default is
+// <chain>/wallets ONLY once that folder exists; before it exists, Core resolves wallet names against the
+// chain data folder itself. Older builds shipped a Core that did not pre-create <chain>/wallets, so a wallet
+// created back then landed one level up, in <chain>/brisvia. Current Core creates <chain>/wallets on startup,
+// which silently moves the lookup into that subfolder and leaves the old wallet invisible — the person sees an
+// empty wallet after updating. Two things fix it for good: (1) the node is now started with an explicit, fixed
+// -walletdir (see start_node), so the location can never drift again; (2) this migration moves a wallet left in
+// the old location into that fixed directory, once, safely, BEFORE the node starts.
+//
+// Copy-then-promote, never a bare rename: copy the whole wallet folder into a staging directory, verify every
+// byte, promote it into place atomically, and keep the old copy as a dated backup. Nothing is deleted, and a
+// crash mid-copy leaves only an ignorable staging folder. A fresh install has nothing to migrate; a wallet
+// already in the right place is left untouched; and if BOTH locations hold a wallet, we refuse to choose.
+
+// Recursively copy a directory and verify every file byte-for-byte. Used to migrate a wallet without trusting
+// a single copy call with someone's keys.
+fn copy_dir_verified(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_verified(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+            // Read both back and compare: a wallet must arrive identical, not "probably".
+            if std::fs::read(&from)? != std::fs::read(&to)? {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("verify mismatch after copy: {}", to.display()),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+// Move a wallet from the old location into wallets/ safely: stage a verified copy, promote it atomically, and
+// keep the original as a dated backup that this release never deletes.
+fn migrate_legacy_wallet(
+    legacy: &std::path::Path,
+    wallets_dir: &std::path::Path,
+    canonical: &std::path::Path,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(wallets_dir)?;
+    let staging = wallets_dir.join(format!(".brisvia-migrating-{}", ahora_secs()));
+    if staging.exists() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    if let Err(e) = copy_dir_verified(legacy, &staging) {
+        let _ = std::fs::remove_dir_all(&staging); // leave nothing half-copied behind
+        return Err(e);
+    }
+    std::fs::rename(&staging, canonical)?; // atomic promote into the canonical name
+    // Keep the old copy as an explicit, dated backup. Never deleted in this release.
+    let backup = legacy.with_file_name(format!("{}.legacy-backup-{}", WALLET_NAME, ahora_secs()));
+    let _ = std::fs::rename(legacy, &backup);
+    Ok(())
+}
+
+// Decide what to do with whatever wallet layout is on disk, and migrate the old layout if needed. Runs BEFORE
+// the node starts, so no wallet database is open while files move.
+fn prepare_wallet_layout(datadir: &std::path::Path) {
+    let chain_dir = datadir.join(net_subdir());
+    let legacy = chain_dir.join(WALLET_NAME); // <chain>/brisvia  (pre-wallets/ layout)
+    let wallets_dir = chain_dir.join("wallets");
+    let canonical = wallets_dir.join(WALLET_NAME); // <chain>/wallets/brisvia  (fixed layout)
+    let legacy_has = legacy.join("wallet.dat").is_file();
+    let canonical_has = canonical.join("wallet.dat").is_file();
+    match (legacy_has, canonical_has) {
+        (true, false) => {
+            // The real, common case: a wallet from an older build sits in the old location. Bring it in.
+            if let Err(e) = migrate_legacy_wallet(&legacy, &wallets_dir, &canonical) {
+                // Do nothing destructive on failure: the legacy wallet stays untouched, and the encrypted seed
+                // file still blocks creating a fresh wallet over it (refuse_if_wallet_exists). Better an empty
+                // screen the user can report than a silent overwrite.
+                eprintln!(
+                    "wallet migration failed ({} -> {}): {}",
+                    legacy.display(),
+                    canonical.display(),
+                    e
+                );
+            }
+        }
+        (true, true) => {
+            // Both locations hold a wallet.dat. Never choose, overwrite or delete: the one in wallets/ could be
+            // empty while the real funds are in the legacy one. Leave both exactly as they are.
+            eprintln!(
+                "wallet layout conflict: both {} and {} exist; left untouched",
+                legacy.display(),
+                canonical.display()
+            );
+        }
+        // NoWallet, or already in the right place: nothing to migrate.
+        _ => {}
+    }
 }
 
 #[tauri::command]
@@ -1997,11 +2118,18 @@ mod node_conf_tests {
     // and — fed the mainnet RPC port — must never contain Litecoin's 9333/9332.
     #[test]
     fn node_conf_emits_the_given_rpc_port_and_no_p2p_port() {
-        let conf = node_conf("brisvia", "listen=1\n", 9338, "addnode=1.2.3.4\n");
+        let conf = node_conf("brisvia", "listen=1\n", 9338, "addnode=1.2.3.4\n", "/data/brisvia-mainnet/wallets");
         assert!(conf.contains("rpcport=9338"), "must carry the mainnet RPC port: {conf}");
         assert!(!conf.contains("9333"), "must never emit Litecoin's P2P port 9333: {conf}");
         assert!(!conf.contains("9332"), "must never emit Litecoin's RPC port 9332: {conf}");
         assert!(!conf.contains("\nport="), "must not pin a P2P port; the chainparams default (9342) is used: {conf}");
+        // The wallet directory must be pinned, and in the GLOBAL part (before the [brisvia] section) so Core
+        // applies it — a wallet path inside a network section is ignored.
+        assert!(conf.contains("walletdir=/data/brisvia-mainnet/wallets"), "must pin the wallet directory: {conf}");
+        assert!(
+            conf.find("walletdir=").unwrap() < conf.find("[brisvia]").unwrap(),
+            "walletdir must be global, before the [brisvia] section: {conf}"
+        );
     }
 
     // The compiled mainnet RPC port is the new, own port — not Litecoin's 9332.
@@ -2009,6 +2137,86 @@ mod node_conf_tests {
     #[test]
     fn mainnet_rpc_port_is_the_new_own_port() {
         assert_eq!(super::RPC_PORT, 9338);
+    }
+
+    // ---- wallet layout migration (the P0 "wallet not found after update" bug) ----
+    use super::{net_subdir, prepare_wallet_layout, WALLET_NAME};
+
+    fn tmp_datadir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("brisvia-migtest-{}-{}", tag, super::ahora_secs()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write_wallet(dir: &std::path::Path, bytes: &[u8]) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("wallet.dat"), bytes).unwrap();
+    }
+
+    // The real user case: a wallet left in the OLD location (<chain>/brisvia) is moved into the fixed
+    // wallets/ directory, byte-for-byte, and the old copy is kept as a dated backup.
+    #[test]
+    fn migrates_a_legacy_wallet_into_the_fixed_directory_and_keeps_a_backup() {
+        let dd = tmp_datadir("legacy");
+        let chain = dd.join(net_subdir());
+        let legacy = chain.join(WALLET_NAME);
+        write_wallet(&legacy, b"REAL-WALLET-WITH-KEYS");
+
+        prepare_wallet_layout(&dd);
+
+        // moved into wallets/brisvia, identical bytes
+        let canonical = chain.join("wallets").join(WALLET_NAME).join("wallet.dat");
+        assert!(canonical.is_file(), "wallet must land in wallets/brisvia");
+        assert_eq!(std::fs::read(&canonical).unwrap(), b"REAL-WALLET-WITH-KEYS");
+        // the plain old name is gone (renamed to a backup), and a dated backup exists with the same bytes
+        assert!(!legacy.join("wallet.dat").exists(), "old location must be renamed away");
+        let backup = std::fs::read_dir(&chain)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.file_name().to_string_lossy().starts_with(&format!("{}.legacy-backup-", WALLET_NAME)))
+            .expect("a dated legacy backup must be kept");
+        assert_eq!(std::fs::read(backup.path().join("wallet.dat")).unwrap(), b"REAL-WALLET-WITH-KEYS");
+        let _ = std::fs::remove_dir_all(&dd);
+    }
+
+    // A wallet already in the right place must not be touched, and a fresh install (nothing on disk) must not
+    // create anything.
+    #[test]
+    fn leaves_a_canonical_wallet_and_a_fresh_install_untouched() {
+        // already canonical
+        let dd = tmp_datadir("canonical");
+        let canonical = dd.join(net_subdir()).join("wallets").join(WALLET_NAME);
+        write_wallet(&canonical, b"CANON");
+        prepare_wallet_layout(&dd);
+        assert_eq!(std::fs::read(canonical.join("wallet.dat")).unwrap(), b"CANON");
+        assert!(!dd.join(net_subdir()).join(WALLET_NAME).exists(), "must not create an old-location wallet");
+        let _ = std::fs::remove_dir_all(&dd);
+
+        // fresh install: nothing anywhere
+        let dd2 = tmp_datadir("fresh");
+        prepare_wallet_layout(&dd2);
+        assert!(!dd2.join(net_subdir()).join("wallets").join(WALLET_NAME).exists());
+        assert!(!dd2.join(net_subdir()).join(WALLET_NAME).exists());
+        let _ = std::fs::remove_dir_all(&dd2);
+    }
+
+    // The dangerous case: a wallet.dat in BOTH locations. Never choose, overwrite or delete — a wallet in
+    // wallets/ could be empty while the real funds are in the old one. Both must survive untouched.
+    #[test]
+    fn refuses_to_touch_anything_when_both_locations_hold_a_wallet() {
+        let dd = tmp_datadir("conflict");
+        let chain = dd.join(net_subdir());
+        let legacy = chain.join(WALLET_NAME);
+        let canonical = chain.join("wallets").join(WALLET_NAME);
+        write_wallet(&legacy, b"OLD-FUNDS");
+        write_wallet(&canonical, b"NEW-EMPTY");
+
+        prepare_wallet_layout(&dd);
+
+        assert_eq!(std::fs::read(legacy.join("wallet.dat")).unwrap(), b"OLD-FUNDS", "legacy must be untouched");
+        assert_eq!(std::fs::read(canonical.join("wallet.dat")).unwrap(), b"NEW-EMPTY", "canonical must be untouched");
+        let _ = std::fs::remove_dir_all(&dd);
     }
 }
 
@@ -3815,8 +4023,25 @@ pub fn run() {
                     }
                     std::thread::sleep(Duration::from_secs(1));
                 }
+                // Before touching the wallet, make sure the RPC we reached is OUR node, not a stranger that
+                // happened to be on the same port (an old Brisvia, a manually started node, a testnet, a leftover
+                // process after an update). getblockcount answering is not proof of identity; the chain name is.
+                // If it is not ours, do NOT load the wallet into it — leave the app on its "connecting" state
+                // rather than operate against an unknown node.
+                let expected_chain = net_chain();
+                if let Ok(info) = rpc(&datadir, None, "getblockchaininfo", json!([])) {
+                    // Only refuse on a DEFINITE mismatch: the node answered and it is a different chain. A
+                    // transient RPC error here does not block the wallet (getblockcount already proved the node
+                    // is up), so a slow startup never strands the user with an unloadable wallet.
+                    if info["chain"].as_str() != Some(expected_chain.as_str()) {
+                        eprintln!("startup: node on the RPC port is not our '{expected_chain}' chain; wallet not loaded");
+                        return;
+                    }
+                }
                 // Load the "brisvia" wallet ONLY if it already exists (created earlier with 12 words). If it does
                 // not exist, it is NOT created automatically: the UI shows the onboarding to create or import.
+                // Any wallet left in the pre-wallets/ location by an older build was already moved into the fixed
+                // wallet directory by prepare_wallet_layout(), which runs before the node starts (see start_node).
                 let exists = rpc(&datadir, None, "listwalletdir", json!([]))
                     .map(|v| {
                         v["wallets"].as_array().map(|a| a.iter().any(|w| w["name"] == WALLET_NAME)).unwrap_or(false)
