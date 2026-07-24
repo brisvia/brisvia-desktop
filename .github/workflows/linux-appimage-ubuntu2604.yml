@@ -54,11 +54,12 @@ jobs:
           V="${TAG#v}"
           NAME="Brisvia.Miner_${V}_amd64.AppImage"
           API="https://api.github.com/repos/${GITHUB_REPOSITORY}"
-          # A draft release has no public releases/download/<tag>/ URL (that 404s), so resolve the asset id
-          # through the API with the token and pull the bytes with Accept: octet-stream. This works for draft
-          # and published releases alike, so the smoke can run against the sealed candidate before it ships.
+          # A draft release has no public download URL AND is not served by /releases/tags/<tag> (both 404),
+          # so LIST /releases (a push-scoped token sees drafts), filter by tag_name to get the asset id, then
+          # pull the bytes with Accept: octet-stream. Works for draft and published releases alike.
           AID=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-            "$API/releases/tags/${TAG}" | jq -r --arg N "$NAME" '.assets[] | select(.name==$N) | .id')
+            "$API/releases?per_page=100" \
+            | jq -r --arg T "$TAG" --arg N "$NAME" '.[] | select(.tag_name==$T) | .assets[] | select(.name==$N) | .id')
           test -n "$AID" || { echo "asset $NAME not found in release $TAG"; exit 1; }
           curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" \
             -o app.AppImage "$API/releases/assets/${AID}"
