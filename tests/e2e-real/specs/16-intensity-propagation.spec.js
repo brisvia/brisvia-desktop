@@ -28,10 +28,10 @@ describe('Journey 16 — CPU intensity propagates to the auto-start summary', ()
     const toggle = await $('#auto-start-toggle');
     await toggle.waitForDisplayed({ timeout: 15000 });
     if (!(await toggle.isSelected())) await toggle.click();
-    const cpuEl = await $('#auto-start-cpu');
-    await cpuEl.waitForDisplayed({ timeout: 8000 });
+    // #auto-start-cpu is deliberately HIDDEN (the owner hid the repeated detail panel on 24-jul); the JS still
+    // fills it, so read its textContent and never waitForDisplayed it (which would time out on a hidden element).
     await browser.waitUntil(async () => (await cpuText()).trim().length > 0, {
-      timeout: 8000, timeoutMsg: 'the auto-start CPU summary never rendered a value',
+      timeout: 15000, timeoutMsg: 'the auto-start CPU summary never rendered a value',
     });
 
     // Pick a preset whose label differs from what the summary currently shows, click it, and assert the summary
