@@ -144,6 +144,10 @@ struct AppState {
     // "conflict" (two different wallets on disk, nothing touched) or "recovery" (an encrypted seed exists but
     // no wallet.dat). Surfaced by node_status so a conflict/recovery is never a silent empty screen.
     wallet_layout: Arc<Mutex<String>>,
+    // Serializes node startup. start_node runs prepare_wallet_layout, which INSPECTS, COPIES and RENAMES wallet
+    // files; the initial background start racing a user-triggered retry could otherwise run two migrations at
+    // once on the same datadir. This guard is taken before any of that, so only one startup touches wallets.
+    node_start: Arc<Mutex<()>>,
 }
 
 // Real-mining start on the main network: 2026-08-01 15:00:00 UTC (12:00 Argentina). Kept in sync with the
@@ -667,6 +671,10 @@ fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
     if state.datadir_fatal {
         return Err("ERR:DATADIR_UNAVAILABLE".into());
     }
+    // Serialize the whole startup so prepare_wallet_layout (which copies/renames wallet files, below) can never
+    // run concurrently with another start_node -- e.g. the initial background start racing a "Try again" retry.
+    // Held to the end of the function. A poisoned lock means a previous start panicked mid-flight; refuse.
+    let _start_guard = state.node_start.lock().map_err(|_| "ERR:NODE_START_FAILED".to_string())?;
     let bitcoind = find_binary(app, &format!("bitcoind{EXE_SUFFIX}")).ok_or("ERR:NODE_BINARY_MISSING")?;
     std::fs::create_dir_all(&state.datadir).map_err(|e| e.to_string())?;
     // Wide rpcthreads/rpcworkqueue: the miner (getblocktemplate + submitblock) plus the UI polling make several
@@ -4116,6 +4124,7 @@ pub fn run() {
         datadir,
         datadir_fatal,
         wallet_layout: Arc::new(Mutex::new("ok".into())),
+        node_start: Arc::new(Mutex::new(())),
         wallet_loaded: Arc::new(AtomicBool::new(false)),
         sending: Arc::new(Mutex::new(())),
         wallet_ops: Arc::new(Mutex::new(())),

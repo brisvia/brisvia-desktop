@@ -464,16 +464,21 @@ function nearestPreset(pct) { return pct <= 37 ? 25 : pct <= 62 ? 50 : pct <= 87
 // The label of the CPU preset currently active in the Mining-tab slider (Light/Balanced/High/Max), already
 // translated. The auto-start summary reuses it so "CPU: …" always mirrors what the slider actually shows.
 function activePresetLabel() {
-  const b = $('.mine-grid .seg-btn.active');
+  // Only the INTENSITY presets carry data-pct; the mining-mode buttons (Solo/Pool/Custom) share the
+  // .mine-grid .seg-btn class, so this MUST be scoped to [data-pct] or the auto-start summary would show the
+  // mining MODE (e.g. "Solo") instead of the CPU intensity ("High"). Real bug caught by journey 16.
+  const b = $('.mine-grid .seg-btn.active[data-pct]');
   return b ? b.textContent.trim() : '';
 }
 function setPower(pct, apply) {
   pct = Math.max(1, Math.min(100, parseInt(pct, 10) || 50));
   const r = $('#pow-range'); if (r) r.value = pct;
   refreshPowLabel();
-  // Auto-select the nearest named preset in BOTH controls (Mine and Settings) so they stay in sync.
+  // Auto-select the nearest named preset in BOTH controls (Mine and Settings) so they stay in sync. Scope to the
+  // INTENSITY presets ([data-pct]): the mining-mode buttons (Solo/Pool/Custom) also match .mine-grid .seg-btn and
+  // would be wrongly DEACTIVATED on every intensity change (the mode selection would blank out) without the filter.
   const np = nearestPreset(pct);
-  $$('.mine-grid .seg-btn, #set-intensity .seg-btn').forEach((x) => x.classList.toggle('active', parseInt(x.dataset.pct, 10) === np));
+  $$('.mine-grid .seg-btn[data-pct], #set-intensity .seg-btn').forEach((x) => x.classList.toggle('active', parseInt(x.dataset.pct, 10) === np));
   if (apply) {
     window.brisvia.setIntensity(String(pct)); // applies live (backend relaunches the engine)
     window.brisvia.settings.set('defaultIntensity', String(pct)); // remember as the default too

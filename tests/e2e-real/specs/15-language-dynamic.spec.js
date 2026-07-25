@@ -20,6 +20,14 @@ async function setLang(lang) {
   await (await $(`#set-language .seg-btn[data-lang="${lang}"]`)).click();
 }
 
+// Read #pow-val's TEXT CONTENT directly. The language selector lives in Settings, so switching language leaves
+// the Mine tab (and #pow-val) HIDDEN, and wdio's getText() returns '' for a hidden element. reRenderForLanguage
+// repaints textContent synchronously regardless of visibility, so read that — this test is about the repaint,
+// not about which tab is on screen.
+function powText() {
+  return browser.execute(() => (document.querySelector('#pow-val') || {}).textContent || '');
+}
+
 describe('Journey 15 — language repaints dynamic (JS-painted) text', () => {
   it('the power label flips language live, not only the static labels', async () => {
     harness.fromEnv();
@@ -31,7 +39,7 @@ describe('Journey 15 — language repaints dynamic (JS-painted) text', () => {
     await (await $('[data-testid="view-mine"]')).waitForDisplayed({ timeout: 10000 });
     const powVal = await $('#pow-val');
     await powVal.waitForDisplayed({ timeout: 10000 });
-    await browser.waitUntil(async () => /hilos|threads/i.test(await powVal.getText()), {
+    await browser.waitUntil(async () => /hilos|threads/i.test(await powText()), {
       timeout: 20000, timeoutMsg: 'the power label never showed a threads/hilos count (POW_CORES not populated)',
     });
 
@@ -39,13 +47,13 @@ describe('Journey 15 — language repaints dynamic (JS-painted) text', () => {
     // fixes — the 1s tick does not repaint #pow-val on its own, so a failure here is the real regression.
     await setLang('en');
     await browser.waitUntil(async () => {
-      const t = await powVal.getText();
+      const t = await powText();
       return /threads/i.test(t) && !/hilos/i.test(t);
     }, { timeout: 8000, timeoutMsg: 'the JS-painted power label stayed in the old language after switching to English' });
 
     // Switch back to Spanish: the same dynamic label must read "hilos".
     await setLang('es');
-    await browser.waitUntil(async () => /hilos/i.test(await powVal.getText()), {
+    await browser.waitUntil(async () => /hilos/i.test(await powText()), {
       timeout: 8000, timeoutMsg: 'the JS-painted power label did not switch back to Spanish',
     });
   });

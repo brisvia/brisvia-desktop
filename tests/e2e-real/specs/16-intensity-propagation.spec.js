@@ -11,6 +11,11 @@ const harness = require('../helpers/harness');
 
 const PASSWORD = 'brisvia-e2e-1234';
 
+// Read #auto-start-cpu's text content directly (robust to visibility/rendering timing), same reasoning as journey 15.
+function cpuText() {
+  return browser.execute(() => (document.querySelector('#auto-start-cpu') || {}).textContent || '');
+}
+
 describe('Journey 16 — CPU intensity propagates to the auto-start summary', () => {
   it('the summary follows the slider, not the value captured when the toggle was armed', async () => {
     harness.fromEnv();
@@ -25,14 +30,14 @@ describe('Journey 16 — CPU intensity propagates to the auto-start summary', ()
     if (!(await toggle.isSelected())) await toggle.click();
     const cpuEl = await $('#auto-start-cpu');
     await cpuEl.waitForDisplayed({ timeout: 8000 });
-    await browser.waitUntil(async () => (await cpuEl.getText()).trim().length > 0, {
+    await browser.waitUntil(async () => (await cpuText()).trim().length > 0, {
       timeout: 8000, timeoutMsg: 'the auto-start CPU summary never rendered a value',
     });
 
     // Pick a preset whose label differs from what the summary currently shows, click it, and assert the summary
     // FOLLOWS the slider (equals the active preset button's label). Without the fix it stays on the captured value.
     async function pickPresetDifferentFromSummary() {
-      const summary = (await cpuEl.getText()).trim();
+      const summary = (await cpuText()).trim();
       for (const pct of ['25', '50', '75', '100']) {
         const btn = await $(`.mine-grid .seg-btn[data-pct="${pct}"]`);
         if (await btn.isExisting()) {
@@ -45,7 +50,7 @@ describe('Journey 16 — CPU intensity propagates to the auto-start summary', ()
     const chosen = await pickPresetDifferentFromSummary();
     expect(chosen).toBeTruthy();
 
-    await browser.waitUntil(async () => (await cpuEl.getText()).trim() === chosen, {
+    await browser.waitUntil(async () => (await cpuText()).trim() === chosen, {
       timeout: 8000,
       timeoutMsg: `the auto-start summary stayed stale instead of following the slider to "${chosen}"`,
     });
