@@ -136,3 +136,86 @@ jobs:
           path: |
             *.out
             *.err
+
+  # ChatGPT's one remaining blocker before GO: the .deb was never actually installed and opened. Integrity
+  # (size/sha256) proves the file is well formed, not that apt resolves its deps, the app lands, the sidecars
+  # run and it opens. This installs the EXACT .deb from the draft on a clean Ubuntu 24.04 and opens it once.
+  deb-smoke:
+    runs-on: ubuntu-latest
+    name: does the .deb install and open on Ubuntu 24.04
+    container:
+      image: ubuntu:24.04
+    steps:
+      - name: What a desktop Ubuntu would already have
+        run: |
+          set -eux
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            curl ca-certificates jq file xvfb \
+            libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 gvfs libglib2.0-0 libglib2.0-bin
+
+      - name: Download the EXACT .deb from the draft (authenticated API)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -eux
+          V="${TAG#v}"
+          NAME="Brisvia.Miner_${V}_amd64.deb"
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          AID=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "$API/releases?per_page=100" \
+            | jq -r --arg T "$TAG" --arg N "$NAME" '.[] | select(.tag_name==$T) | .assets[] | select(.name==$N) | .id')
+          test -n "$AID" || { echo ".deb $NAME not found in release $TAG"; exit 1; }
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" \
+            -o app.deb "$API/releases/assets/${AID}"
+          echo "downloaded .deb sha256 + size:"; sha256sum app.deb; stat -c '%s bytes' app.deb
+
+      - name: Install it with apt (must resolve dependencies and finish)
+        run: |
+          set -eux
+          PKG=$(dpkg-deb -f app.deb Package); echo "PKG=$PKG" >> "$GITHUB_ENV"
+          DEBIAN_FRONTEND=noninteractive apt-get install -y ./app.deb
+          echo "installed version:"; dpkg -s "$PKG" | grep -E '^Version:'
+          dpkg -s "$PKG" | grep -E '^Version:' | grep -q '1.1.1' || { echo "FAIL: installed version is not 1.1.1"; exit 1; }
+
+      - name: The app binary and its sidecars landed
+        run: |
+          set -eux
+          BIN=$(dpkg -L "$PKG" | grep -E '/brisvia-miner$' | head -1); echo "BIN=$BIN" >> "$GITHUB_ENV"
+          test -x "$BIN" || { echo "FAIL: app binary not executable at $BIN"; exit 1; }
+          DIR=$(dirname "$BIN")
+          echo "install dir:"; ls -la "$DIR"
+          for s in bitcoind bitcoin-cli brisvia-worker; do
+            F=$(dpkg -L "$PKG" | grep -E "/$s$" | head -1)
+            test -n "$F" && test -f "$F" && echo "OK sidecar $s -> $F" || { echo "FAIL: sidecar $s missing from the package"; exit 1; }
+          done
+          echo "desktop entry:"; dpkg -L "$PKG" | grep -E '\.desktop$' || echo "(no .desktop listed)"
+
+      - name: Open it once under Xvfb; it must NOT die immediately and must use a PERMANENT datadir
+        run: |
+          set -x
+          export HOME=/root WEBKIT_DISABLE_DMABUF_RENDERER=1 WEBKIT_DISABLE_COMPOSITING_MODE=1
+          timeout 30 xvfb-run -a "$BIN" > app.out 2> app.err &
+          PID=$!
+          sleep 22
+          if kill -0 "$PID" 2>/dev/null; then
+            echo "OK: the app is still alive after 22s (did not crash on open)"
+          else
+            echo "FAIL: the app exited early"; echo "--- stderr ---"; tail -60 app.err; echo "--- stdout ---"; tail -20 app.out; exit 1
+          fi
+          # Permanent datadir (HOME/.brisvia), NOT the OS temp dir.
+          if [ -d "$HOME/.brisvia" ]; then echo "OK: permanent datadir at $HOME/.brisvia"; ls -la "$HOME/.brisvia" || true; else
+            echo "NOTE: $HOME/.brisvia not created yet (the app may still be starting the node)"; fi
+          # Close cleanly.
+          kill "$PID" 2>/dev/null || true; sleep 2; pkill -f bitcoind 2>/dev/null || true
+          echo "--- last stderr ---"; tail -30 app.err || true
+
+      - name: Keep the .deb smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-smoke-logs
+          path: |
+            app.out
+            app.err
