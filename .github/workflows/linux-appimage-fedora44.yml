@@ -1,0 +1,133 @@
+name: Linux - Fedora 44 AppImage regression (and the fix)
+
+# A user on three Fedora 44 machines updated to 1.1.1 and the AppImage stopped opening:
+#   libpcre2-8.so.0: no version information available (required by /lib64/libglib-2.0.so.0)
+#   libmount.so.1: version `MOUNT_2_40' not found (required by /lib64/libgio-2.0.so.0)
+#
+# Root cause (verified by inspection of the published artifact): the build drops the bundled GLib so the
+# host's newer GLib is used on Ubuntu 24.04+, but it LEFT GLib's own low-level dependencies bundled
+# (libmount, libpcre2, libblkid, libselinux, libffi, libuuid). On Fedora 44 the host GLib/GIO is built
+# against util-linux 2.40 and needs MOUNT_2_40, but the bundled libmount only exports up to MOUNT_2_37,
+# so it fails to load. The bundled libpcre2 likewise lacks the version symbols the host GLib expects.
+#
+# The fix is to extend the excludelist so those GLib dependencies also come from the host, consistently
+# with the host GLib. This workflow proves BOTH the cause and the fix, and that the fix does not regress
+# Ubuntu 24.04/26.04. It downloads the EXACT published AppImage, runs it as-published and repacked with
+# the extended removal, on each distro, and reports which library errors appear.
+#
+# It never publishes anything. Manual trigger only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to test (e.g. v1.1.1)"
+        required: true
+        default: "v1.1.1"
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: "fedora:44"
+            family: fedora
+          - image: "ubuntu:24.04"
+            family: debian
+          - image: "ubuntu:26.04"
+            family: debian
+    name: does the AppImage open on ${{ matrix.image }}
+    container:
+      image: ${{ matrix.image }}
+      options: --privileged
+    steps:
+      - name: Install what a desktop would already have
+        run: |
+          set -eux
+          if [ "${{ matrix.family }}" = "fedora" ]; then
+            dnf install -y --setopt=install_weak_deps=False \
+              glib2 gtk3 mesa-libEGL mesa-libGL xorg-x11-server-Xvfb \
+              util-linux pcre2 fuse-libs findutils file which curl >/dev/null
+            echo "host libs:"; rpm -q glib2 util-linux pcre2 || true
+            echo "host libmount MOUNT_2_40?:"; strings /usr/lib64/libmount.so.1 | grep -E '^MOUNT_2_4' | head -3 || echo "no MOUNT_2_4x"
+          else
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update >/dev/null
+            apt-get install -y --no-install-recommends \
+              curl ca-certificates file findutils xvfb \
+              libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 gvfs \
+              libglib2.0-0 libglib2.0-bin libmount1 libpcre2-8-0 zstd >/dev/null
+            echo "host libmount MOUNT_2_40?:"; strings /usr/lib/x86_64-linux-gnu/libmount.so.1 | grep -E '^MOUNT_2_4' | head -3 || echo "no MOUNT_2_4x"
+          fi
+
+      - name: Download the published AppImage (public release)
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -eux
+          V="${TAG#v}"
+          URL="https://github.com/brisvia/brisvia-desktop/releases/download/${TAG}/Brisvia.Miner_${V}_amd64.AppImage"
+          curl -fsSL -o app.AppImage "$URL"
+          chmod +x app.AppImage
+          echo "sha256:"; sha256sum app.AppImage
+          ./app.AppImage --appimage-extract >/dev/null
+          mv squashfs-root as_published
+          echo "bundled base libs:"; ls -1 as_published/usr/lib | grep -E 'libmount|libpcre2|libblkid|libselinux|libffi|libuuid|libglib|libgio|libgobject' || true
+
+      - name: Make a copy with the EXTENDED removal (GLib + its low-level deps)
+        run: |
+          set -eux
+          cp -a as_published fixed
+          # GLib family (already excluded in the build) + the GLib low-level dependency chain that must
+          # match the host: util-linux (mount/blkid/uuid), pcre2, selinux, ffi.
+          find fixed/usr/lib -type f \( \
+               -name 'libglib-2.0.so*' -o -name 'libgio-2.0.so*' -o -name 'libgobject-2.0.so*' -o -name 'libgmodule-2.0.so*' \
+               -o -name 'libmount.so*' -o -name 'libblkid.so*' -o -name 'libuuid.so*' \
+               -o -name 'libpcre2-8.so*' -o -name 'libpcre.so*' -o -name 'libselinux.so*' -o -name 'libffi.so*' \
+               \) -print -delete
+
+      - name: Run both, capture the startup and any library errors
+        run: |
+          set -x
+          run_case () {
+            DIR="$1"; NAME="$2"
+            echo "::group::$NAME on ${{ matrix.image }}"
+            export HOME=/root WEBKIT_DISABLE_DMABUF_RENDERER=1 WEBKIT_DISABLE_COMPOSITING_MODE=1 APPIMAGE_EXTRACT_AND_RUN=1
+            timeout 30 xvfb-run -a "$DIR/AppRun" > "$NAME.log" 2>&1 || true
+            echo "--- tail ---"; tail -25 "$NAME.log" || true
+            if grep -qiE "MOUNT_2_40. not found|no version information available|version \`MOUNT|cannot open shared object|undefined symbol" "$NAME.log"; then
+              echo "RESULT[$NAME]: LIBRARY MIX ERROR present"
+            else
+              echo "RESULT[$NAME]: no library-mix error"
+            fi
+            echo "::endgroup::"
+          }
+          run_case as_published as-published
+          run_case fixed fixed-extended-removal
+
+      - name: Verdict for ${{ matrix.image }}
+        run: |
+          set -e
+          echo "=============================================="
+          for f in as-published fixed-extended-removal; do
+            if grep -qiE "MOUNT_2_40. not found|no version information available|version \`MOUNT|cannot open shared object|undefined symbol" "$f.log"; then
+              echo "  $f : library-mix error YES"
+            else
+              echo "  $f : library-mix error no"
+            fi
+          done
+          echo "=============================================="
+          echo "Expected: on fedora:44 'as-published' shows the error and 'fixed-extended-removal' does not;"
+          echo "on ubuntu 24.04/26.04 neither shows it (the fix must not regress them)."
+
+      - name: Keep the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fedora44-logs-${{ matrix.family }}-${{ strategy.job-index }}
+          path: "*.log"

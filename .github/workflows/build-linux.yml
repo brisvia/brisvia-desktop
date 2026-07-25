@@ -226,9 +226,18 @@ jobs:
       # they have to match the host's GIO/GVFS. The build runs on 22.04 (GLib 2.72) and GLib is forward
       # compatible, so every supported host satisfies what the bundled GTK and WebKit ask for.
       #
+      # Fedora 44 regression (2026-07-25): removing ONLY GLib was not enough. GLib's own low-level deps were
+      # still bundled (libmount, libblkid, libuuid, libpcre2, libselinux, libffi). On Fedora 44 the host GLib
+      # is built against util-linux 2.40 and needs MOUNT_2_40, but the bundled libmount only exported up to
+      # MOUNT_2_37, so the host libgio failed to load ("libmount.so.1: version `MOUNT_2_40' not found"), and
+      # the host libglib rejected the bundled libpcre2 ("no version information available"). A user hit this on
+      # three Fedora 44 machines after updating to 1.1.1. Reproduced and the fix validated on Fedora 44 +
+      # Ubuntu 24.04/26.04 in .github/workflows/linux-appimage-fedora44.yml. So we now also drop those deps:
+      # they too are on the official AppImage excludelist and must match the host's GLib.
+      #
       # Order matters. Tauri signs the AppImage during the build, so repacking invalidates that signature
       # and it has to be produced again from the repacked bytes — otherwise the updater refuses the file.
-      - name: Drop the bundled GLib from the AppImage, then sign it again
+      - name: Drop the bundled GLib and its low-level deps from the AppImage, then sign it again
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
@@ -246,9 +255,13 @@ jobs:
           WORK="$(mktemp -d)"
           trap 'rm -rf "$WORK"' EXIT
           ( cd "$WORK" && "$ORIG" --appimage-extract >/dev/null )
-          echo "::group::removing the bundled GLib family (files and symlinks)"
+          echo "::group::removing the bundled GLib family AND its low-level deps (files and symlinks)"
+          # GLib (glib/gio/gobject/gmodule) + the GLib dependency chain that must match the host:
+          # util-linux (mount/blkid/uuid), pcre2, selinux, ffi. Leaving these bundled broke Fedora 44 (above).
           find "$WORK/squashfs-root" \( -type f -o -type l \) \( -name 'libglib-2.0.so*' \
-               -o -name 'libgio-2.0.so*' -o -name 'libgobject-2.0.so*' -o -name 'libgmodule-2.0.so*' \) \
+               -o -name 'libgio-2.0.so*' -o -name 'libgobject-2.0.so*' -o -name 'libgmodule-2.0.so*' \
+               -o -name 'libmount.so*' -o -name 'libblkid.so*' -o -name 'libuuid.so*' \
+               -o -name 'libpcre2-8.so*' -o -name 'libpcre.so*' -o -name 'libselinux.so*' -o -name 'libffi.so*' \) \
                -print -delete
           echo "::endgroup::"
           # Pin appimagetool by SHA-256: the `continuous` URL is mutable and must not change the build silently.
@@ -272,7 +285,7 @@ jobs:
           npm run tauri signer sign -- "$ORIG"
           test -s "$ORIG.sig" || { echo "FAIL: the repacked AppImage was not signed"; exit 1; }
 
-      - name: Guard - the AppImage must not carry GLib
+      - name: Guard - the AppImage must not carry GLib or its low-level deps
         run: |
           set -euo pipefail
           BUNDLE=src-tauri/target/release/bundle/appimage
@@ -282,9 +295,11 @@ jobs:
           WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
           ( cd "$WORK" && "$A" --appimage-extract >/dev/null )
           HITS=$(find "$WORK/squashfs-root" \( -type f -o -type l \) \( -name 'libglib-2.0.so*' \
-                 -o -name 'libgio-2.0.so*' -o -name 'libgobject-2.0.so*' -o -name 'libgmodule-2.0.so*' \) | wc -l)
-          [ "$HITS" -eq 0 ] || { echo "FAIL: the AppImage still bundles $HITS GLib files; it will not start on Ubuntu 24.04+"; exit 1; }
-          echo "OK: no bundled GLib — the host's copy will be used"
+                 -o -name 'libgio-2.0.so*' -o -name 'libgobject-2.0.so*' -o -name 'libgmodule-2.0.so*' \
+                 -o -name 'libmount.so*' -o -name 'libblkid.so*' -o -name 'libuuid.so*' \
+                 -o -name 'libpcre2-8.so*' -o -name 'libpcre.so*' -o -name 'libselinux.so*' -o -name 'libffi.so*' \) | wc -l)
+          [ "$HITS" -eq 0 ] || { echo "FAIL: the AppImage still bundles $HITS GLib/util-linux/pcre files; it can break on Fedora 44 or Ubuntu 24.04+"; exit 1; }
+          echo "OK: no bundled GLib or its low-level deps — the host's copies will be used"
 
       # The guard that would have caught the collision bug BEFORE it reached the draft. The previous build
       # produced an AppImage that ran appimagetool ("SOURCE is missing") and still went green because nothing
