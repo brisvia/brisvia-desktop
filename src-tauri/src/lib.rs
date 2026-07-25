@@ -709,6 +709,7 @@ fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
     let conf_tmp = state.datadir.join("bitcoin.conf.new");
     std::fs::write(&conf_tmp, &conf).map_err(|e| e.to_string())?;
     std::fs::rename(&conf_tmp, &conf_path).map_err(|e| e.to_string())?;
+    let _ = std::fs::write(state.datadir.join("node-stderr.log"), b""); // fresh node stderr capture for this start
     // Remember how big the log is BEFORE launching, so we only ever read what THIS attempt writes.
     let mark = log_size(&state.datadir);
     let mut child = spawn_node(&bitcoind, &state.datadir, None)?;
@@ -725,7 +726,15 @@ fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
     // It died on startup. Only this attempt's log decides what happens next.
     let what = classify_failure(&log_since(&state.datadir, mark));
     let flag = match what {
-        Repair::None => return Err("ERR:NODE_START_FAILED".into()), // died for a reason we do not know
+        Repair::None => {
+            // Surface the node's own stderr (a bad config option, an unreadable datadir) so an otherwise
+            // "unknown" death is diagnosable instead of vanishing into a null pipe.
+            let se = std::fs::read_to_string(state.datadir.join("node-stderr.log")).unwrap_or_default();
+            let tail = se.lines().filter(|l| !l.trim().is_empty()).collect::<Vec<_>>();
+            let tail = tail.iter().rev().take(12).rev().cloned().collect::<Vec<_>>().join(" | ");
+            eprintln!("node died on startup (stderr): {tail}");
+            return Err("ERR:NODE_START_FAILED".into()); // died for a reason we do not know
+        }
         Repair::Blocked("disk") => return Err("ERR:NODE_DISK_FULL".into()),
         Repair::Blocked("locked") => return Err("ERR:NODE_ALREADY_RUNNING".into()),
         Repair::Blocked(_) => return Err("ERR:NODE_PERMISSIONS".into()),
@@ -766,13 +775,22 @@ fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
 // Launches bitcoind, optionally with a repair flag.
 fn spawn_node(bitcoind: &Path, datadir: &Path, repair_flag: Option<&str>) -> Result<Child, String> {
     let mut cmd = Command::new(bitcoind);
+    // Capture the node's stderr to a file instead of discarding it. Core writes EARLY config/init errors (bad
+    // option, unreadable datadir) to stderr BEFORE its debug.log exists, so with stderr going to null those
+    // deaths were invisible and classify_failure could only report "unknown". start_node reads this on failure.
+    let stderr = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(datadir.join("node-stderr.log"))
+        .map(Stdio::from)
+        .unwrap_or_else(|_| Stdio::null());
     cmd.arg(format!("-datadir={}", datadir.display()))
         // Ignore any settings.json left in the datadir: Core reads it AFTER bitcoin.conf and it can silently
         // override chain / walletdir / prune / ports. The app fully owns its config (bitcoin.conf rewritten on
         // every start + critical flags on the CLI), so an inherited settings.json must never speak for us.
         .arg("-nosettings")
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(stderr);
     // maxtipage ONLY in an isolated (regtest) run, and it goes on the COMMAND LINE, not in the config file:
     // it is a DEBUG_ONLY option and the node ignores it from bitcoin.conf (which is why the first attempt at
     // this changed nothing and the mining journey stayed red).
