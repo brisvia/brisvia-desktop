@@ -991,6 +991,13 @@ fn node_status(state: State<AppState>) -> Value {
             // The node answered: it is up. Clear any stale startup error so a past failure (from a repair that
             // has since succeeded) does not keep haunting the UI.
             *state.node_error.lock().unwrap() = None;
+            // Wallet-layout problem, decided before the node started. Hand the UI a READY-MADE error code (so it
+            // is never a silent blank wallet), emitted here in Rust so the error-contract guard sees it.
+            let wallet_layout_error = match state.wallet_layout.lock().unwrap().as_str() {
+                "conflict" => Some("ERR:WALLET_CONFLICT"),
+                "recovery" => Some("ERR:WALLET_RECOVERY"),
+                _ => None,
+            };
             json!({
                 "connected": true,
                 "blocks": info["blocks"],
@@ -1001,9 +1008,9 @@ fn node_status(state: State<AppState>) -> Value {
                 "verificationprogress": info["verificationprogress"],
                 "walletReady": state.wallet_loaded.load(Ordering::SeqCst),
                 "walletOnDisk": on_disk,
-                // "ok" | "conflict" (two wallets on disk, none touched) | "recovery" (seed present, wallet gone).
-                // The UI turns conflict/recovery into a clear message instead of a blank wallet.
-                "walletLayout": state.wallet_layout.lock().unwrap().clone()
+                // null | "ERR:WALLET_CONFLICT" (two wallets on disk, none touched) | "ERR:WALLET_RECOVERY"
+                // (seed present, wallet gone). The UI shows it as a clear banner instead of a blank wallet.
+                "walletLayoutError": wallet_layout_error
             })
         }
         // Not connected. If the background start actually FAILED, hand the UI the reason (ERR:NODE_*) so it can

@@ -1506,13 +1506,10 @@ async function pollNet() {
   // Node-startup error (missing binary / disk full / another instance / permissions): show the reason in the
   // user's language instead of an endless "connecting…". node_status only fills nodeError on a REAL start
   // failure, so while the node is merely still spinning up this stays null and no banner appears.
-  // A wallet-layout problem is decided BEFORE the node starts, so here the node is connected. Never leave it
-  // silent (a blank wallet the user cannot explain): "conflict" = two wallets on disk, none touched; "recovery"
-  // = an encrypted seed exists but the wallet is gone (restore it, do not create a new empty one).
-  const layout = st && st.walletLayout;
-  const layoutCode = (connected && layout === 'conflict') ? 'ERR:WALLET_CONFLICT'
-    : (connected && layout === 'recovery') ? 'ERR:WALLET_RECOVERY'
-    : null;
+  // A wallet-layout problem is decided BEFORE the node starts, so here the node is connected. The backend hands
+  // us a ready-made ERR: code (conflict = two wallets on disk, none touched; recovery = a seed exists but the
+  // wallet is gone) so it is never a silent blank wallet the user cannot explain.
+  const layoutCode = connected && st ? (st.walletLayoutError || null) : null;
   updateNodeErrorBanner(!connected ? (st && st.nodeError) : layoutCode);
   const walletReady = !!(st && st.walletReady);
   // Wait mode (real-network build, before launch): the node may still be catching up, but we must NOT show
