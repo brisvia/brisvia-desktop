@@ -99,19 +99,27 @@ jobs:
       image: "${{ matrix.image }}"
       options: --privileged
     steps:
-      - name: Base desktop libs
+      - name: Base desktop libs (a real desktop already has these; a container does not)
         run: |
           set -eux
           if command -v dnf >/dev/null 2>&1; then
             dnf install -y --setopt=install_weak_deps=False glib2 gtk3 mesa-libEGL mesa-libGL \
-              xorg-x11-server-Xvfb util-linux pcre2 fuse-libs findutils file which >/dev/null
+              xorg-x11-server-Xvfb util-linux pcre2 fuse-libs findutils file which procps-ng dbus dbus-daemon >/dev/null
           else
             export DEBIAN_FRONTEND=noninteractive
             apt-get update >/dev/null
-            apt-get install -y --no-install-recommends file findutils xvfb which \
+            apt-get install -y --no-install-recommends file findutils xvfb which procps dbus \
               libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 gvfs \
               libglib2.0-0 libmount1 libpcre2-8-0 >/dev/null
           fi
+          # A container ships without a machine-id; without it the tray (appindicator) can stall on D-Bus at
+          # startup. A real Fedora/Ubuntu desktop always has one. Give the container a stable machine-id so the
+          # test exercises the app's real path (reaching the node), not a missing-desktop-plumbing stall.
+          ID=$( dbus-uuidgen 2>/dev/null || (tr -dc 'a-f0-9' < /dev/urandom | head -c 32) )
+          printf '%s\n' "$ID" | tee /etc/machine-id >/dev/null
+          mkdir -p /var/lib/dbus && printf '%s\n' "$ID" | tee /var/lib/dbus/machine-id >/dev/null
+          command -v pgrep >/dev/null && echo "pgrep present" || { echo "FAIL: pgrep missing"; exit 1; }
+          echo "machine-id: $(cat /etc/machine-id)"
       - name: Get the r2 artifact
         uses: actions/download-artifact@v4
         with:
@@ -131,10 +139,11 @@ jobs:
           rm -rf squashfs-root
           # 2) run it and wait for a REAL init signal, not just 'still alive'
           export HOME=/root WEBKIT_DISABLE_DMABUF_RENDERER=1 WEBKIT_DISABLE_COMPOSITING_MODE=1 APPIMAGE_EXTRACT_AND_RUN=1
-          xvfb-run -a "./$A" > run.log 2>&1 &
+          # dbus-run-session gives the app a real session bus (like a desktop), so the tray init does not stall.
+          dbus-run-session -- xvfb-run -a "./$A" > run.log 2>&1 &
           PID=$!
           ok=0
-          for i in $(seq 1 30); do
+          for i in $(seq 1 45); do
             sleep 2
             kill -0 "$PID" 2>/dev/null || { echo "FAIL: the app exited early on ${{ matrix.image }}"; tail -60 run.log; exit 1; }
             if grep -qiE "MOUNT_2_40|no version information available|cannot open shared object|undefined symbol|version \`MOUNT|SOURCE is missing|appimagetool, continuous" run.log; then
