@@ -1,0 +1,143 @@
+name: Linux AppImage r2 hotfix (Fedora 44) - repack, test, artifact only
+
+# Produces a corrected 1.1.1 Linux AppImage for the Fedora 44 regression WITHOUT rebuilding the app and
+# WITHOUT touching the published release. It takes the EXACT published AppImage, drops the GLib low-level
+# deps that broke Fedora 44 (libmount/libblkid/libuuid/libpcre2/libpcre/libselinux/libffi, on top of the
+# GLib family already removed), repacks, re-signs with the updater key over the NEW bytes, tests it on
+# Fedora 44 + Ubuntu 24.04/26.04, and uploads the result as a workflow artifact for review. It never
+# modifies the release. Manual trigger only.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag whose AppImage to correct"
+        default: "v1.1.1"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  repack:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout (for the tauri signer)
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install frontend deps (tauri cli signer)
+        run: npm install
+      - name: Tools
+        run: sudo apt-get update && sudo apt-get install -y curl file
+      - name: Download the published AppImage
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -eux
+          V="${TAG#v}"
+          curl -fsSL -o orig.AppImage "https://github.com/brisvia/brisvia-desktop/releases/download/${TAG}/Brisvia.Miner_${V}_amd64.AppImage"
+          chmod +x orig.AppImage
+          echo "ORIGINAL sha256:"; sha256sum orig.AppImage
+      - name: Repack without GLib and its low-level deps, then re-sign over the new bytes
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          V="${TAG#v}"
+          WORK="$(mktemp -d)"
+          ( cd "$WORK" && "$GITHUB_WORKSPACE/orig.AppImage" --appimage-extract >/dev/null )
+          echo "::group::removing GLib + its low-level deps"
+          find "$WORK/squashfs-root" \( -type f -o -type l \) \( -name 'libglib-2.0.so*' \
+               -o -name 'libgio-2.0.so*' -o -name 'libgobject-2.0.so*' -o -name 'libgmodule-2.0.so*' \
+               -o -name 'libmount.so*' -o -name 'libblkid.so*' -o -name 'libuuid.so*' \
+               -o -name 'libpcre2-8.so*' -o -name 'libpcre.so*' -o -name 'libselinux.so*' -o -name 'libffi.so*' \) \
+               -print -delete
+          echo "::endgroup::"
+          APPIMAGETOOL_SHA256=a6d71e2b6cd66f8e8d16c37ad164658985e0cf5fcaa950c90a482890cb9d13e0
+          curl -fsSL -o "$WORK/appimagetool" \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          echo "${APPIMAGETOOL_SHA256}  ${WORK}/appimagetool" | sha256sum -c -
+          chmod +x "$WORK/appimagetool"
+          mkdir "$WORK/tool"
+          ( cd "$WORK/tool" && "$WORK/appimagetool" --appimage-extract >/dev/null )
+          OUT="Brisvia.Miner_${V}_amd64-r2.AppImage"
+          ( cd "$WORK" && ARCH=x86_64 "$WORK/tool/squashfs-root/AppRun" \
+            "$WORK/squashfs-root" "$GITHUB_WORKSPACE/$OUT" >/dev/null )
+          chmod +x "$GITHUB_WORKSPACE/$OUT"
+          rm -f "$GITHUB_WORKSPACE/$OUT.sig"
+          npm run tauri signer sign -- "$GITHUB_WORKSPACE/$OUT"
+          test -s "$GITHUB_WORKSPACE/$OUT.sig" || { echo "FAIL: r2 not signed"; exit 1; }
+          echo "CORRECTED r2 sha256:"; sha256sum "$OUT" "$OUT.sig"
+          # Guard: none of the removed families may remain
+          WORK2="$(mktemp -d)"; ( cd "$WORK2" && "$GITHUB_WORKSPACE/$OUT" --appimage-extract >/dev/null )
+          HITS=$(find "$WORK2/squashfs-root" \( -type f -o -type l \) \( -name 'libglib-2.0.so*' -o -name 'libgio-2.0.so*' \
+                 -o -name 'libgobject-2.0.so*' -o -name 'libgmodule-2.0.so*' -o -name 'libmount.so*' -o -name 'libblkid.so*' \
+                 -o -name 'libuuid.so*' -o -name 'libpcre2-8.so*' -o -name 'libpcre.so*' -o -name 'libselinux.so*' -o -name 'libffi.so*' \) | wc -l)
+          [ "$HITS" -eq 0 ] || { echo "FAIL: r2 still bundles $HITS files that must come from the host"; exit 1; }
+          echo "OK: r2 carries none of the host-managed libraries"
+      - name: Upload the r2 artifact (NOT attached to the release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: appimage-r2
+          path: |
+            Brisvia.Miner_*_amd64-r2.AppImage
+            Brisvia.Miner_*_amd64-r2.AppImage.sig
+
+  matrix:
+    needs: repack
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["fedora:44", "ubuntu:24.04", "ubuntu:26.04"]
+    name: r2 opens on ${{ matrix.image }}
+    container:
+      image: "${{ matrix.image }}"
+      options: --privileged
+    steps:
+      - name: Base desktop libs
+        run: |
+          set -eux
+          if command -v dnf >/dev/null 2>&1; then
+            dnf install -y --setopt=install_weak_deps=False glib2 gtk3 mesa-libEGL mesa-libGL \
+              xorg-x11-server-Xvfb util-linux pcre2 fuse-libs findutils file which >/dev/null
+          else
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update >/dev/null
+            apt-get install -y --no-install-recommends file findutils xvfb which \
+              libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 gvfs \
+              libglib2.0-0 libmount1 libpcre2-8-0 >/dev/null
+          fi
+      - name: Get the r2 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: appimage-r2
+      - name: Open the r2 and confirm a real start (no library mix)
+        run: |
+          set -x
+          A=$(ls Brisvia.Miner_*_amd64-r2.AppImage | head -1)
+          chmod +x "$A"
+          export HOME=/root WEBKIT_DISABLE_DMABUF_RENDERER=1 WEBKIT_DISABLE_COMPOSITING_MODE=1 APPIMAGE_EXTRACT_AND_RUN=1
+          timeout 45 xvfb-run -a "./$A" > run.log 2>&1 &
+          PID=$!
+          sleep 32
+          echo "--- tail ---"; tail -30 run.log || true
+          if grep -qiE "MOUNT_2_40|no version information available|cannot open shared object|undefined symbol|version \`MOUNT" run.log; then
+            echo "FAIL: library-mix error on ${{ matrix.image }}"; exit 1
+          fi
+          if ! kill -0 "$PID" 2>/dev/null; then
+            echo "FAIL: the app exited early on ${{ matrix.image }}"; tail -50 run.log; exit 1
+          fi
+          echo "sidecars / datadir:"; pgrep -a bitcoind || echo "(bitcoind not seen yet)"; ls -la "$HOME/.brisvia" 2>/dev/null || echo "(no datadir yet)"
+          kill -TERM "$PID" 2>/dev/null || true; sleep 2; pkill -f bitcoind 2>/dev/null || true
+          echo "OK: r2 opens and stays alive on ${{ matrix.image }} with no library-mix error"
+      - name: keep log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r2-open-${{ strategy.job-index }}
+          path: run.log
