@@ -642,12 +642,16 @@ fn node_conf(chain: &str, net_lines: &str, rpc_port: u16, seeds: &str, walletdir
     format!(
         // The node connects to the network on its own (dnsseed + fixed seed), accepts inbound if the router
         // allows it (natpmp tries to open the port), and validates everything locally. RPC stays on 127.0.0.1 only.
-        // walletdir is pinned to one fixed, absolute path (global, before the [chain] section) so Core never
-        // silently changes where it looks for the wallet between versions. See prepare_wallet_layout.
-        // prune=0 is pinned on purpose: a leftover prune setting from any older config must never quietly delete
-        // blocks, which would then make a restore-from-seed rescan impossible. The chain is new; there is nothing
-        // to prune, and we do not offer pruned nodes yet.
-        "chain={chain}\nserver=1\nwalletdir={walletdir}\nprune=0\n{net_lines}rpcthreads=16\nrpcworkqueue=128\n[{chain}]\nrpcport={port}\nrpcbind=127.0.0.1\nrpcallowip=127.0.0.1\n{seeds}",
+        // walletdir is pinned to one fixed, absolute path so Core never silently changes where it looks for the
+        // wallet between versions (see prepare_wallet_layout). It MUST live INSIDE the [chain] section, not the
+        // global one: Core treats -walletdir as network-specific and refuses to start on a non-default network
+        // (regtest/testnet) when it sits globally ("Config setting for -walletdir only applied on <net> network
+        // when in section"). On the default network (our brisvia mainnet) it is honoured either way, so the
+        // [chain] section is the single placement that works on EVERY network -- including the e2e regtest.
+        // prune=0 is network-agnostic and pinned on purpose: a leftover prune setting from any older config must
+        // never quietly delete blocks, which would then make a restore-from-seed rescan impossible. The chain is
+        // new; there is nothing to prune, and we do not offer pruned nodes yet.
+        "chain={chain}\nserver=1\nprune=0\n{net_lines}rpcthreads=16\nrpcworkqueue=128\n[{chain}]\nwalletdir={walletdir}\nrpcport={port}\nrpcbind=127.0.0.1\nrpcallowip=127.0.0.1\n{seeds}",
         chain = chain,
         walletdir = walletdir,
         net_lines = net_lines,
@@ -2282,12 +2286,13 @@ mod node_conf_tests {
         assert!(!conf.contains("9333"), "must never emit Litecoin's P2P port 9333: {conf}");
         assert!(!conf.contains("9332"), "must never emit Litecoin's RPC port 9332: {conf}");
         assert!(!conf.contains("\nport="), "must not pin a P2P port; the chainparams default (9342) is used: {conf}");
-        // The wallet directory must be pinned, and in the GLOBAL part (before the [brisvia] section) so Core
-        // applies it — a wallet path inside a network section is ignored.
+        // The wallet directory must be pinned, INSIDE the [chain] section. Core treats -walletdir as
+        // network-specific: in the global section it is REJECTED on a non-default network (regtest/testnet, which
+        // killed the e2e node), and it is applied for the active network when it lives in that network's section.
         assert!(conf.contains("walletdir=/data/brisvia-mainnet/wallets"), "must pin the wallet directory: {conf}");
         assert!(
-            conf.find("walletdir=").unwrap() < conf.find("[brisvia]").unwrap(),
-            "walletdir must be global, before the [brisvia] section: {conf}"
+            conf.find("walletdir=").unwrap() > conf.find("[brisvia]").unwrap(),
+            "walletdir must be inside the [brisvia] section: {conf}"
         );
     }
 
