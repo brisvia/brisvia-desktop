@@ -47,6 +47,9 @@ const PLAN = [
   // Regression guards for the two UI-propagation bugs found and fixed on 2026-07-24.
   { file: '15-language-dynamic.spec.js', app: harness.APP_E2E, regtest: true },
   { file: '16-intensity-propagation.spec.js', app: harness.APP_MAINNET_E2E, regtest: true, nowUnix: BEFORE_LAUNCH },
+  // The walletdir bug proven end to end: a wallet left in the OLD location is migrated back and reloaded by a
+  // real node, and it still owns its address (keys survived). Covers what the unit tests cannot (a live node).
+  { file: '17-migrate-legacy.spec.js', app: harness.APP_E2E, regtest: true },
 ];
 
 // Optional filter --only <substr,substr>
