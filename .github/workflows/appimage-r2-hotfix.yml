@@ -116,25 +116,45 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: appimage-r2
-      - name: Open the r2 and confirm a real start (no library mix)
+      - name: Open the r2 and confirm a REAL start (sidecars + node running + clean close)
         run: |
           set -x
           A=$(ls Brisvia.Miner_*_amd64-r2.AppImage | head -1)
           chmod +x "$A"
+          echo "SHA-256 of the exact file under test:"; sha256sum "$A"
+          # 1) the bundle must actually carry the three sidecars
+          ./"$A" --appimage-extract >/dev/null
+          for s in bitcoind bitcoin-cli brisvia-worker; do
+            find squashfs-root -type f -name "$s" | head -1 | grep -q . || { echo "FAIL: sidecar $s missing from the bundle"; exit 1; }
+          done
+          echo "OK: sidecars present in the bundle"
+          rm -rf squashfs-root
+          # 2) run it and wait for a REAL init signal, not just 'still alive'
           export HOME=/root WEBKIT_DISABLE_DMABUF_RENDERER=1 WEBKIT_DISABLE_COMPOSITING_MODE=1 APPIMAGE_EXTRACT_AND_RUN=1
-          timeout 45 xvfb-run -a "./$A" > run.log 2>&1 &
+          xvfb-run -a "./$A" > run.log 2>&1 &
           PID=$!
-          sleep 32
-          echo "--- tail ---"; tail -30 run.log || true
-          if grep -qiE "MOUNT_2_40|no version information available|cannot open shared object|undefined symbol|version \`MOUNT" run.log; then
-            echo "FAIL: library-mix error on ${{ matrix.image }}"; exit 1
+          ok=0
+          for i in $(seq 1 30); do
+            sleep 2
+            kill -0 "$PID" 2>/dev/null || { echo "FAIL: the app exited early on ${{ matrix.image }}"; tail -60 run.log; exit 1; }
+            if grep -qiE "MOUNT_2_40|no version information available|cannot open shared object|undefined symbol|version \`MOUNT|SOURCE is missing|appimagetool, continuous" run.log; then
+              echo "FAIL: library-mix or wrong-binary error on ${{ matrix.image }}"; tail -60 run.log; exit 1
+            fi
+            # real init: the app spawned its bundled node (bitcoind) AND created a permanent datadir
+            if pgrep -f bitcoind >/dev/null 2>&1 && [ -d "$HOME/.brisvia" ]; then ok=1; break; fi
+          done
+          if [ "$ok" != 1 ]; then
+            echo "FAIL: no real init (bitcoind node + permanent datadir) within timeout on ${{ matrix.image }}"
+            echo "datadir:"; ls -la "$HOME/.brisvia" 2>/dev/null || echo "(none)"; echo "procs:"; pgrep -fa bitcoind || true
+            tail -60 run.log; exit 1
           fi
-          if ! kill -0 "$PID" 2>/dev/null; then
-            echo "FAIL: the app exited early on ${{ matrix.image }}"; tail -50 run.log; exit 1
-          fi
-          echo "sidecars / datadir:"; pgrep -a bitcoind || echo "(bitcoind not seen yet)"; ls -la "$HOME/.brisvia" 2>/dev/null || echo "(no datadir yet)"
-          kill -TERM "$PID" 2>/dev/null || true; sleep 2; pkill -f bitcoind 2>/dev/null || true
-          echo "OK: r2 opens and stays alive on ${{ matrix.image }} with no library-mix error"
+          echo "OK: reached a usable start on ${{ matrix.image }} — bitcoind node running + permanent datadir at \$HOME/.brisvia"
+          pgrep -fa bitcoind | head -1; ls -la "$HOME/.brisvia" | head
+          # 3) clean close: stop the app, confirm the node goes away too
+          kill -TERM "$PID" 2>/dev/null || true
+          for i in $(seq 1 12); do sleep 1; pgrep -f bitcoind >/dev/null 2>&1 || break; done
+          if pgrep -f bitcoind >/dev/null 2>&1; then echo "NOTE: node still running after close; forcing"; pkill -f bitcoind || true; fi
+          echo "OK: closed on ${{ matrix.image }}"
       - name: keep log
         if: always()
         uses: actions/upload-artifact@v4
