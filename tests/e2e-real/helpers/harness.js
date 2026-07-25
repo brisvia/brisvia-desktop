@@ -103,8 +103,10 @@ async function waitFor(fn, { timeout = 30000, interval = 300, msg = 'condition' 
   throw new Error(`Timed out waiting for: ${msg} (last value: ${JSON.stringify(last)})`);
 }
 
-// Waits until the node's RPC answers (getblockcount succeeds).
-async function waitRpcUp(datadir, port, timeout = 60000) {
+// Waits until the node's RPC answers (getblockcount succeeds). The default is generous because a COLD CI runner
+// can be slow to launch the app + build the RandomX dataset + start bitcoind on first run; a short timeout there
+// false-fails a healthy boot (the node just had not answered yet), which is exactly what a real user never sees.
+async function waitRpcUp(datadir, port, timeout = 120000) {
   return waitFor(() => rpc(datadir, port, ['getblockcount']).status === 0, {
     timeout, interval: 500, msg: `the node's RPC to be up on :${port}`,
   });

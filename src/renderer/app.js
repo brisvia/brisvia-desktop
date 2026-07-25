@@ -25,6 +25,9 @@ function transError(err) {
       NODE_REPAIR_FAILED: 'errors.node_repair_failed',
       NODE_START_FAILED: 'errors.node_start_failed',
       NODE_BINARY_MISSING: 'errors.node_binary_missing',
+      DATADIR_UNAVAILABLE: 'errors.datadir_unavailable',
+      WALLET_CONFLICT: 'errors.wallet_conflict',
+      WALLET_RECOVERY: 'errors.wallet_recovery',
       INVALID_AMOUNT: 'errors.invalid_amount', SEND_IN_PROGRESS: 'errors.send_in_progress',
       AMOUNT_TOO_SMALL: 'errors.amount_too_small',
       OPERATION_FAILED: 'errors.operation_failed', SEND_STATUS_UNKNOWN: 'errors.send_status_unknown',
@@ -1503,7 +1506,14 @@ async function pollNet() {
   // Node-startup error (missing binary / disk full / another instance / permissions): show the reason in the
   // user's language instead of an endless "connecting…". node_status only fills nodeError on a REAL start
   // failure, so while the node is merely still spinning up this stays null and no banner appears.
-  updateNodeErrorBanner(!connected ? (st && st.nodeError) : null);
+  // A wallet-layout problem is decided BEFORE the node starts, so here the node is connected. Never leave it
+  // silent (a blank wallet the user cannot explain): "conflict" = two wallets on disk, none touched; "recovery"
+  // = an encrypted seed exists but the wallet is gone (restore it, do not create a new empty one).
+  const layout = st && st.walletLayout;
+  const layoutCode = (connected && layout === 'conflict') ? 'ERR:WALLET_CONFLICT'
+    : (connected && layout === 'recovery') ? 'ERR:WALLET_RECOVERY'
+    : null;
+  updateNodeErrorBanner(!connected ? (st && st.nodeError) : layoutCode);
   const walletReady = !!(st && st.walletReady);
   // Wait mode (real-network build, before launch): the node may still be catching up, but we must NOT show
   // "Syncing" — before the launch date the honest state is "waiting for launch", not a sync in progress.

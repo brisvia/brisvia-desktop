@@ -135,6 +135,15 @@ struct AppState {
     // Monotonic start-attempt counter. A slow failing attempt must not clobber a newer one that already
     // succeeded: each attempt captures its number and only writes node_error if it is still the current one.
     node_attempt: Arc<AtomicU64>,
+    // TEMP-fatal: true when there is no permanent per-user data dir (no APPDATA/HOME) and no BRISVIA_DATADIR
+    // override, so the datadir would fall back to the OS temp dir (ephemeral). Writing a wallet or seed there
+    // could lose funds on the next cleanup, so the app refuses to start the node, create a wallet, write the
+    // seed or mine. Read-only after startup, so a plain bool is enough.
+    datadir_fatal: bool,
+    // Result of prepare_wallet_layout on the last node start: "ok" (nothing to do / migrated cleanly),
+    // "conflict" (two different wallets on disk, nothing touched) or "recovery" (an encrypted seed exists but
+    // no wallet.dat). Surfaced by node_status so a conflict/recovery is never a silent empty screen.
+    wallet_layout: Arc<Mutex<String>>,
 }
 
 // Real-mining start on the main network: 2026-08-01 15:00:00 UTC (12:00 Argentina). Kept in sync with the
@@ -648,6 +657,12 @@ fn node_conf(chain: &str, net_lines: &str, rpc_port: u16, seeds: &str, walletdir
 }
 
 fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
+    // TEMP-fatal (same failure family as the walletdir bug: an implicit path deciding where funds live). If the
+    // datadir would sit on ephemeral TEMP storage, refuse to bring up the node -- and therefore any wallet, seed
+    // or mining -- rather than write keys somewhere the OS may wipe.
+    if state.datadir_fatal {
+        return Err("ERR:DATADIR_UNAVAILABLE".into());
+    }
     let bitcoind = find_binary(app, &format!("bitcoind{EXE_SUFFIX}")).ok_or("ERR:NODE_BINARY_MISSING")?;
     std::fs::create_dir_all(&state.datadir).map_err(|e| e.to_string())?;
     // Wide rpcthreads/rpcworkqueue: the miner (getblocktemplate + submitblock) plus the UI polling make several
@@ -682,7 +697,8 @@ fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
     // the node is still stopped, rescue any wallet left in the old location into this directory.
     let walletdir = state.datadir.join(net_subdir()).join("wallets");
     std::fs::create_dir_all(&walletdir).map_err(|e| e.to_string())?; // -walletdir must point at an existing dir
-    prepare_wallet_layout(&state.datadir);
+    let layout = prepare_wallet_layout(&state.datadir);
+    *state.wallet_layout.lock().unwrap() = layout.as_str().to_string();
     // bitcoin.conf reads paths with forward slashes on every platform; backslashes would need escaping.
     let walletdir_str = walletdir.display().to_string().replace('\\', "/");
     let conf = node_conf(&chain, net_lines, rpc_port(), seeds, &walletdir_str);
@@ -751,6 +767,10 @@ fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
 fn spawn_node(bitcoind: &Path, datadir: &Path, repair_flag: Option<&str>) -> Result<Child, String> {
     let mut cmd = Command::new(bitcoind);
     cmd.arg(format!("-datadir={}", datadir.display()))
+        // Ignore any settings.json left in the datadir: Core reads it AFTER bitcoin.conf and it can silently
+        // override chain / walletdir / prune / ports. The app fully owns its config (bitcoin.conf rewritten on
+        // every start + critical flags on the CLI), so an inherited settings.json must never speak for us.
+        .arg("-nosettings")
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     // maxtipage ONLY in an isolated (regtest) run, and it goes on the COMMAND LINE, not in the config file:
@@ -980,7 +1000,10 @@ fn node_status(state: State<AppState>) -> Value {
                 "ibd": info["initialblockdownload"],
                 "verificationprogress": info["verificationprogress"],
                 "walletReady": state.wallet_loaded.load(Ordering::SeqCst),
-                "walletOnDisk": on_disk
+                "walletOnDisk": on_disk,
+                // "ok" | "conflict" (two wallets on disk, none touched) | "recovery" (seed present, wallet gone).
+                // The UI turns conflict/recovery into a clear message instead of a blank wallet.
+                "walletLayout": state.wallet_layout.lock().unwrap().clone()
             })
         }
         // Not connected. If the background start actually FAILED, hand the UI the reason (ERR:NODE_*) so it can
@@ -990,7 +1013,13 @@ fn node_status(state: State<AppState>) -> Value {
             "connected": false,
             "walletReady": false,
             "walletOnDisk": false,
-            "nodeError": state.node_error.lock().unwrap().clone()
+            // TEMP-fatal is known before the background start runs, so surface it here directly rather than
+            // waiting for the start attempt to stash it -- the app can never work from ephemeral storage.
+            "nodeError": if state.datadir_fatal {
+                Some("ERR:DATADIR_UNAVAILABLE".to_string())
+            } else {
+                state.node_error.lock().unwrap().clone()
+            }
         }),
     }
 }
@@ -1183,6 +1212,12 @@ fn copy_dir_verified(src: &std::path::Path, dst: &std::path::Path) -> std::io::R
                     format!("verify mismatch after copy: {}", to.display()),
                 ));
             }
+            // Durability: flush the copied file to disk BEFORE it is promoted, so a power cut right after the
+            // rename cannot leave a promoted-but-empty wallet. The original is kept as a backup regardless, so
+            // this is belt-and-braces, not the only line of defence.
+            if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&to) {
+                let _ = f.sync_all();
+            }
         }
     }
     Ok(())
@@ -1211,41 +1246,135 @@ fn migrate_legacy_wallet(
     Ok(())
 }
 
+// Outcome of prepare_wallet_layout, surfaced to the UI so a conflict/recovery is never a silent empty screen.
+#[derive(Debug, PartialEq, Eq)]
+enum WalletLayout {
+    Ok,       // nothing to do, already canonical, or migrated cleanly
+    Conflict, // two DIFFERENT wallets on disk, an invalid destination, or a linked path: nothing was touched
+    Recovery, // an encrypted seed exists but there is no wallet.dat anywhere -> offer restore, never auto-create
+}
+impl WalletLayout {
+    fn as_str(&self) -> &'static str {
+        match self {
+            WalletLayout::Ok => "ok",
+            WalletLayout::Conflict => "conflict",
+            WalletLayout::Recovery => "recovery",
+        }
+    }
+}
+
+// True if the path itself is a symlink/junction (not following it). A rename is only atomic within one real
+// filesystem, and a link could aim the "migration" at somewhere outside the datadir entirely.
+fn is_symlink(p: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(p).map(|m| m.file_type().is_symlink()).unwrap_or(false)
+}
+
+// True if two wallet folders have byte-identical contents (same relative files, same bytes). Used to tell the
+// tail of an interrupted migration (a promoted copy plus the not-yet-renamed original) apart from two genuinely
+// different wallets. On any read error it returns false: "not proven identical" must never green-light a move.
+fn dirs_identical(a: &std::path::Path, b: &std::path::Path) -> bool {
+    fn collect(
+        root: &std::path::Path,
+        base: &std::path::Path,
+        out: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+    ) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(root)? {
+            let entry = entry?;
+            let path = entry.path();
+            let rel = path.strip_prefix(base).unwrap_or(&path).to_path_buf();
+            if entry.file_type()?.is_dir() {
+                collect(&path, base, out)?;
+            } else {
+                out.insert(rel, std::fs::read(&path)?);
+            }
+        }
+        Ok(())
+    }
+    let mut ma = std::collections::BTreeMap::new();
+    let mut mb = std::collections::BTreeMap::new();
+    if collect(a, a, &mut ma).is_err() || collect(b, b, &mut mb).is_err() {
+        return false;
+    }
+    ma == mb
+}
+
 // Decide what to do with whatever wallet layout is on disk, and migrate the old layout if needed. Runs BEFORE
-// the node starts, so no wallet database is open while files move.
-fn prepare_wallet_layout(datadir: &std::path::Path) {
+// the node starts, so no wallet database is open while files move. Returns a status the UI can surface.
+fn prepare_wallet_layout(datadir: &std::path::Path) -> WalletLayout {
     let chain_dir = datadir.join(net_subdir());
     let legacy = chain_dir.join(WALLET_NAME); // <chain>/brisvia  (pre-wallets/ layout)
     let wallets_dir = chain_dir.join("wallets");
     let canonical = wallets_dir.join(WALLET_NAME); // <chain>/wallets/brisvia  (fixed layout)
+
+    // A linked path on any wallet location breaks the "atomic rename within one filesystem" guarantee and could
+    // point outside the datadir. Do not move anything: treat it as a conflict for the user to resolve.
+    if is_symlink(&chain_dir) || is_symlink(&legacy) || is_symlink(&wallets_dir) || is_symlink(&canonical) {
+        eprintln!("wallet layout: a wallet path is a symlink/junction; not migrating");
+        return WalletLayout::Conflict;
+    }
+
+    // Sweep leftover staging dirs from a crash mid-copy. They are never valid wallets and, sitting inside
+    // walletdir, Core could otherwise try to enumerate them as one.
+    if let Ok(rd) = std::fs::read_dir(&wallets_dir) {
+        for e in rd.flatten() {
+            if e.file_name().to_string_lossy().starts_with(".brisvia-migrating-") {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
+
     let legacy_has = legacy.join("wallet.dat").is_file();
     let canonical_has = canonical.join("wallet.dat").is_file();
     match (legacy_has, canonical_has) {
         (true, false) => {
+            // A canonical FOLDER without a wallet.dat is an invalid/incomplete destination: never migrate into
+            // it (the atomic rename needs the name free) and never delete it. Ask the user to resolve.
+            if canonical.exists() {
+                eprintln!("wallet layout: canonical path exists without wallet.dat; not migrating");
+                return WalletLayout::Conflict;
+            }
             // The real, common case: a wallet from an older build sits in the old location. Bring it in.
-            if let Err(e) = migrate_legacy_wallet(&legacy, &wallets_dir, &canonical) {
-                // Do nothing destructive on failure: the legacy wallet stays untouched, and the encrypted seed
-                // file still blocks creating a fresh wallet over it (refuse_if_wallet_exists). Better an empty
-                // screen the user can report than a silent overwrite.
-                eprintln!(
-                    "wallet migration failed ({} -> {}): {}",
-                    legacy.display(),
-                    canonical.display(),
-                    e
-                );
+            match migrate_legacy_wallet(&legacy, &wallets_dir, &canonical) {
+                Ok(()) => WalletLayout::Ok,
+                Err(e) => {
+                    // Nothing destructive happened: the legacy wallet is intact and the encrypted seed still
+                    // blocks a fresh overwrite (refuse_if_wallet_exists). Surface it so the UI does not show a
+                    // blank wallet the user cannot explain.
+                    eprintln!("wallet migration failed ({} -> {}): {}", legacy.display(), canonical.display(), e);
+                    WalletLayout::Conflict
+                }
             }
         }
         (true, true) => {
-            // Both locations hold a wallet.dat. Never choose, overwrite or delete: the one in wallets/ could be
-            // empty while the real funds are in the legacy one. Leave both exactly as they are.
-            eprintln!(
-                "wallet layout conflict: both {} and {} exist; left untouched",
-                legacy.display(),
-                canonical.display()
-            );
+            // Both hold a wallet.dat. Either a real conflict (two different wallets) OR the tail of a migration
+            // that promoted the copy but died before renaming the original to a backup. If the two are
+            // byte-identical it is the latter: finish the job by moving the legacy copy aside. Otherwise never
+            // choose, overwrite or delete -- the wallets/ one could be empty while the funds are in the legacy one.
+            if dirs_identical(&legacy, &canonical) {
+                let backup = legacy.with_file_name(format!("{}.legacy-backup-{}", WALLET_NAME, ahora_secs()));
+                match std::fs::rename(&legacy, &backup) {
+                    Ok(()) => WalletLayout::Ok, // interrupted migration completed safely
+                    Err(_) => WalletLayout::Conflict,
+                }
+            } else {
+                eprintln!(
+                    "wallet layout conflict: both {} and {} exist and differ; left untouched",
+                    legacy.display(),
+                    canonical.display()
+                );
+                WalletLayout::Conflict
+            }
         }
-        // NoWallet, or already in the right place: nothing to migrate.
-        _ => {}
+        (false, false) => {
+            // No wallet anywhere. If an encrypted seed exists, the wallet was lost/removed but the seed can
+            // restore it: tell the UI to offer recovery instead of silently creating a new empty wallet.
+            if enc_seed_path(datadir).exists() {
+                WalletLayout::Recovery
+            } else {
+                WalletLayout::Ok
+            }
+        }
+        (false, true) => WalletLayout::Ok, // already in the right place
     }
 }
 
@@ -1598,6 +1727,11 @@ fn activate_wallet(state: &AppState, name: &str) {
 // Create a NEW wallet with a 12-word backup. Returns the words (to show once) + fingerprint.
 #[tauri::command]
 fn wallet_create_bip39(state: State<AppState>, name: String, password: String) -> Result<Value, String> {
+    // Defence in depth: never write a seed/keys to ephemeral TEMP storage. The node would not be up in this
+    // state either (start_node refuses), but the seed write is the irreversible step, so it guards itself too.
+    if state.datadir_fatal {
+        return Err("ERR:DATADIR_UNAVAILABLE".into());
+    }
     // Exclusive: the exists-check below and the phrase write must not interleave with another create.
     let _ops = state.wallet_ops.lock().map_err(|_| "ERR:WALLET_EXISTS".to_string())?;
     // Fail closed BEFORE touching Core. Until now the only thing standing between a second create and a
@@ -2140,7 +2274,7 @@ mod node_conf_tests {
     }
 
     // ---- wallet layout migration (the P0 "wallet not found after update" bug) ----
-    use super::{net_subdir, prepare_wallet_layout, WALLET_NAME};
+    use super::{enc_seed_path, net_subdir, prepare_wallet_layout, WalletLayout, WALLET_NAME};
 
     fn tmp_datadir(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("brisvia-migtest-{}-{}", tag, super::ahora_secs()));
@@ -2155,15 +2289,17 @@ mod node_conf_tests {
     }
 
     // The real user case: a wallet left in the OLD location (<chain>/brisvia) is moved into the fixed
-    // wallets/ directory, byte-for-byte, and the old copy is kept as a dated backup.
+    // wallets/ directory, byte-for-byte, and the old copy is kept as a dated backup OUTSIDE wallets/.
     #[test]
     fn migrates_a_legacy_wallet_into_the_fixed_directory_and_keeps_a_backup() {
         let dd = tmp_datadir("legacy");
         let chain = dd.join(net_subdir());
         let legacy = chain.join(WALLET_NAME);
         write_wallet(&legacy, b"REAL-WALLET-WITH-KEYS");
+        // Precondition that reproduces the ACTUAL bug: the wallet is in the chain root, wallets/ does not exist.
+        assert!(!chain.join("wallets").exists(), "precondition: the legacy layout has no wallets/ dir yet");
 
-        prepare_wallet_layout(&dd);
+        assert_eq!(prepare_wallet_layout(&dd), WalletLayout::Ok);
 
         // moved into wallets/brisvia, identical bytes
         let canonical = chain.join("wallets").join(WALLET_NAME).join("wallet.dat");
@@ -2176,7 +2312,15 @@ mod node_conf_tests {
             .filter_map(|e| e.ok())
             .find(|e| e.file_name().to_string_lossy().starts_with(&format!("{}.legacy-backup-", WALLET_NAME)))
             .expect("a dated legacy backup must be kept");
+        // The backup must live in the chain root, NOT inside wallets/, or Core's listwalletdir would enumerate it.
+        assert_eq!(backup.path().parent().unwrap(), chain, "backup must sit outside wallets/");
         assert_eq!(std::fs::read(backup.path().join("wallet.dat")).unwrap(), b"REAL-WALLET-WITH-KEYS");
+        // no leftover staging dir
+        assert!(
+            std::fs::read_dir(chain.join("wallets")).unwrap().filter_map(|e| e.ok())
+                .all(|e| !e.file_name().to_string_lossy().starts_with(".brisvia-migrating-")),
+            "no staging dir must be left behind"
+        );
         let _ = std::fs::remove_dir_all(&dd);
     }
 
@@ -2188,23 +2332,23 @@ mod node_conf_tests {
         let dd = tmp_datadir("canonical");
         let canonical = dd.join(net_subdir()).join("wallets").join(WALLET_NAME);
         write_wallet(&canonical, b"CANON");
-        prepare_wallet_layout(&dd);
+        assert_eq!(prepare_wallet_layout(&dd), WalletLayout::Ok);
         assert_eq!(std::fs::read(canonical.join("wallet.dat")).unwrap(), b"CANON");
         assert!(!dd.join(net_subdir()).join(WALLET_NAME).exists(), "must not create an old-location wallet");
         let _ = std::fs::remove_dir_all(&dd);
 
         // fresh install: nothing anywhere
         let dd2 = tmp_datadir("fresh");
-        prepare_wallet_layout(&dd2);
+        assert_eq!(prepare_wallet_layout(&dd2), WalletLayout::Ok);
         assert!(!dd2.join(net_subdir()).join("wallets").join(WALLET_NAME).exists());
         assert!(!dd2.join(net_subdir()).join(WALLET_NAME).exists());
         let _ = std::fs::remove_dir_all(&dd2);
     }
 
-    // The dangerous case: a wallet.dat in BOTH locations. Never choose, overwrite or delete — a wallet in
-    // wallets/ could be empty while the real funds are in the old one. Both must survive untouched.
+    // The dangerous case: a wallet.dat in BOTH locations with DIFFERENT contents. Never choose, overwrite or
+    // delete — a wallet in wallets/ could be empty while the real funds are in the old one. Both survive.
     #[test]
-    fn refuses_to_touch_anything_when_both_locations_hold_a_wallet() {
+    fn refuses_to_touch_anything_when_both_locations_hold_a_different_wallet() {
         let dd = tmp_datadir("conflict");
         let chain = dd.join(net_subdir());
         let legacy = chain.join(WALLET_NAME);
@@ -2212,10 +2356,76 @@ mod node_conf_tests {
         write_wallet(&legacy, b"OLD-FUNDS");
         write_wallet(&canonical, b"NEW-EMPTY");
 
-        prepare_wallet_layout(&dd);
+        assert_eq!(prepare_wallet_layout(&dd), WalletLayout::Conflict);
 
         assert_eq!(std::fs::read(legacy.join("wallet.dat")).unwrap(), b"OLD-FUNDS", "legacy must be untouched");
         assert_eq!(std::fs::read(canonical.join("wallet.dat")).unwrap(), b"NEW-EMPTY", "canonical must be untouched");
+        let _ = std::fs::remove_dir_all(&dd);
+    }
+
+    // Crash between the two renames: the copy was promoted to wallets/brisvia but the process died before the
+    // legacy folder was renamed to a backup, leaving two BYTE-IDENTICAL copies. On the next start we must NOT
+    // freeze forever as a "conflict"; we recognise the identical pair and finish the job.
+    #[test]
+    fn completes_an_interrupted_migration_when_both_copies_are_identical() {
+        let dd = tmp_datadir("interrupted");
+        let chain = dd.join(net_subdir());
+        let legacy = chain.join(WALLET_NAME);
+        let canonical = chain.join("wallets").join(WALLET_NAME);
+        write_wallet(&legacy, b"SAME-KEYS");
+        write_wallet(&canonical, b"SAME-KEYS");
+
+        assert_eq!(prepare_wallet_layout(&dd), WalletLayout::Ok, "identical pair must complete, not conflict");
+
+        // canonical stays, legacy is moved to a dated backup outside wallets/
+        assert_eq!(std::fs::read(canonical.join("wallet.dat")).unwrap(), b"SAME-KEYS");
+        assert!(!legacy.join("wallet.dat").exists(), "the interrupted legacy copy must be moved aside");
+        let backup = std::fs::read_dir(&chain)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.file_name().to_string_lossy().starts_with(&format!("{}.legacy-backup-", WALLET_NAME)))
+            .expect("the completed migration must leave a dated backup");
+        assert_eq!(std::fs::read(backup.path().join("wallet.dat")).unwrap(), b"SAME-KEYS");
+        let _ = std::fs::remove_dir_all(&dd);
+    }
+
+    // An invalid destination: a canonical FOLDER exists but has no wallet.dat (an interrupted create, an empty
+    // dir, whatever). We must not migrate into it (the atomic rename needs the name free) nor delete it —
+    // classify it as a conflict and leave the legacy wallet exactly where it is.
+    #[test]
+    fn refuses_when_the_canonical_folder_exists_without_a_wallet() {
+        let dd = tmp_datadir("invaliddest");
+        let chain = dd.join(net_subdir());
+        let legacy = chain.join(WALLET_NAME);
+        write_wallet(&legacy, b"LEGACY-FUNDS");
+        std::fs::create_dir_all(chain.join("wallets").join(WALLET_NAME)).unwrap(); // dir exists, no wallet.dat
+
+        assert_eq!(prepare_wallet_layout(&dd), WalletLayout::Conflict);
+        assert_eq!(std::fs::read(legacy.join("wallet.dat")).unwrap(), b"LEGACY-FUNDS", "legacy must be untouched");
+        let _ = std::fs::remove_dir_all(&dd);
+    }
+
+    // A seed exists but there is no wallet.dat anywhere: the wallet was lost/removed. We must report recovery
+    // (so the UI offers restore) and NEVER silently create an empty wallet.
+    #[test]
+    fn reports_recovery_when_a_seed_exists_but_no_wallet() {
+        let dd = tmp_datadir("recovery");
+        std::fs::write(enc_seed_path(&dd), b"\x01encrypted-seed-bytes").unwrap();
+        assert_eq!(prepare_wallet_layout(&dd), WalletLayout::Recovery);
+        // nothing was created
+        assert!(!dd.join(net_subdir()).join("wallets").join(WALLET_NAME).exists());
+        let _ = std::fs::remove_dir_all(&dd);
+    }
+
+    // A leftover staging dir from a crash mid-copy is swept before anything else, so Core never enumerates it.
+    #[test]
+    fn sweeps_a_leftover_staging_dir() {
+        let dd = tmp_datadir("staging");
+        let wallets = dd.join(net_subdir()).join("wallets");
+        let stale = wallets.join(".brisvia-migrating-123");
+        write_wallet(&stale, b"HALF-COPIED");
+        assert_eq!(prepare_wallet_layout(&dd), WalletLayout::Ok);
+        assert!(!stale.exists(), "the leftover staging dir must be swept");
         let _ = std::fs::remove_dir_all(&dd);
     }
 }
@@ -3863,6 +4073,10 @@ pub fn run() {
     let datadir = std::env::var("BRISVIA_DATADIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| dirs_data_dir().join("BrisviaSim"));
+    // TEMP-fatal: an explicit BRISVIA_DATADIR is a deliberate (test/advanced) choice and is trusted. Otherwise,
+    // if there is no permanent per-user data dir, `datadir` above is under the OS temp dir -- flag it so the app
+    // refuses to start the node, create a wallet, write the seed or mine instead of putting keys on TEMP.
+    let datadir_fatal = std::env::var("BRISVIA_DATADIR").is_err() && permanent_data_dir().is_none();
     let total_secs_initial = load_total_mined(&datadir);
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
 
@@ -3870,6 +4084,8 @@ pub fn run() {
     let state = AppState {
         child: Arc::new(Mutex::new(None)),
         datadir,
+        datadir_fatal,
+        wallet_layout: Arc::new(Mutex::new("ok".into())),
         wallet_loaded: Arc::new(AtomicBool::new(false)),
         sending: Arc::new(Mutex::new(())),
         wallet_ops: Arc::new(Mutex::new(())),
@@ -4140,21 +4356,24 @@ fn docs_dir() -> PathBuf {
     dirs_data_dir()
 }
 
-// User data directory, cross-platform with no extra dependencies.
-fn dirs_data_dir() -> PathBuf {
+// The OS's PERMANENT per-user data dir, or None if the platform's expected variable is missing/empty. When this
+// is None, the only fallback would be TEMP (ephemeral) -- run() treats that as fatal instead of writing keys there.
+fn permanent_data_dir() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            return PathBuf::from(appdata).join("Brisvia");
-        }
+        return std::env::var("APPDATA").ok().filter(|p| !p.is_empty()).map(|p| PathBuf::from(p).join("Brisvia"));
     }
     #[cfg(not(target_os = "windows"))]
     {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(".brisvia");
-        }
+        return std::env::var("HOME").ok().filter(|p| !p.is_empty()).map(|p| PathBuf::from(p).join(".brisvia"));
     }
-    std::env::temp_dir().join("Brisvia")
+}
+
+// User data directory, cross-platform with no extra dependencies. Falls back to TEMP only as a last resort;
+// run() detects that fallback (via permanent_data_dir) and marks the app datadir_fatal rather than writing keys
+// to ephemeral storage. Non-critical callers (e.g. docs_dir) tolerate the TEMP fallback.
+fn dirs_data_dir() -> PathBuf {
+    permanent_data_dir().unwrap_or_else(|| std::env::temp_dir().join("Brisvia"))
 }
 
 // Error messages that reach the user must be translated codes, never Core's raw English.

@@ -43,7 +43,7 @@ exports.config = {
         autoDownloadEdgeDriver: true, // downloads the msedgedriver matching the machine's WebView2
         captureBackendLogs: true, // Rust backend logs in the report
         captureFrontendLogs: true, // frontend console.* in the report
-        startTimeout: 60000, // the app starts the node in the background; give it room
+        startTimeout: 150000, // the app starts the node in the background; a cold CI runner needs real room
       },
     ],
   ],
