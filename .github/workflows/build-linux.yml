@@ -246,9 +246,17 @@ jobs:
           WORK="$(mktemp -d)"
           trap 'rm -rf "$WORK"' EXIT
           ( cd "$WORK" && "$ORIG" --appimage-extract >/dev/null )
-          echo "::group::removing the bundled GLib family (files and symlinks)"
+          # Extended removal: drop GLib AND its low-level dependency closure (util-linux + PCRE + SELinux + ffi).
+          # On Fedora 44 the host GLib/GIO needs the MOUNT_2_40 symbol but a bundled libmount only exports up to
+          # MOUNT_2_37, so the app fails to load; the same version mismatch bites bundled libpcre2. Rule: if
+          # GLib/GIO comes from the host, its base dependency closure must come from the host too -- never mix a
+          # new host GLib with an old bundled libmount / PCRE / libffi / libselinux. Validated across Ubuntu
+          # 22.04/24.04/26.04, Debian 12 and Fedora 44 (see linux-appimage-fedora44 reproduction + matrix).
+          echo "::group::removing the bundled GLib family + its low-level deps (files and symlinks)"
           find "$WORK/squashfs-root" \( -type f -o -type l \) \( -name 'libglib-2.0.so*' \
-               -o -name 'libgio-2.0.so*' -o -name 'libgobject-2.0.so*' -o -name 'libgmodule-2.0.so*' \) \
+               -o -name 'libgio-2.0.so*' -o -name 'libgobject-2.0.so*' -o -name 'libgmodule-2.0.so*' \
+               -o -name 'libmount.so*' -o -name 'libblkid.so*' -o -name 'libuuid.so*' \
+               -o -name 'libpcre2-8.so*' -o -name 'libpcre.so*' -o -name 'libselinux.so*' -o -name 'libffi.so*' \) \
                -print -delete
           echo "::endgroup::"
           # Pin appimagetool by SHA-256: the `continuous` URL is mutable and must not change the build silently.
@@ -272,7 +280,7 @@ jobs:
           npm run tauri signer sign -- "$ORIG"
           test -s "$ORIG.sig" || { echo "FAIL: the repacked AppImage was not signed"; exit 1; }
 
-      - name: Guard - the AppImage must not carry GLib
+      - name: Guard - the AppImage must not carry GLib or its low-level deps
         run: |
           set -euo pipefail
           BUNDLE=src-tauri/target/release/bundle/appimage
@@ -281,10 +289,14 @@ jobs:
           A="$(realpath "${APPIMAGES[0]}")"
           WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
           ( cd "$WORK" && "$A" --appimage-extract >/dev/null )
+          # Recursive: fail if ANY excluded library (or a versioned symlink) reappears anywhere in the AppDir.
+          # linuxdeploy/tauri can re-copy these on a later build; this must FAIL, not warn.
           HITS=$(find "$WORK/squashfs-root" \( -type f -o -type l \) \( -name 'libglib-2.0.so*' \
-                 -o -name 'libgio-2.0.so*' -o -name 'libgobject-2.0.so*' -o -name 'libgmodule-2.0.so*' \) | wc -l)
-          [ "$HITS" -eq 0 ] || { echo "FAIL: the AppImage still bundles $HITS GLib files; it will not start on Ubuntu 24.04+"; exit 1; }
-          echo "OK: no bundled GLib — the host's copy will be used"
+                 -o -name 'libgio-2.0.so*' -o -name 'libgobject-2.0.so*' -o -name 'libgmodule-2.0.so*' \
+                 -o -name 'libmount.so*' -o -name 'libblkid.so*' -o -name 'libuuid.so*' \
+                 -o -name 'libpcre2-8.so*' -o -name 'libpcre.so*' -o -name 'libselinux.so*' -o -name 'libffi.so*' \) | wc -l)
+          [ "$HITS" -eq 0 ] || { echo "FAIL: the AppImage still bundles $HITS GLib/low-level files; it will not start on Ubuntu 24.04+/Fedora 44"; exit 1; }
+          echo "OK: no bundled GLib or low-level deps — the host's copies will be used"
 
       # The guard that would have caught the collision bug BEFORE it reached the draft. The previous build
       # produced an AppImage that ran appimagetool ("SOURCE is missing") and still went green because nothing
