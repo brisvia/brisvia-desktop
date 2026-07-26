@@ -1,0 +1,119 @@
+name: Validate Linux matrix (does the AppImage open on every target distro?)
+
+# Runs the EXACT AppImage from a (draft) release inside a real container for every distro we claim to
+# support, and FAILS if it hits a fatal library error on start-up. This is the gate for the "extended
+# removal" change (dropping GLib + its low-level deps so the host provides a coherent set): it must fix
+# Fedora 44 (host GLib needs MOUNT_2_40) WITHOUT breaking the 22.04 / Debian 12 floor.
+#
+# Scope: it proves the AppImage LOADS its shared libraries and starts on each distro (the failure mode we
+# are hunting happens at load time, before the window). The full node+wallet journey is covered by the
+# Windows E2E and the 1.1.1->1.1.2 migration test; a real desktop / VM pass on Fedora is still recommended
+# on top of this. Never publishes anything. Manual trigger only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Draft tag to validate (e.g. v1.1.2)"
+        required: true
+        default: "v1.1.2"
+
+permissions:
+  contents: write # draft releases are only visible to write-level tokens
+
+jobs:
+  opens:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false # we want the verdict on EVERY distro, not just the first failure
+      matrix:
+        distro:
+          - "ubuntu:22.04"   # the declared floor
+          - "debian:12"      # the declared floor (Debian)
+          - "ubuntu:24.04"
+          - "ubuntu:26.04"
+          - "fedora:44"      # the one the extended removal must fix
+    name: opens on ${{ matrix.distro }}
+    container:
+      image: ${{ matrix.distro }}
+      options: --privileged # the AppImage runtime wants FUSE; we extract-and-run, but keep it permissive
+    steps:
+      - name: Install what a normal desktop of this distro already ships
+        run: |
+          set -eux
+          if command -v apt-get >/dev/null 2>&1; then
+            apt-get update
+            # A desktop install already has these. We install the runtime GLib/GTK/WebKit stack AND the
+            # low-level libraries the AppImage now expects FROM THE HOST (util-linux, PCRE2, SELinux, ffi),
+            # exactly what a real desktop provides. If a name differs across releases, the build still
+            # proceeds (|| true) and the run step surfaces any missing library concretely.
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              curl ca-certificates file xvfb jq \
+              libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 gvfs \
+              libglib2.0-0 libglib2.0-bin \
+              libmount1 libblkid1 libuuid1 libpcre2-8-0 libselinux1 libffi8 zstd || true
+          else
+            # Fedora
+            dnf -y install \
+              curl ca-certificates file xorg-x11-server-Xvfb jq \
+              webkit2gtk4.1 gtk3 libappindicator-gtk3 gvfs \
+              glib2 libmount libblkid libuuid pcre2 libselinux libffi zstd || true
+          fi
+          echo "host libmount symbols (want MOUNT_2_40 on new distros):"
+          strings /usr/lib*/libmount.so.1 2>/dev/null | grep -E '^MOUNT_2_4' | head -3 || \
+          strings /usr/lib/*/libmount.so.1 2>/dev/null | grep -E '^MOUNT_2_4' | head -3 || echo "no MOUNT_2_4x on host (old floor: expected)"
+
+      - name: Download the AppImage from the (draft) release — authenticated
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -eux
+          V="${TAG#v}"
+          NAME="Brisvia.Miner_${V}_amd64.AppImage"
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          # A draft release is not served by /releases/tags/<tag>; LIST /releases (a write-scoped token sees
+          # drafts), filter by tag_name for the asset id, then pull the bytes as octet-stream.
+          AID=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "$API/releases?per_page=100" \
+            | jq -r --arg T "$TAG" --arg N "$NAME" '.[] | select(.tag_name==$T) | .assets[] | select(.name==$N) | .id')
+          test -n "$AID" || { echo "asset $NAME not found in release $TAG"; exit 1; }
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" \
+            -o app.AppImage "$API/releases/assets/${AID}"
+          chmod +x app.AppImage
+          echo "downloaded:"; sha256sum app.AppImage
+
+      - name: Guard - the AppImage carries NO GLib or low-level deps
+        run: |
+          set -eux
+          ./app.AppImage --appimage-extract >/dev/null
+          HITS=$(find squashfs-root \( -type f -o -type l \) \( -name 'libglib-2.0.so*' \
+                 -o -name 'libgio-2.0.so*' -o -name 'libgobject-2.0.so*' -o -name 'libgmodule-2.0.so*' \
+                 -o -name 'libmount.so*' -o -name 'libblkid.so*' -o -name 'libuuid.so*' \
+                 -o -name 'libpcre2-8.so*' -o -name 'libpcre.so*' -o -name 'libselinux.so*' -o -name 'libffi.so*' \) | wc -l)
+          [ "$HITS" -eq 0 ] || { echo "FAIL: the AppImage still bundles $HITS excluded libraries"; exit 1; }
+          echo "OK: AppImage carries none of the excluded libraries — the host provides them"
+
+      - name: Run it headless and FAIL on any fatal library error
+        run: |
+          set -x
+          # Extract-and-run so we do not need FUSE inside the container. 30s is plenty: the errors we hunt
+          # (missing symbol / version not found) fire at load time, before the window would appear.
+          timeout 30 xvfb-run -a ./squashfs-root/AppRun > out.log 2> err.log || true
+          echo "--- stdout (tail) ---"; tail -30 out.log || true
+          echo "--- stderr (tail) ---"; tail -60 err.log || true
+          # Any of these means the AppImage could not load its libraries on this distro -> hard fail.
+          if grep -qiE "version \`?MOUNT_2_4[0-9]'? not found|symbol lookup error|undefined symbol|cannot open shared object|error while loading shared libraries|g_task_set_static_name" err.log; then
+            echo "FAIL: fatal library error on ${{ matrix.distro }} — see stderr above"
+            exit 1
+          fi
+          echo "OK: the AppImage loaded its libraries and started on ${{ matrix.distro }} without a fatal library error"
+
+      - name: Keep the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-matrix-${{ strategy.job-index }}
+          path: |
+            *.out
+            *.log
