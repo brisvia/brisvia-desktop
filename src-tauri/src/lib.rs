@@ -726,13 +726,38 @@ fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
     let mark = log_size(&state.datadir);
     let mut child = spawn_node(&bitcoind, &state.datadir, None)?;
 
-    // A healthy node stays up. One that cannot open its database dies within a couple of seconds, so give it a
-    // short window: if it is still alive after that, this is a normal start and we get out of the way.
-    let died = wait_for_early_exit(&mut child, Duration::from_secs(6));
-    if !died {
-        *state.child.lock().unwrap() = Some(child);
-        let _ = std::fs::remove_file(repair_marker(&state.datadir)); // healthy start: clear any old marker
-        return Ok(());
+    // Readiness gate. BEFORE launch and through the 2 h transition window, the future-dated genesis makes the
+    // node exit LATE on the 2nd+ start (up to ~14 s, verifying the RandomX genesis), so we must wait for a REAL
+    // RPC answer on our chain instead of the fixed 6 s "still alive = healthy" check -- otherwise the app
+    // enables the wallet on a node about to die. AFTER the window the node starts normally and we keep the exact
+    // audited 1.1.1 behaviour, so launch day is untouched. The window is read ONCE here (not re-evaluated
+    // mid-attempt) so a clock crossing cannot switch branches during a single start.
+    let extended_readiness = (ahora_secs() as i64) < MAINNET_START + 2 * 3600;
+    if extended_readiness {
+        match wait_until_ready_or_dead(&mut child, &state.datadir, Duration::from_secs(120)) {
+            NodeReady::Answering => {
+                *state.child.lock().unwrap() = Some(child);
+                let _ = std::fs::remove_file(repair_marker(&state.datadir)); // healthy start: clear any old marker
+                return Ok(());
+            }
+            NodeReady::Exited => {} // fall through: classify the failure and repair
+            NodeReady::TimedOut | NodeReady::ProbeFailed => {
+                // Alive but never proved ready (or uninspectable). Fail CLOSED: never enable the wallet on a
+                // node we cannot confirm. Keep any repair marker, stop the half-started process, and surface an
+                // honest error the UI can retry -- a process that "has not died yet" is NOT ready.
+                let _ = child.kill();
+                return Err("ERR:NODE_NOT_READY".into());
+            }
+        }
+    } else {
+        // Post-transition: the audited 1.1.1 path, unchanged. A healthy node stays up; one that cannot open its
+        // database dies within a couple of seconds. Still alive after the short window = a normal start.
+        let died = wait_for_early_exit(&mut child, Duration::from_secs(6));
+        if !died {
+            *state.child.lock().unwrap() = Some(child);
+            let _ = std::fs::remove_file(repair_marker(&state.datadir));
+            return Ok(());
+        }
     }
 
     // It died on startup. Only this attempt's log decides what happens next.
@@ -769,8 +794,22 @@ fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
     }
     let mark = log_size(&state.datadir);
     let mut child = spawn_node(&bitcoind, &state.datadir, Some(flag))?;
-    // A rebuild takes a while, so we only check it did not die immediately again.
-    if wait_for_early_exit(&mut child, Duration::from_secs(6)) {
+    // The -reindex empties the chainstate and re-verifies the genesis proof-of-work (RandomX), so wait for the
+    // RPC to actually answer on our chain -- not a fixed 6 s -- or the wallet fails again right after a
+    // "successful" repair. ONLY a real Answering counts as success: a late exit, a timeout or an uninspectable
+    // process are all a FAILED repair, so keep the marker (the next start must still know a repair was needed)
+    // and stop the half-repaired process. There is at most ONE automatic repair per start, so no repair loop.
+    // Post-transition keeps the audited 1.1.1 check.
+    if extended_readiness {
+        if wait_until_ready_or_dead(&mut child, &state.datadir, Duration::from_secs(180)) != NodeReady::Answering {
+            let _ = child.kill();
+            let what = classify_failure(&log_since(&state.datadir, mark));
+            return Err(match what {
+                Repair::Blocked("disk") => "ERR:NODE_DISK_FULL".into(),
+                _ => "ERR:NODE_REPAIR_FAILED".to_string(),
+            });
+        }
+    } else if wait_for_early_exit(&mut child, Duration::from_secs(6)) {
         let what = classify_failure(&log_since(&state.datadir, mark));
         return Err(match what {
             Repair::Blocked("disk") => "ERR:NODE_DISK_FULL".into(),
@@ -837,6 +876,9 @@ fn spawn_node(bitcoind: &Path, datadir: &Path, repair_flag: Option<&str>) -> Res
 }
 
 // True if the process exited within `window`. Polls instead of blocking so a healthy node is not delayed.
+// Kept for the POST-launch startup path (see start_node): after the transition window the node starts
+// normally, so the audited 1.1.1 behaviour ("still alive after a short window = healthy") is preserved
+// exactly and launch day is untouched.
 fn wait_for_early_exit(child: &mut Child, window: Duration) -> bool {
     let deadline = std::time::Instant::now() + window;
     while std::time::Instant::now() < deadline {
@@ -847,6 +889,73 @@ fn wait_for_early_exit(child: &mut Child, window: Duration) -> bool {
         }
     }
     false
+}
+
+/// One readiness probe with a SHORT, self-contained timeout, so a single hung call cannot swallow the whole
+/// wait window. Returns true only when: the RPC answered, the JSON-RPC body carried NO error, AND the node
+/// reports OUR chain. getblockchaininfo (not uptime) is used on purpose: during warm-up the node answers it
+/// with a "loading" error, so a plain success proves the chainstate is loaded and wallet calls will work.
+/// The chain check rejects a stranger on the same port (an old node, a testnet, a leftover process).
+fn rpc_probe_ready(datadir: &PathBuf, expected_chain: &str) -> bool {
+    let cookie = match read_cookie(datadir) {
+        Some(c) => c,
+        None => return false, // node has not written its cookie yet: not ready
+    };
+    let url = format!("http://{}:{}/", RPC_HOST, rpc_port());
+    let auth = format!("Basic {}", b64(cookie.trim().as_bytes()));
+    let body = json!({ "jsonrpc": "1.0", "id": "brisvia", "method": "getblockchaininfo", "params": [] });
+    match ureq::post(&url).set("Authorization", &auth).timeout(Duration::from_secs(2)).send_json(body) {
+        Ok(r) => match r.into_json::<Value>() {
+            Ok(v) => v["error"].is_null() && v["result"]["chain"].as_str() == Some(expected_chain),
+            Err(_) => false,
+        },
+        Err(_) => false, // refused / timed out / bad status: not ready
+    }
+}
+
+/// Outcome of waiting for a freshly-spawned node to settle. A node is READY only when it ANSWERS its RPC on
+/// our chain AND is still alive; a process that merely "has not died yet" is NOT ready -- that was the 1.1.1
+/// defect (declared healthy at 6 s while dying at ~14 s), and treating a timeout as success would just move
+/// the same defect to the window size. Every non-Answering outcome fails closed.
+#[derive(PartialEq)]
+enum NodeReady {
+    Answering,   // RPC answered on our chain and the process is still alive: genuinely usable
+    Exited,      // the process was OBSERVED to exit: classify the log + repair
+    TimedOut,    // the window elapsed with the process alive but never answering: NOT ready
+    ProbeFailed, // could not even inspect the process (try_wait errored): NOT an observed exit, fail closed
+}
+
+/// Wait until the node ANSWERS its RPC (truly ready), EXITS (needs a repair), or the window runs out.
+///
+/// Replaces the fixed 6 s "still alive = healthy" check, wrong before launch: the mainnet genesis is dated at
+/// the launch instant, so on the 2nd+ start the node loads a tip in the future, spends up to ~14 s
+/// re-verifying the genesis proof-of-work (RandomX) and ONLY THEN exits asking for -reindex. At 6 s it is
+/// still alive (verifying), so the app used to declare it healthy and enable the wallet on a node about to
+/// die -> "node not ready" / "backup without the wallet". We now wait for a real RPC answer. The genesis
+/// death happens during "Verifying blocks" (before warm-up ends), so the probe cannot see a valid answer
+/// before that exit; the extra try_wait AFTER a good probe still guards the "answers once, dies immediately"
+/// race for completeness. Each probe has its own 2 s timeout, so the outer window is a real ceiling.
+fn wait_until_ready_or_dead(child: &mut Child, datadir: &PathBuf, window: Duration) -> NodeReady {
+    let deadline = std::time::Instant::now() + window;
+    let expected_chain = net_chain();
+    while std::time::Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) => return NodeReady::Exited, // observed exit
+            Err(_) => return NodeReady::ProbeFailed, // cannot inspect: fail closed, but NOT an observed exit
+            Ok(None) => {}                           // still running
+        }
+        if rpc_probe_ready(datadir, &expected_chain) {
+            // Answered on our chain. Re-check it is STILL alive: a node can answer once and exit immediately
+            // after (the future-genesis exit lands at the end of verification). Ready only if still alive.
+            return match child.try_wait() {
+                Ok(None) => NodeReady::Answering,
+                Ok(Some(_)) => NodeReady::Exited,
+                Err(_) => NodeReady::ProbeFailed,
+            };
+        }
+        std::thread::sleep(Duration::from_millis(400));
+    }
+    NodeReady::TimedOut
 }
 
 // ---- orderly shutdown: stop mining -> stop RPC -> wait -> kill ----
@@ -4272,7 +4381,11 @@ pub fn run() {
             let wallet_loaded = state.wallet_loaded.clone();
             let receive_addr = state.receive_addr.clone();
             std::thread::spawn(move || {
-                for _ in 0..90 {
+                // Wait for the node's RPC before touching the wallet. The ceiling matches the worst-case
+                // pre-launch startup (up to ~120 s initial + ~180 s reindex in start_node), so a slow repair
+                // never makes this thread give up early and leave the wallet unloaded while the node is still
+                // coming up. A normal start answers in seconds and breaks out immediately.
+                for _ in 0..300 {
                     if rpc(&datadir, None, "getblockcount", json!([])).is_ok() {
                         break;
                     }
@@ -4857,6 +4970,72 @@ mod rpc_wire_format_tests {
 // A comment saying "do not kill it" does not stop anyone from killing it. These tests do: if a kill
 // ever reappears on the node's path, they turn red.
 // ============================================================================================
+// ============================================================================================
+// The heart of the 1.1.2 fix: a node is READY only when it answers its RPC AND is still alive. A process
+// that merely "has not died yet" must NOT be reported as ready -- that was the defect that enabled the
+// wallet on a node about to die from the future-dated genesis. These tests pin that contract.
+// ============================================================================================
+#[cfg(test)]
+mod node_readiness_tests {
+    use super::*;
+
+    // A process that will not close on its own, standing in for a node still verifying the genesis.
+    fn stubborn() -> std::process::Child {
+        #[cfg(target_os = "windows")]
+        let c = Command::new("cmd").args(["/c", "ping -n 60 127.0.0.1 >nul"]).spawn();
+        #[cfg(not(target_os = "windows"))]
+        let c = Command::new("sleep").arg("60").spawn();
+        c.expect("could not spawn the test process")
+    }
+
+    // A process that exits immediately.
+    fn quick() -> std::process::Child {
+        #[cfg(target_os = "windows")]
+        let c = Command::new("cmd").args(["/c", "exit 0"]).spawn();
+        #[cfg(not(target_os = "windows"))]
+        let c = Command::new("true").spawn();
+        c.expect("could not spawn the test process")
+    }
+
+    // THE regression test: alive but no usable RPC (no cookie => the probe can never succeed) must time out,
+    // NEVER be treated as ready. This is exactly the case that used to slip through the fixed 6 s window and
+    // let the app enable the wallet on a node seconds from dying.
+    #[test]
+    fn alive_but_no_rpc_never_reports_ready() {
+        let dir = std::env::temp_dir().join(format!("brisvia-ready-timeout-{}", ahora_secs()));
+        let _ = std::fs::create_dir_all(&dir); // no .cookie inside: rpc_probe_ready always fails
+        let mut child = stubborn();
+        let out = wait_until_ready_or_dead(&mut child, &dir, Duration::from_millis(900));
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(out == NodeReady::TimedOut, "an alive node with no RPC must be TimedOut, never Answering");
+    }
+
+    // A process that has already exited is reported Exited, so start_node classifies the log and repairs
+    // (with -reindex for the future genesis) instead of declaring a dead node healthy.
+    #[test]
+    fn a_process_that_exited_is_reported_exited() {
+        let dir = std::env::temp_dir().join(format!("brisvia-ready-exited-{}", ahora_secs()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut child = quick();
+        std::thread::sleep(Duration::from_millis(300)); // let it exit before we look
+        let out = wait_until_ready_or_dead(&mut child, &dir, Duration::from_secs(2));
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(out == NodeReady::Exited, "a process that already exited must be Exited");
+    }
+
+    // A missing/garbage cookie must make the readiness probe fail closed, never pass.
+    #[test]
+    fn probe_fails_closed_without_a_valid_cookie() {
+        let dir = std::env::temp_dir().join(format!("brisvia-ready-nocookie-{}", ahora_secs()));
+        let _ = std::fs::create_dir_all(&dir);
+        assert!(!rpc_probe_ready(&dir, &net_chain()), "no cookie must never read as ready");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 #[cfg(test)]
 mod node_shutdown_tests {
     use super::*;
