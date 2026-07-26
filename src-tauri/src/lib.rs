@@ -3223,6 +3223,38 @@ fn refresh_tooltip(state: &AppState) {
     let _ = tray.set_tooltip(Some(&tip));
 }
 
+/// Builds the miner worker command. Single source of truth so the first launch and the light-mode retry stay
+/// byte-for-byte identical except for BRISVIA_FORCE_LIGHT. Recreates the events file each call: a retry starts
+/// from a clean log (the follower re-reads the whole file every pass, so truncation is safe). RPC credentials
+/// travel via env, never argv; the pool URL only in pool mode; the plaintext-pool opt-out is always removed.
+fn build_worker_command(miner_bin: &Path, url: &str, addr: &str, cuser: &str, cpass: &str, threads: usize,
+                        pool_url: &Option<String>, events_path: &Path, force_light: bool) -> Command {
+    let out = std::fs::File::create(events_path).map(Stdio::from).unwrap_or_else(|_| Stdio::null());
+    let max_blocks = u64::MAX.to_string();
+    let thr = threads.to_string();
+    let mut cmd = Command::new(miner_bin);
+    cmd.args([url, "", "", addr, max_blocks.as_str(), thr.as_str()])
+        .env("BRISVIA_RPC_USER", cuser)
+        .env("BRISVIA_RPC_PASS", cpass)
+        .env("BRISVIA_JSON", "1")
+        .stdout(out)
+        .stderr(Stdio::null());
+    // Pass the pool URL only in pool mode; in solo mode REMOVE any inherited value so a leftover can never
+    // silently put the worker in pool mode (keeps the audited solo path pristine).
+    match pool_url {
+        Some(purl) => { cmd.env("BRISVIA_POOL_URL", purl); }
+        None => { cmd.env_remove("BRISVIA_POOL_URL"); }
+    }
+    // Never mine unencrypted: an inherited BRISVIA_POOL_PLAIN would downgrade the pool link to plain text, where
+    // a man-in-the-middle can rewrite the payout address. Remove it ALWAYS.
+    cmd.env_remove("BRISVIA_POOL_PLAIN");
+    // Light-mode retry: skip the ~2.1 GB fast dataset and mine in light from the start (used by the supervisor
+    // when a fast worker died before producing any work, e.g. Linux overcommit OOM-killing it mid-init).
+    if force_light { cmd.env("BRISVIA_FORCE_LIGHT", "1"); } else { cmd.env_remove("BRISVIA_FORCE_LIGHT"); }
+    no_window(&mut cmd);
+    cmd
+}
+
 #[tauri::command]
 fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>) -> Value {
     if let Some(i) = intensity {
@@ -3324,10 +3356,9 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
     // mining not starting). Instead we redirect its stdout to a file —which never blocks on write, like the node—
     // and follow it (tail) from a thread that re-reads the file every half second.
     let events_path = state.datadir.join("miner-events.log");
-    let out_stdio = std::fs::File::create(&events_path).map(Stdio::from).unwrap_or_else(|_| Stdio::null());
     // Mining mode: solo (against the local node, default) or pool. In pool/custom mode the worker connects to a
     // stratum pool (BRISVIA_POOL_URL) and mines there; only the payout address travels in the login. The solo
-    // arguments below are still passed (the worker ignores them in pool mode) so nothing about solo changes.
+    // arguments are still passed (the worker ignores them in pool mode) so nothing about solo changes.
     let pool_url = {
         let mode = state.mining_mode.lock().unwrap().clone();
         match mode.as_str() {
@@ -3345,35 +3376,15 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
         state.mining.store(false, Ordering::SeqCst);
         return json!({ "mining": false, "error": "ERR:POOL_ADDR_MISSING" });
     }
-    let mut cmd = Command::new(&miner_bin);
-    // RPC credentials go via ENV, not argv: a process command line is readable by other local processes, so we keep
-    // the node cookie user/password out of it. The worker reads BRISVIA_RPC_USER/PASS (with an argv fallback for CLI).
-    let empty = String::new();
-    cmd.args([&url, &empty, &empty, &addr, &u64::MAX.to_string(), &threads.to_string()])
-        .env("BRISVIA_RPC_USER", &cuser)
-        .env("BRISVIA_RPC_PASS", &cpass)
-        .env("BRISVIA_JSON", "1")
-        .stdout(out_stdio)
-        .stderr(Stdio::null());
-    // Explicit mode: pass the pool URL only in pool mode; in solo mode REMOVE any inherited BRISVIA_POOL_URL so a
-    // residual/leftover value can never silently put the worker in pool mode (keeps the audited solo path pristine).
-    match &pool_url {
-        Some(purl) => { cmd.env("BRISVIA_POOL_URL", purl); }
-        None => { cmd.env_remove("BRISVIA_POOL_URL"); }
-    }
-    // The worker encrypts by default and only skips it if BRISVIA_POOL_PLAIN is set (the local e2e harness).
-    // Remove it ALWAYS: an inherited value -- from the user's environment, another program, or something
-    // hostile -- would silently downgrade the connection to plain text, and on a plain link anyone in the
-    // middle can rewrite the payout address and collect the rewards. The app must never mine unencrypted.
-    cmd.env_remove("BRISVIA_POOL_PLAIN");
-    no_window(&mut cmd);
-    let child = match cmd.spawn() {
+    // First launch: FAST where the RAM allows it (build_worker_command handles args, env creds and pool mode).
+    let child = match build_worker_command(&miner_bin, &url, &addr, &cuser, &cpass, threads, &pool_url, &events_path, false).spawn() {
         Ok(c) => c,
         Err(e) => { state.mining.store(false, Ordering::SeqCst); return json!({ "mining": false, "error": format!("could not start the miner: {e}") }); }
     };
 
     // Thread that follows the events file and updates accepted contributions + real hashrate.
     {
+        let events_path = events_path.clone(); // the follower gets its own copy; the supervisor keeps the original
         let mined = state.mined.clone();
         let stale = state.stale.clone();
         let hashrate = state.hashrate.clone();
@@ -3507,6 +3518,51 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
         });
     }
     *state.miner_child.lock().unwrap() = Some(child);
+
+    // Worker supervisor: watches for an UNEXPECTED worker exit (the follower thread only reads events, it never
+    // notices the process dying). A fast solo worker can be OOM-killed while building the ~2.1 GB dataset — on
+    // Linux, overcommit lets the 2.1 GB reservation "succeed" and then the kernel kills the process when it
+    // touches the pages, so try_new alone does not catch it. In that case we retry ONCE in light mode, so a small
+    // machine still mines (slower) instead of showing "Preparing…" forever. Any later death just stops cleanly.
+    {
+        let miner_child = state.miner_child.clone();
+        let mining = state.mining.clone();
+        let ready = state.miner_ready.clone();
+        let (miner_bin, url, addr, cuser, cpass) =
+            (miner_bin.clone(), url.clone(), addr.clone(), cuser.clone(), cpass.clone());
+        let (pool_url, events_path) = (pool_url.clone(), events_path.clone());
+        let is_solo = pool_url.is_none();
+        std::thread::spawn(move || {
+            let mut retried_light = false;
+            loop {
+                std::thread::sleep(Duration::from_millis(600));
+                if !mining.load(Ordering::SeqCst) { break; } // stopped by the user / another path
+                let mut guard = miner_child.lock().unwrap();
+                let exited = match guard.as_mut() {
+                    Some(child) => matches!(child.try_wait(), Ok(Some(_))),
+                    None => break, // the child was taken elsewhere (stop) -> nothing left to supervise
+                };
+                if !exited { continue; } // still running (a slow but healthy dataset build lands here)
+                // The worker exited on its own. If the user meanwhile stopped, treat it as a normal stop.
+                if !mining.load(Ordering::SeqCst) { *guard = None; break; }
+                // Retry once in light if a SOLO worker died BEFORE it ever produced work (never became ready):
+                // that is the dataset-OOM signature. Pool mode already falls back to light on its own.
+                if is_solo && !retried_light && !ready.load(Ordering::SeqCst) {
+                    retried_light = true;
+                    match build_worker_command(&miner_bin, &url, &addr, &cuser, &cpass, threads, &pool_url, &events_path, true).spawn() {
+                        Ok(c) => { *guard = Some(c); continue; }
+                        Err(_) => { *guard = None; }
+                    }
+                } else {
+                    *guard = None;
+                }
+                // Give up: stop cleanly so the UI stops showing "Mining/Preparing" forever.
+                mining.store(false, Ordering::SeqCst);
+                ready.store(false, Ordering::SeqCst);
+                break;
+            }
+        });
+    }
     json!({ "mining": true })
 }
 
