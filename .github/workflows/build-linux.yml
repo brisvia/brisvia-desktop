@@ -51,7 +51,7 @@ jobs:
           # `main` branch still has Litecoin's old 9333/9332 (the fix lives on mainnet-ports-9342, one commit
           # ahead of main, same genesis/consensus). Without this pin the packaged node shipped on 9333 — caught
           # by the Linux ports guard. TODO: merge mainnet-ports-9342 into core main, then drop this pin.
-          ref: 69c48b2dfcf20fba70f6b5aef6958786e61ab7ed
+          ref: c36a75367ef3c2670413c10d8f5aa88b89258c05
           submodules: recursive
           path: core
 
