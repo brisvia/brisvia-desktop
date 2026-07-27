@@ -30,6 +30,7 @@ jobs:
         distro:
           - "ubuntu:22.04"   # the declared floor
           - "debian:12"      # the declared floor (Debian)
+          - "debian:13"      # current Debian stable (trixie)
           - "ubuntu:24.04"
           - "ubuntu:26.04"
           - "fedora:44"      # the one the extended removal must fix
