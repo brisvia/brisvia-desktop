@@ -429,7 +429,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: brisvia/brisvia
-          ref: ad36f2248c5607126bfbda0e03ad25abb016e026
+          ref: d9dfb942ef3ba9cfd85bb142dc799c9fa567fcd6
           submodules: recursive
           path: core
       - name: Build RandomX (static lib)
