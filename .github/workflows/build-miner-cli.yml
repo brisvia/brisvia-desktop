@@ -55,7 +55,7 @@ jobs:
           # RandomX compiled into this miner is byte-identical to the one in the packaged node. A different
           # core could change the hashes and the pool would reject every share this miner sends. Keep in
           # sync with the desktop builds; drop all three pins together when mainnet-ports lands in core main.
-          ref: d9dfb942ef3ba9cfd85bb142dc799c9fa567fcd6
+          ref: 8195a1b0c71d236eb32b8675ffc245e1f6f7fcb1
           submodules: recursive
           path: core
 
