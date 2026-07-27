@@ -50,7 +50,7 @@ jobs:
           # Pin the node source to the commit with the mainnet port move (P2P 9342, RPC 9338). Core `main` still
           # has Litecoin's old 9333/9332; the fix lives on mainnet-ports-9342 (one commit ahead, same genesis).
           # Without this pin the packaged node shipped on 9333. TODO: merge that branch into main, then drop the pin.
-          ref: c36a75367ef3c2670413c10d8f5aa88b89258c05
+          ref: ad36f2248c5607126bfbda0e03ad25abb016e026
           submodules: recursive
           path: core
 
