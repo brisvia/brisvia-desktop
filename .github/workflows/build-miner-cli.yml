@@ -66,9 +66,11 @@ jobs:
 
       - name: Build RandomX
         # The very same library the node and the desktop app use. Using a different one would produce
-        # different hashes, and every share this miner sent would be rejected.
+        # different hashes, and every share this miner sent would be rejected. -DARCH=default (portable,
+        # passed explicitly) matches the desktop builds and keeps this CLI miner runnable on older CPUs
+        # instead of relying on the submodule default.
         run: |
-          cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release
+          cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release -DARCH=default
           cmake --build core/src/randomx/build -j3
 
       - name: Build the terminal miner

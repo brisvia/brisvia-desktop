@@ -148,6 +148,13 @@ struct AppState {
     // files; the initial background start racing a user-triggered retry could otherwise run two migrations at
     // once on the same datadir. This guard is taken before any of that, so only one startup touches wallets.
     node_start: Arc<Mutex<()>>,
+    // When the solo miner first saw 0 peers (None = has peers / not applicable). Used by miner_status to raise a
+    // sustained-peer-loss warning only after the isolation has lasted a while, and to clear it when a peer returns.
+    no_peers_since: Arc<Mutex<Option<Instant>>>,
+    // Whether the RUNNING miner is effectively solo (pool_url.is_none() at launch) — the real backend, not the UI
+    // mode name. The peer-loss warning reads this so "custom without an address" (which falls back to solo) is
+    // covered and a real pool session never triggers it. Set on each miner_start.
+    mining_is_solo: Arc<AtomicBool>,
 }
 
 // Real-mining start on the main network: 2026-08-01 15:00:00 UTC (12:00 Argentina). Kept in sync with the
@@ -1137,6 +1144,16 @@ fn node_status(state: State<AppState>) -> Value {
                 "recovery" => Some("ERR:WALLET_RECOVERY"),
                 _ => None,
             };
+            // Clock-skew warning (ChatGPT hunt 27-jul): reuse the SAME measurement that already blocks mining
+            // (getnetworkinfo timeoffset vs the peers' adjusted time, >= 5 min). Surfaced here so the banner can
+            // show even when NOT mining, and it clears itself the moment the offset returns to a safe value.
+            // Mainnet only (a test/regtest run is intentionally offline and has no meaningful peer time).
+            let clock_skew = net_chain() == NET_CHAIN
+                && rpc(&state.datadir, None, "getnetworkinfo", json!([]))
+                    .ok()
+                    .and_then(|ni| ni.get("timeoffset").and_then(|v| v.as_i64()))
+                    .map(|o| o.unsigned_abs() >= 300)
+                    .unwrap_or(false);
             json!({
                 "connected": true,
                 "blocks": info["blocks"],
@@ -1147,6 +1164,9 @@ fn node_status(state: State<AppState>) -> Value {
                 "verificationprogress": info["verificationprogress"],
                 "walletReady": state.wallet_loaded.load(Ordering::SeqCst),
                 "walletOnDisk": on_disk,
+                // true = the machine clock is off by >= 5 min vs the network. The UI shows a persistent banner
+                // (mining is blocked while this is true); it clears itself when the clock is corrected.
+                "clockSkew": clock_skew,
                 // null | "ERR:WALLET_CONFLICT" (two wallets on disk, none touched) | "ERR:WALLET_RECOVERY"
                 // (seed present, wallet gone). The UI shows it as a clear banner instead of a blank wallet.
                 "walletLayoutError": wallet_layout_error
@@ -3376,6 +3396,11 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
         state.mining.store(false, Ordering::SeqCst);
         return json!({ "mining": false, "error": "ERR:POOL_ADDR_MISSING" });
     }
+    // Record the EFFECTIVE backend for the peer-loss warning: solo iff no pool URL (so "custom without address",
+    // which mines solo, is covered, and a real pool session never raises the isolated-chain warning). Reset the
+    // peer-loss timer so a new session never inherits a stale 0-peers instant from a previous solo run.
+    state.mining_is_solo.store(pool_url.is_none(), Ordering::SeqCst);
+    *state.no_peers_since.lock().unwrap() = None;
     // First launch: FAST where the RAM allows it (build_worker_command handles args, env creds and pool mode).
     let child = match build_worker_command(&miner_bin, &url, &addr, &cuser, &cpass, threads, &pool_url, &events_path, false).spawn() {
         Ok(c) => c,
@@ -3614,6 +3639,84 @@ fn physical_cores() -> usize {
     *PHYS.get_or_init(num_cpus::get_physical)
 }
 
+// Total PHYSICAL RAM installed, in MiB (0 = could not detect). Read once. This is the FIXED hardware, NOT the
+// momentarily free memory: a good machine running a heavy game still reports its full RAM, so the "mine in a
+// group" hint (which uses this) never fires on a capable computer that is merely busy right now. Implemented
+// natively per-OS to avoid pulling in a system-info crate.
+fn total_ram_mb() -> u64 {
+    use std::sync::OnceLock;
+    static RAM: OnceLock<u64> = OnceLock::new();
+    *RAM.get_or_init(detect_total_ram_mb)
+}
+
+#[cfg(target_os = "linux")]
+fn detect_total_ram_mb() -> u64 {
+    // /proc/meminfo reports "MemTotal:   <kB> kB". kB -> MiB.
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("MemTotal:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|n| n.parse::<u64>().ok())
+        })
+        .map(|kb| kb / 1024)
+        .unwrap_or(0)
+}
+
+#[cfg(target_os = "macos")]
+fn detect_total_ram_mb() -> u64 {
+    // sysctl hw.memsize returns total physical memory in bytes.
+    std::process::Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(|bytes| bytes / (1024 * 1024))
+        .unwrap_or(0)
+}
+
+#[cfg(target_os = "windows")]
+fn detect_total_ram_mb() -> u64 {
+    // GlobalMemoryStatusEx (kernel32) fills ullTotalPhys with total physical memory in bytes. FFI declared inline
+    // so no extra crate is needed; the struct layout MUST match MEMORYSTATUSEX exactly (order and widths).
+    #[repr(C)]
+    struct MemoryStatusEx {
+        length: u32,
+        memory_load: u32,
+        total_phys: u64,
+        avail_phys: u64,
+        total_page_file: u64,
+        avail_page_file: u64,
+        total_virtual: u64,
+        avail_virtual: u64,
+        avail_extended_virtual: u64,
+    }
+    extern "system" {
+        fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
+    }
+    let mut s: MemoryStatusEx = unsafe { std::mem::zeroed() };
+    s.length = std::mem::size_of::<MemoryStatusEx>() as u32;
+    if unsafe { GlobalMemoryStatusEx(&mut s) } != 0 {
+        s.total_phys / (1024 * 1024)
+    } else {
+        0
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn detect_total_ram_mb() -> u64 {
+    0
+}
+
+// Whether this machine is weak enough that solo mining will be painfully slow and the group is the better fit:
+// 4 GiB or less of RAM (RandomX needs ~2.1 GB just for the fast dataset) OR 2 or fewer logical cores. A RAM
+// reading of 0 means "unknown" and never counts as weak on its own. Fixed hardware only (see total_ram_mb).
+fn hardware_is_weak(ram_mb: u64, cores: usize) -> bool {
+    (ram_mb > 0 && ram_mb <= 4096) || cores <= 2
+}
+
 // The launch instant, as the single canonical UTC source of truth for "is mainnet live yet". In production this
 // is ALWAYS the fixed constant. Only an e2e/CI build (feature "e2e") may override it via BRISVIA_E2E_MAINNET_START,
 // so a test can cross the launch boundary in seconds without touching the machine clock. The override literally
@@ -3660,6 +3763,28 @@ fn miner_status(state: State<AppState>) -> Value {
         else if pool_everjob { "waiting" }
         else { "authenticated" };
     let pool_retry_secs = pool_retry_at.saturating_sub(now_secs);
+    // Sustained peer-loss warning while mining SOLO on mainnet (ChatGPT hunt + audit 27-jul): if the node holds 0
+    // peers for >= 75 s the solo miner may be extending an isolated branch whose blocks get discarded (no funds
+    // lost). We only WARN (persistent yellow banner in the UI) — never stop, switch mode or restart.
+    //
+    // `mining_is_solo` is the EFFECTIVE backend (pool_url.is_none() at launch), not the UI mode name, so a real
+    // pool session never triggers it and "custom without an address" (which mines solo) does. THREE RPC states, so
+    // a transient RPC failure never flips the warning: 0 peers -> start/keep the timer; >=1 peer -> clear timer and
+    // warning; RPC failed -> leave the prior state untouched (the node problem surfaces via node_status, not here).
+    let warn_no_peers = if mining
+        && state.mining_is_solo.load(Ordering::SeqCst)
+        && net_chain() == NET_CHAIN
+    {
+        let mut since = state.no_peers_since.lock().unwrap();
+        match rpc(&state.datadir, None, "getconnectioncount", json!([])).ok().and_then(|v| v.as_u64()) {
+            Some(0) => since.get_or_insert_with(Instant::now).elapsed().as_secs() >= 75,
+            Some(_) => { *since = None; false }                                   // a peer is really back -> clear
+            None => since.map(|t| t.elapsed().as_secs() >= 75).unwrap_or(false),  // RPC failed -> keep prior state
+        }
+    } else {
+        *state.no_peers_since.lock().unwrap() = None;
+        false
+    };
     json!({
         "mining": mining,
         "preparing": preparing,
@@ -3674,6 +3799,14 @@ fn miner_status(state: State<AppState>) -> Value {
         // core count, shown alongside it so "24 cores / 32 threads" reads honestly (mining runs on threads).
         "cores": state.cores as u64,
         "physicalCores": physical_cores() as u64,
+        // Fixed hardware (RAM installed + cores) + whether it's weak enough that the app should suggest group
+        // mining. Uses TOTAL installed RAM, never momentary free memory, so a capable machine busy with a game is
+        // never flagged. ramMb = 0 means "unknown". The frontend shows the group-hint popup once when weak.
+        "hardware": {
+            "ramMb": total_ram_mb(),
+            "cores": state.cores as u64,
+            "weak": hardware_is_weak(total_ram_mb(), state.cores),
+        },
         // Which mode the app is ACTUALLY running (normalised: never "pool" while POOL_ENABLED is off).
         "mode": state.mining_mode.lock().unwrap().clone(),
         // Pool-mode live status for the honest UI. `sharesSent` is what left the miner; `sharesAccepted` is what
@@ -3698,7 +3831,10 @@ fn miner_status(state: State<AppState>) -> Value {
         "mainnetStartMs": mainnet_start_ms,
         "autoStart": auto_start,
         "autoIntensity": auto_intensity,
-        "totalSeconds": total
+        "totalSeconds": total,
+        // Sustained-peer-loss warning for solo mining (computed above): true only after >= 75 s at 0 peers.
+        // The UI shows a persistent yellow banner; nothing about the mining itself changes.
+        "warnNoPeers": warn_no_peers
     })
 }
 
@@ -4325,6 +4461,8 @@ pub fn run() {
         ach_cache: Arc::new(Mutex::new(None)),
         node_error: Arc::new(Mutex::new(None)),
         node_attempt: Arc::new(AtomicU64::new(0)),
+        no_peers_since: Arc::new(Mutex::new(None)),
+        mining_is_solo: Arc::new(AtomicBool::new(true)),
     };
 
     let mut builder = tauri::Builder::default();

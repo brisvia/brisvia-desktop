@@ -303,6 +303,15 @@ fn main() {
 
         if cur_seed != Some(seed_key) {
             let t_ds = Instant::now();
+            // Free the previous epoch's dataset AND cache BEFORE building the new ones. At a seed change the
+            // worker only needs ~2.1 GB (the new dataset), not a ~4.2 GB peak of old+new alive at once. On a
+            // machine that can hold one dataset but not two, this lets try_new fall to LIGHT cleanly instead
+            // of the OS OOM-killing the process mid-rebuild at the first epoch boundary (~3 days after launch).
+            // Safe here: mine_block joined all its VMs before returning, so no VM still references old cache/dataset.
+            // Use take()+drop (not `= None`) so the intent — release the old Arc NOW — is explicit and the
+            // compiler never treats it as a dead store.
+            drop(dataset.take());
+            drop(cache.take());
             let c = Cache::new(&seed_key);
             // FAST mode builds a ~2.1 GB dataset (~10x faster). On a machine that cannot allocate it,
             // try_new returns None and we mine in LIGHT mode (cache only): slower, but it NEVER crashes.

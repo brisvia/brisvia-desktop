@@ -138,6 +138,14 @@
     <span class="neb-text"><strong id="neb-title" data-i18n="node_err.title"></strong> <span id="neb-msg"></span></span>
     <button class="btn xs" id="neb-retry" data-i18n="node_err.retry"></button>
   </div>
+  <!-- Clock skewed >= 5 min vs the network: informational strip, shown even when not mining; clears itself. -->
+  <div id="clock-skew-banner" class="warn-banner" data-testid="clock-skew-banner" hidden>
+    <span class="warn-text"><strong data-i18n="clock_skew.title"></strong> <span data-i18n="clock_skew.msg"></span></span>
+  </div>
+  <!-- Solo mining with no peers for a while: the found blocks may be discarded. Warning only, never stops mining. -->
+  <div id="solo-isolated-banner" class="warn-banner" data-testid="solo-isolated-banner" hidden>
+    <span class="warn-text"><strong data-i18n="solo_isolated.title"></strong> <span data-i18n="solo_isolated.msg"></span></span>
+  </div>
 
   <main class="content">
 
@@ -557,6 +565,30 @@
       <div class="row-gap">
         <button id="upd-err-retry" class="btn ghost" data-i18n="update.retry"></button>
         <button id="upd-err-download" class="btn primary" data-i18n="update.download_site"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Group-mining suggestion: shown ONCE, only on weak hardware (little installed RAM / few cores), the first
+       time the user can actually mine. Uses FIXED installed RAM, never momentary free memory, so a capable
+       machine busy with a game is never nagged. Never forced: the user can still choose solo, informed. -->
+  <div id="modal-group-hint" class="overlay" data-testid="modal-group-hint" hidden>
+    <div class="card modal">
+      <h2 data-i18n="group_hint.title"></h2>
+      <p class="muted small" data-i18n="group_hint.intro"></p>
+      <div class="ghint-opts">
+        <div class="ghint-opt reco">
+          <strong data-i18n="group_hint.group_title"></strong>
+          <span class="muted small" data-i18n="group_hint.group_desc"></span>
+        </div>
+        <div class="ghint-opt">
+          <strong data-i18n="group_hint.solo_title"></strong>
+          <span class="muted small" data-i18n="group_hint.solo_desc"></span>
+        </div>
+      </div>
+      <div class="row-gap">
+        <button id="ghint-solo" class="btn ghost" data-i18n="group_hint.choose_solo"></button>
+        <button id="ghint-group" class="btn primary" data-i18n="group_hint.choose_group"></button>
       </div>
     </div>
   </div>

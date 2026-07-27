@@ -69,10 +69,13 @@ jobs:
             libayatana-appindicator3-dev patchelf
 
       - name: Build RandomX (static lib, portable)
-        # No -DARCH=native on purpose: the CI CPU differs from users', a native build could use
-        # instructions (AVX2/...) missing on older CPUs. The portable build keeps runtime CPU detection.
+        # -DARCH=default (NOT native) on purpose: the CI CPU differs from users'. A native build could bake in
+        # instructions (AVX2/...) absent on older CPUs -> "Illegal instruction" at launch. We pass it
+        # EXPLICITLY instead of trusting the submodule's default, so a future RandomX bump that flips the
+        # default back to "native" can't silently ship a non-portable Linux binary. RandomX still selects the
+        # AES/AVX path at runtime via cpuid.
         run: |
-          cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release
+          cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release -DARCH=default
           cmake --build core/src/randomx/build -j3
 
       - name: Mark job start (used to prove the sidecar was built by THIS run)

@@ -295,9 +295,26 @@ function fmtDuration(secs) {
   if (m > 0) return `${u(m, 'unit_min')} ${u(s, 'unit_s')}`;
   return u(s, 'unit_s');
 }
+// One-time "mine in a group" suggestion for weak hardware. Fires ONCE (persisted in localStorage), only when the
+// machine is weak (little installed RAM / few cores — fixed hardware, never momentary free memory), mining is
+// actually available right now (network open, not syncing, not already mining) and the user is still on solo.
+// Never forced: the popup lets the user keep solo, informed. The group uses the official pool, live once mainnet is.
+function maybeShowGroupHint(s) {
+  if (!s || !s.hardware || !s.hardware.weak) return;
+  if (currentMiningMode !== 'solo') return;              // already in a group -> nothing to suggest
+  if (localStorage.getItem('brisvia_group_hint_shown')) return;
+  if (isWaitMode() || syncing || mining) return;         // only when mining is available and the user is idle
+  localStorage.setItem('brisvia_group_hint_shown', '1'); // show at most once, ever
+  const m = $('#modal-group-hint');
+  if (m) m.hidden = false;
+}
+
 async function refreshMine() {
   const s = await window.brisvia.getStatus();
   mining = s.mining;
+  // Sustained peer-loss warning strip while mining SOLO (backend raises it after >= 75 s at 0 peers). Purely
+  // informational: the mining is not stopped or switched; the strip clears itself the moment a peer returns.
+  { const sib = $('#solo-isolated-banner'); if (sib) sib.hidden = !(s && s.warnNoPeers); }
   // Live mining indicator in the topbar (visible from any tab): show it only while mining is on.
   const miningInd = $('#mining-ind'); if (miningInd) miningInd.hidden = !mining;
   // Single source of truth from the backend: the canonical launch instant and the persisted auto-start choice
@@ -306,6 +323,7 @@ async function refreshMine() {
   if (typeof s.autoStart === 'boolean' && !autoStarting) autoArmed = s.autoStart;
   if (typeof s.autoIntensity === 'string') autoIntensity = s.autoIntensity;
   renderMineMode(s); // keep the in-tab mode box in sync with the REAL active mode (before any early return)
+  maybeShowGroupHint(s); // one-time "mine in a group" suggestion for weak hardware (little RAM / few cores)
   evalAutoStart(s);  // honour the voluntary auto-start-at-launch (never without consent, never pool->solo)
   // Suppress the "Preparing…" flash for a few seconds after a live power change (the engine relaunches behind the scenes).
   const preparing = mining && s.preparing && Date.now() > suppressPreparingUntil;
@@ -1003,6 +1021,15 @@ $$('#mine-mode-seg .seg-btn').forEach((b) => b.addEventListener('click', () => {
   changeMiningMode(b.dataset.mode);
 }));
 
+// Group-hint popup actions. "Group" switches to the official pool; "solo" just closes (solo is the default).
+if ($('#ghint-group')) $('#ghint-group').addEventListener('click', () => {
+  const m = $('#modal-group-hint'); if (m) m.hidden = true;
+  changeMiningMode('pool');
+});
+if ($('#ghint-solo')) $('#ghint-solo').addEventListener('click', () => {
+  const m = $('#modal-group-hint'); if (m) m.hidden = true;
+});
+
 // ===================== Voluntary auto-start when mainnet goes live (Mining tab) =====================
 // A one-shot the user must arm on purpose (off by default). Guarantees, in order of importance:
 //   1) never starts mining without the armed consent;
@@ -1516,6 +1543,9 @@ async function pollNet() {
   // wallet is gone) so it is never a silent blank wallet the user cannot explain.
   const layoutCode = connected && st ? (st.walletLayoutError || null) : null;
   updateNodeErrorBanner(!connected ? (st && st.nodeError) : layoutCode);
+  // Clock-skew warning strip: shown whenever the node reports the machine clock is off by >= 5 min vs the
+  // network (mainnet only). Informational; it clears itself the moment the clock is corrected.
+  { const csb = $('#clock-skew-banner'); if (csb) csb.hidden = !(connected && st && st.clockSkew); }
   const walletReady = !!(st && st.walletReady);
   // Wait mode (real-network build, before launch): the node may still be catching up, but we must NOT show
   // "Syncing" — before the launch date the honest state is "waiting for launch", not a sync in progress.

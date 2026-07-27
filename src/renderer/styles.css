@@ -334,6 +334,15 @@ h1 { font-size: 26px; line-height: 1.1; letter-spacing: -.02em; max-width: 18ch;
 .node-error-banner strong { color: #e05a5a; font-weight: 700; }
 .node-error-banner .neb-text { display: inline; }
 .node-error-banner .btn.xs { padding: 4px 13px; font-size: 12px; line-height: 1.25; min-height: 0; }
+/* Amber warning strips (clock skew, solo isolation): informational, never block the app like the red one above. */
+.warn-banner { display: flex; align-items: center; justify-content: center; gap: 10px 14px; flex-wrap: wrap; padding: 8px 16px; font-size: 12.5px; line-height: 1.35; background: rgba(213,166,111,.13); border-bottom: 1px solid rgba(213,166,111,.36); color: var(--text); text-align: center; }
+.warn-banner strong { color: var(--sand); font-weight: 700; }
+.warn-banner .warn-text { display: inline; }
+/* Group-mining suggestion popup (weak hardware): two option cards, "group" recommended. */
+.ghint-opts { display: flex; flex-direction: column; gap: 9px; margin: 14px 0 4px; }
+.ghint-opt { padding: 11px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); }
+.ghint-opt.reco { border-color: rgba(53,191,197,.45); background: linear-gradient(180deg, rgba(53,191,197,.09), rgba(53,191,197,.02)); }
+.ghint-opt strong { display: block; font-size: 13.5px; margin-bottom: 2px; }
 
 @media (max-width: 720px) {
   .mine-grid { grid-template-columns: 1fr; }
