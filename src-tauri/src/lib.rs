@@ -1144,7 +1144,7 @@ fn node_status(state: State<AppState>) -> Value {
                 "recovery" => Some("ERR:WALLET_RECOVERY"),
                 _ => None,
             };
-            // Clock-skew warning (ChatGPT hunt 27-jul): reuse the SAME measurement that already blocks mining
+            // Clock-skew warning: reuse the SAME measurement that already blocks mining
             // (getnetworkinfo timeoffset vs the peers' adjusted time, >= 5 min). Surfaced here so the banner can
             // show even when NOT mining, and it clears itself the moment the offset returns to a safe value.
             // Mainnet only (a test/regtest run is intentionally offline and has no meaningful peer time).
@@ -3763,7 +3763,7 @@ fn miner_status(state: State<AppState>) -> Value {
         else if pool_everjob { "waiting" }
         else { "authenticated" };
     let pool_retry_secs = pool_retry_at.saturating_sub(now_secs);
-    // Sustained peer-loss warning while mining SOLO on mainnet (ChatGPT hunt + audit 27-jul): if the node holds 0
+    // Sustained peer-loss warning while mining SOLO on mainnet: if the node holds 0
     // peers for >= 75 s the solo miner may be extending an isolated branch whose blocks get discarded (no funds
     // lost). We only WARN (persistent yellow banner in the UI) — never stop, switch mode or restart.
     //

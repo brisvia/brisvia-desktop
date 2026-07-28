@@ -282,7 +282,7 @@ h1 { font-size: 26px; line-height: 1.1; letter-spacing: -.02em; max-width: 18ch;
 
 /* modals */
 .modal { width: min(420px, 92vw); padding: 26px 28px; position: relative; }
-/* El modal Recibir muestra la lista de direcciones: mas ancho para que la direccion bech32 entre en una sola linea sin cortarse. */
+/* The Receive modal shows the address list: wider so a full bech32 address fits on one line without wrapping. */
 #modal-receive .modal { width: min(560px, 94vw); }
 .modal h2 { font-size: 20px; margin-bottom: 8px; }
 .modal-x { position: absolute; right: 14px; top: 12px; background: none; border: 0; color: var(--muted); font-size: 24px; line-height: 1; cursor: pointer; }
