@@ -1,13 +1,14 @@
 # Tauri signCommand wrapper for SSL.com eSigner (CodeSignTool).
 #
 # Tauri calls this once per file it is about to bundle, passing the file path as the only argument.
-# We must sign ONLY the app binary (brisvia-miner.exe) and the NSIS installer. The three sidecars
-# (bitcoind.exe, bitcoin-cli.exe, brisvia-worker.exe) must NOT be signed: the build has a guard that
-# extracts bitcoind.exe from the finished installer and compares its SHA-256 to the one compiled in
-# this job; signing it would change its bytes and break that provenance guard forever.
+# We sign ONLY the app binary (brisvia-miner.exe) and the NSIS installer HERE. The three sidecars
+# (bitcoind.exe, bitcoin-cli.exe, brisvia-worker.exe) are Authenticode-signed in a DEDICATED step BEFORE
+# the Tauri build ("Sign the sidecars ... before bundling"), and the provenance guard's canonical SHA is
+# recorded from those SIGNED bytes. So here we SKIP the sidecars to avoid double-signing them; they arrive
+# already signed and their signed bytes must reach the installer unchanged.
 #
 # Safety rules:
-#   - Skip the three sidecars by exact name (keep their hash).
+#   - Skip the three sidecars by exact name (already signed in the dedicated step; do not double-sign).
 #   - brisvia-miner.exe is signed BEFORE bundling in a separate step; if it already carries a valid
 #     Authenticode signature, skip it here (do not double-sign).
 #   - Sign the NSIS installer (*-setup.exe).
