@@ -22,8 +22,10 @@ describe('Journey 1 — first launch', () => {
     });
     expect((await ver.getText()).trim()).toMatch(/^v\d/);
 
-    // 2) The backend brought up the node: the regtest bitcoind RPC responds.
-    await harness.waitRpcUp(run.datadir, run.port, 60000);
+    // 2) The backend brought up the node: the regtest bitcoind RPC responds. First launch is the slowest (cold
+    // app start + RandomX dataset + first bitcoind boot on a cold CI runner), so give it plenty of room: this is
+    // about "did the node ever come up", not about speed. A tight timeout here only flakes on slow runners.
+    await harness.waitRpcUp(run.datadir, run.port, 240000);
 
     // 3) It is really regtest (the e2e redirection reached the node).
     const chain = harness.rpc(run.datadir, run.port, ['getblockchaininfo']).stdout;

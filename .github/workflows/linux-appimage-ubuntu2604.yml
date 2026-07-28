@@ -1,4 +1,4 @@
-name: Linux - does the AppImage open on Ubuntu 26.04?
+name: Linux - does the AppImage open on Ubuntu 24.04 / 26.04?
 
 # A user on Ubuntu 26.04 (ThinkPad T430, Intel HD 4000, Wayland) reported the AppImage never opening.
 # Two causes were diagnosed by hand and only one of them was ever fixed:
@@ -23,11 +23,19 @@ on:
         required: true
         default: "v1.1.0"
 
+permissions:
+  contents: write        # draft releases are only visible to write-level tokens
+
 jobs:
-  probar:
+  reproduce:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false               # a failure on one Ubuntu must not cancel the other — we want both verdicts
+      matrix:
+        ubuntu: ["24.04", "26.04"]
+    name: does the AppImage open on Ubuntu ${{ matrix.ubuntu }}
     container:
-      image: ubuntu:26.04
+      image: ubuntu:${{ matrix.ubuntu }}
       options: --privileged        # the AppImage runtime wants FUSE; we extract instead, but keep it permissive
     steps:
       - name: Install what a desktop Ubuntu would already have
@@ -35,22 +43,31 @@ jobs:
           set -eux
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            curl ca-certificates file xvfb \
+            curl ca-certificates file xvfb jq \
             libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 \
             gvfs libglib2.0-0 libglib2.0-bin zstd
           # 26.04 renamed the package (the 64-bit time_t transition), so do not query one fixed name.
           echo "host GLib package:"; dpkg -l | grep -E 'libglib2\.0-0' || true
           echo "host GLib soname:"; ls -l /usr/lib/x86_64-linux-gnu/libglib-2.0.so.0* || true
 
-      - name: Download the published AppImage
+      - name: Download the AppImage (authenticated API — resolves draft releases too)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
         run: |
           set -eux
           V="${TAG#v}"
-          curl -fsSL -o app.AppImage \
-            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/Brisvia.Miner_${V}_amd64.AppImage"
+          NAME="Brisvia.Miner_${V}_amd64.AppImage"
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          # A draft release has no public download URL AND is not served by /releases/tags/<tag> (both 404),
+          # so LIST /releases (a push-scoped token sees drafts), filter by tag_name to get the asset id, then
+          # pull the bytes with Accept: octet-stream. Works for draft and published releases alike.
+          AID=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "$API/releases?per_page=100" \
+            | jq -r --arg T "$TAG" --arg N "$NAME" '.[] | select(.tag_name==$T) | .assets[] | select(.name==$N) | .id')
+          test -n "$AID" || { echo "asset $NAME not found in release $TAG"; exit 1; }
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" \
+            -o app.AppImage "$API/releases/assets/${AID}"
           chmod +x app.AppImage
           sha256sum app.AppImage
 
@@ -76,26 +93,26 @@ jobs:
       - name: Run both, and see how far each one gets
         run: |
           set -x
-          probar () {
-            DIR="$1"; NOMBRE="$2"
-            echo "::group::$NOMBRE"
+          run_case () {
+            DIR="$1"; NAME="$2"
+            echo "::group::$NAME"
             # 20s is plenty: the failures we are hunting happen during start-up, not later.
-            timeout 20 xvfb-run -a "$DIR/AppRun" > "$NOMBRE.out" 2> "$NOMBRE.err" || true
-            echo "--- stderr ---"; tail -40 "$NOMBRE.err" || true
-            if grep -q "g_task_set_static_name" "$NOMBRE.err"; then
-              echo "RESULT[$NOMBRE]: GLib clash PRESENT"
+            timeout 20 xvfb-run -a "$DIR/AppRun" > "$NAME.out" 2> "$NAME.err" || true
+            echo "--- stderr ---"; tail -40 "$NAME.err" || true
+            if grep -q "g_task_set_static_name" "$NAME.err"; then
+              echo "RESULT[$NAME]: GLib clash PRESENT"
             else
-              echo "RESULT[$NOMBRE]: no GLib clash"
+              echo "RESULT[$NAME]: no GLib clash"
             fi
-            if grep -qi "EGL_BAD_PARAMETER\|Could not create default EGL display" "$NOMBRE.err"; then
-              echo "RESULT[$NOMBRE]: EGL failure PRESENT"
+            if grep -qi "EGL_BAD_PARAMETER\|Could not create default EGL display" "$NAME.err"; then
+              echo "RESULT[$NAME]: EGL failure PRESENT"
             else
-              echo "RESULT[$NOMBRE]: no EGL failure"
+              echo "RESULT[$NAME]: no EGL failure"
             fi
             echo "::endgroup::"
           }
-          probar original as-published
-          probar repacked without-bundled-glib
+          run_case original as-published
+          run_case repacked without-bundled-glib
 
       - name: Verdict
         run: |

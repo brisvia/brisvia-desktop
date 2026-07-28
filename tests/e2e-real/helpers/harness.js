@@ -103,8 +103,10 @@ async function waitFor(fn, { timeout = 30000, interval = 300, msg = 'condition' 
   throw new Error(`Timed out waiting for: ${msg} (last value: ${JSON.stringify(last)})`);
 }
 
-// Waits until the node's RPC answers (getblockcount succeeds).
-async function waitRpcUp(datadir, port, timeout = 60000) {
+// Waits until the node's RPC answers (getblockcount succeeds). The default is generous because a COLD CI runner
+// can be slow to launch the app + build the RandomX dataset + start bitcoind on first run; a short timeout there
+// false-fails a healthy boot (the node just had not answered yet), which is exactly what a real user never sees.
+async function waitRpcUp(datadir, port, timeout = 120000) {
   return waitFor(() => rpc(datadir, port, ['getblockcount']).status === 0, {
     timeout, interval: 500, msg: `the node's RPC to be up on :${port}`,
   });
@@ -190,7 +192,7 @@ async function teardown(run) {
 }
 
 // Saves evidence when a journey fails: a screenshot, the node's debug.log, the miner's events, and
-// procesos vivos + estado del RPC, bajo test-results/e2e-real/<tag>-<timestamp>/.
+// live processes + RPC state, under test-results/e2e-real/<tag>-<timestamp>/.
 async function captureFailure(browser, run, testName) {
   try {
     if (!run || !run.datadir) return;
@@ -209,12 +211,12 @@ async function captureFailure(browser, run, testName) {
     } catch {}
     try {
       const info =
-        `procesos:\n${listProcs(run.datadir)}\n\n` +
+        `processes:\n${listProcs(run.datadir)}\n\n` +
         `getblockchaininfo:\n${rpc(run.datadir, run.port, ['getblockchaininfo']).stdout}\n`;
-      fs.writeFileSync(path.join(dir, 'estado.txt'), info);
+      fs.writeFileSync(path.join(dir, 'state.txt'), info);
     } catch {}
     return dir;
-  } catch { /* la evidencia nunca debe tumbar la corrida */ }
+  } catch { /* evidence must never break the run */ }
 }
 
 // ----- UI helpers. These run INSIDE the wdio process and use its globals: $, $$, browser, expect -----
@@ -228,7 +230,7 @@ async function skipWelcome() {
   for (let i = 0; i < 5 && !(await choose.isDisplayed()); i++) {
     await next.waitForClickable({ timeout: 10000 });
     await next.click();
-    await browser.pause(150); // deja re-renderizar la diapositiva; el corte real es el isDisplayed()
+    await browser.pause(150); // let the slide re-render; the real gate is isDisplayed()
   }
   await choose.waitForDisplayed({ timeout: 10000 });
 }

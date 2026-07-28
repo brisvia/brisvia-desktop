@@ -90,31 +90,31 @@ class PE:
                 break
             no = self.off(name_rva)
             dll = _cstr(self.b, no) if no is not None else "?"
-            simbolos = []
+            symbols = []
             t = self.off(oft or first)
             if t is not None:
-                paso = 8 if self.pe32plus else 4
-                leer = _u64 if self.pe32plus else _u32
+                step = 8 if self.pe32plus else 4
+                read_uint = _u64 if self.pe32plus else _u32
                 bit = 1 << (63 if self.pe32plus else 31)
                 while True:
-                    v = leer(self.b, t)
+                    v = read_uint(self.b, t)
                     if v == 0:
                         break
                     if v & bit:
                         # THE case a name-only diff cannot see: no name exists, only a number.
-                        simbolos.append(("ordinal", v & 0xFFFF))
+                        symbols.append(("ordinal", v & 0xFFFF))
                     else:
                         h = self.off(v & 0x7FFFFFFF)
-                        simbolos.append(("name", _cstr(self.b, h + 2) if h is not None else "?"))
-                    t += paso
-            out.append((dll, simbolos))
+                        symbols.append(("name", _cstr(self.b, h + 2) if h is not None else "?"))
+                    t += step
+            out.append((dll, symbols))
             o += 20
         return out
 
 
 def self_test():
     """Point it at a real Windows binary and assert it reads something sane."""
-    fallos = 0
+    failures = 0
     for cand in (r"C:\Windows\System32\notepad.exe", r"C:\Windows\System32\cmd.exe"):
         p = pathlib.Path(cand)
         if not p.exists():
@@ -123,29 +123,29 @@ def self_test():
             imp = PE(p.read_bytes()).imports()
         except Exception as e:
             print(f"  FAIL  could not read {p.name}: {e}")
-            fallos += 1
+            failures += 1
             continue
         total = sum(len(s) for _, s in imp)
         if not imp or total < 5:
             print(f"  FAIL  {p.name}: {len(imp)} dlls / {total} symbols -- too little to be real")
-            fallos += 1
+            failures += 1
         else:
             print(f"  PASS  reads-a-real-PE  ({p.name}: {len(imp)} dlls, {total} symbols)")
         break
     else:
         print("  FAIL  found no Windows binary to test")
-        fallos += 1
+        failures += 1
 
     try:
         PE(b"not a PE" + b"\0" * 200)
         print("  FAIL  accepted something that is not a PE")
-        fallos += 1
+        failures += 1
     except ValueError:
         print("  PASS  rejects-what-is-not-a-PE")
 
     print()
-    if fallos:
-        print(f"SELF-TEST FAILED ({fallos})")
+    if failures:
+        print(f"SELF-TEST FAILED ({failures})")
         return 1
     print("self-test OK")
     return 0
@@ -166,18 +166,18 @@ def main():
     print(f"  {len(imp)} DLLs, {sum(len(s) for _, s in imp)} imports")
     print()
 
-    por_ordinal = []
-    for dll, simbolos in imp:
-        ords = [v for k, v in simbolos if k == "ordinal"]
-        marca = f"  <-- {len(ords)} BY ORDINAL: {ords}" if ords else ""
-        print(f"  {dll:<22} {len(simbolos):>4} imports{marca}")
+    by_ordinal = []
+    for dll, symbols in imp:
+        ords = [v for k, v in symbols if k == "ordinal"]
+        mark = f"  <-- {len(ords)} BY ORDINAL: {ords}" if ords else ""
+        print(f"  {dll:<22} {len(symbols):>4} imports{mark}")
         if ords:
-            por_ordinal.append((dll, ords))
+            by_ordinal.append((dll, ords))
 
     print()
-    if por_ordinal:
+    if by_ordinal:
         print("  IMPORTS BY ORDINAL FOUND. A by-name diff does NOT see them:")
-        for dll, ords in por_ordinal:
+        for dll, ords in by_ordinal:
             print(f"    {dll}: {ords}")
         print("  Each one must be resolved against the /EXPORTS of the DLL Windows actually loads.")
     else:

@@ -21,7 +21,7 @@ import tempfile
 REPO = "brisvia/brisvia-desktop"
 
 # platform -> (signature file, artifact the updater downloads). The version is filled in from the tag.
-PLATAFORMAS = {
+PLATFORMS = {
     "windows-x86_64": ("Brisvia.Miner_{v}_x64-setup.exe.sig", "Brisvia.Miner_{v}_x64-setup.exe"),
     "darwin-aarch64": ("Brisvia.Miner.app.tar.gz.sig", "Brisvia.Miner.app.tar.gz"),
     "linux-x86_64": ("Brisvia.Miner_{v}_amd64.AppImage.sig", "Brisvia.Miner_{v}_amd64.AppImage"),
@@ -48,27 +48,27 @@ def main():
     gh("release", "download", tag, "--repo", REPO, "--pattern", "*.sig", "--dir", tmp, "--clobber")
 
     manifest = {"version": version, "notes": notes, "pub_date": pub, "platforms": {}}
-    faltan = []
-    for plat, (sig_tpl, art_tpl) in PLATAFORMAS.items():
+    missing = []
+    for plat, (sig_tpl, art_tpl) in PLATFORMS.items():
         sig_name = sig_tpl.format(v=version)
         path = os.path.join(tmp, sig_name)
         if not os.path.exists(path):
-            faltan.append(f"{plat}: {sig_name} missing")
+            missing.append(f"{plat}: {sig_name} missing")
             continue
-        firma = open(path).read().strip()
-        if not firma:
-            faltan.append(f"{plat}: {sig_name} is empty")
+        signature = open(path).read().strip()
+        if not signature:
+            missing.append(f"{plat}: {sig_name} is empty")
             continue
         manifest["platforms"][plat] = {
-            "signature": firma,
+            "signature": signature,
             "url": f"https://github.com/{REPO}/releases/download/{tag}/{art_tpl.format(v=version)}",
         }
 
     # Better no manifest than a half one: a platform missing here means those users are silently stranded on
     # an old version, with nothing looking broken.
-    if faltan:
+    if missing:
         print("NOT writing the manifest: a platform's signature is missing.", file=sys.stderr)
-        for f in faltan:
+        for f in missing:
             print("  - " + f, file=sys.stderr)
         print("\nRun the 3 builds (Windows/Linux/macOS) and try again.", file=sys.stderr)
         sys.exit(1)

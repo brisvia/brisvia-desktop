@@ -1,0 +1,184 @@
+name: Build the terminal miner (Linux)
+
+# Builds the headless miner for people running Linux servers with no desktop.
+#
+# WHY A SEPARATE WORKFLOW: the desktop builds carry a whole app (webview, node, installer). This is a
+# single small binary with no interface, and it must run on the widest possible range of servers.
+#
+# WHY ubuntu-22.04 AND NOT NEWER: a binary built on a newer system demands a newer system to run.
+# Built on the machine that produced our first attempt (Ubuntu 24.04) it required glibc 2.38, so it
+# would not start on Ubuntu 22.04 — which is what a large share of servers run. 22.04 gives glibc
+# 2.35, covering Ubuntu 22.04+ and Debian 12+. Same floor as the rest of our Linux artifacts.
+#
+# THIS WORKFLOW NEVER PUBLISHES. It does not create releases and never touches latest.json, draft,
+# prerelease or make_latest. The ONLY authority that publishes is publish-approved-release.yml, which
+# checks the draft's assets byte-for-byte against an approved manifest. The most this workflow does is
+# ATTACH the built binary to an EXISTING DRAFT (when a tag is given), so the terminal miner can ship
+# INSIDE the same byte-exact v1.1.1 release. The binary must then be added to release-go-v1.1.1.json
+# (name+size+sha256) BEFORE the manifest is frozen and the ceremony runs.
+
+on:
+  # Pushing this branch keeps the workflow available (GitHub only lets you manually launch workflows
+  # that already exist on main, and this one is not there yet). On push it only builds and tests.
+  push:
+    branches: [feat/miner-cli]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Exact commit SHA to build from (empty = branch HEAD). Use the FROZEN 1.1.1 SHA for release."
+        required: false
+        default: ""
+      tag:
+        description: "Existing DRAFT tag to attach the binary to (e.g. v1.1.1). Empty = only build, do not attach."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out the app
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # For a release build pass the exact frozen 1.1.1 SHA so the CLI comes from the same commit as
+          # the desktop app, not from the moving branch HEAD. Empty falls back to the branch (for testing).
+          ref: ${{ inputs.ref }}
+
+      - name: Check out the node (for the RandomX sources)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: brisvia/brisvia
+          # Pin the SAME core commit the desktop builds use (build-windows.yml / build-linux.yml), so the
+          # RandomX compiled into this miner is byte-identical to the one in the packaged node. A different
+          # core could change the hashes and the pool would reject every share this miner sends. Keep in
+          # sync with the desktop builds; drop all three pins together when mainnet-ports lands in core main.
+          ref: 8195a1b0c71d236eb32b8675ffc245e1f6f7fcb1
+          submodules: recursive
+          path: core
+
+      - name: Build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake build-essential
+
+      - name: Build RandomX
+        # The very same library the node and the desktop app use. Using a different one would produce
+        # different hashes, and every share this miner sent would be rejected. -DARCH=default (portable,
+        # passed explicitly) matches the desktop builds and keeps this CLI miner runnable on older CPUs
+        # instead of relying on the submodule default.
+        run: |
+          cmake -S core/src/randomx -B core/src/randomx/build -DCMAKE_BUILD_TYPE=Release -DARCH=default
+          cmake --build core/src/randomx/build -j3
+
+      - name: Build the terminal miner
+        run: |
+          export RANDOMX_LIB_DIR="$PWD/core/src/randomx/build"
+          cd crates/brisvia-randomx
+          cargo build --release --bin brisvia_miner
+          cp target/release/brisvia_miner "$GITHUB_WORKSPACE/brisvia-miner-linux-x86_64"
+
+      - name: What does it need to run
+        # This is the check that would have caught the first attempt. It is printed and enforced: if
+        # the binary ends up demanding something newer than 2.35, the build fails instead of shipping
+        # something that will not start on a normal server.
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          chmod +x brisvia-miner-linux-x86_64
+          echo "size: $(du -h brisvia-miner-linux-x86_64 | cut -f1)"
+          echo "libraries:"; ldd brisvia-miner-linux-x86_64 || true
+          MAX=$(objdump -T brisvia-miner-linux-x86_64 | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
+                | sort -uV | tail -1 | tr -d 'GLIBC_')
+          echo "highest glibc required: $MAX"
+          if [ "$(printf '%s\n2.35\n' "$MAX" | sort -V | tail -1)" != "2.35" ]; then
+            echo "FAIL: needs glibc $MAX, which is newer than 2.35 (Ubuntu 22.04)."
+            echo "It would not start on a large share of servers."
+            exit 1
+          fi
+          echo "OK: runs on Ubuntu 22.04+ and Debian 12+"
+
+      - name: It starts and validates its input
+        # A binary that builds but refuses every address, or crashes on --help, is worse than none.
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          ./brisvia-miner-linux-x86_64 --help | head -3
+          if ./brisvia-miner-linux-x86_64 --address not-an-address 2>&1 | grep -q "not valid"; then
+            echo "OK: rejects a bad address"
+          else
+            echo "FAIL: accepted an invalid address"; exit 1
+          fi
+          if ./brisvia-miner-linux-x86_64 --address bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq 2>&1 \
+             | grep -q "not a Brisvia address"; then
+            echo "OK: rejects an address from another coin"
+          else
+            echo "FAIL: accepted a foreign address"; exit 1
+          fi
+
+      - name: Checksum
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          sha256sum brisvia-miner-linux-x86_64 | tee brisvia-miner-linux-x86_64.sha256
+
+      - name: Sign the binary with the updater's key (standard minisign .minisig) and verify it here
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          # The terminal miner is a standalone binary people download by hand; a .sha256 alone does not prove
+          # authorship, so it gets its OWN signature. We reuse the SAME key as the auto-updater — one root of
+          # trust the app already carries. Tauri signs with minisign but wraps the signature in an extra
+          # base64 layer; we decode it to the standard .minisig that Linux users verify with plain `minisign`.
+          # minisign is NOT in Ubuntu's repos; fetch the official static binary, pinned by version AND SHA-256.
+          # Fail closed if the download does not match, so a swapped/tampered tool can never sign our releases.
+          MS_SHA=9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73
+          curl -sSL https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz -o /tmp/ms.tar.gz
+          echo "$MS_SHA  /tmp/ms.tar.gz" | sha256sum -c - || { echo "FAIL: minisign tarball SHA-256 mismatch (expected $MS_SHA)"; exit 1; }
+          mkdir -p /tmp/msdir && tar xzf /tmp/ms.tar.gz -C /tmp/msdir
+          # The tarball ships several architectures; pick the x86_64 one (the runner is x86_64).
+          MINISIGN=$(find /tmp/msdir -type f -name minisign -path "*x86_64*" | head -1)
+          [ -n "$MINISIGN" ] || MINISIGN=$(find /tmp/msdir -type f -name minisign | head -1)
+          [ -n "$MINISIGN" ] || { echo "FAIL: minisign binary not found in the tarball"; exit 1; }
+          sudo install "$MINISIGN" /usr/local/bin/minisign
+          npm ci >/dev/null 2>&1 || npm install >/dev/null 2>&1
+          npm run tauri -- signer sign "brisvia-miner-linux-x86_64"
+          base64 --decode brisvia-miner-linux-x86_64.sig > brisvia-miner-linux-x86_64.minisig
+          # Standard public key derived from the SAME key the app trusts (the tauri.conf string is base64-wrapped).
+          PK=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['plugins']['updater']['pubkey'])")
+          echo "$PK" | base64 --decode > brisvia-miner-minisign.pub
+          # Verify RIGHT HERE with the standard tool, exactly as a user would; fail the build if it does not check.
+          minisign -V -p brisvia-miner-minisign.pub -m brisvia-miner-linux-x86_64 -x brisvia-miner-linux-x86_64.minisig
+          echo "OK: the .minisig verifies with the same public key the app already trusts"
+
+      - name: Keep the build
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: brisvia-miner-linux
+          path: |
+            brisvia-miner-linux-x86_64
+            brisvia-miner-linux-x86_64.minisig
+            brisvia-miner-linux-x86_64.sha256
+
+      - name: Attach to the existing DRAFT release (only if a tag is given; never changes its state)
+        if: inputs.tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # HARD RULE: only ever add the CLI to a DRAFT. Refuse if the release is already published — the
+          # byte-exact ceremony (publish-approved-release.yml) must approve the FINAL asset set, and we must
+          # never mutate a live release, latest.json, draft, prerelease or make_latest.
+          DRAFT=$(gh release view "${{ inputs.tag }}" --repo "${{ github.repository }}" --json isDraft --jq .isDraft)
+          if [ "$DRAFT" != "true" ]; then
+            echo "REFUSING: ${{ inputs.tag }} is not a draft (isDraft=$DRAFT). The CLI is only added before approval."
+            exit 1
+          fi
+          gh release upload "${{ inputs.tag }}" \
+            brisvia-miner-linux-x86_64 brisvia-miner-linux-x86_64.minisig brisvia-miner-linux-x86_64.sha256 \
+            --repo "${{ github.repository }}" --clobber
+          echo "OK: terminal miner attached to draft ${{ inputs.tag }} (release state untouched)."
+          echo "NEXT (ceremony): add both files to release-go-${{ inputs.tag }}.json (name+size+sha256)"
+          echo "      BEFORE freezing the manifest and running publish-approved-release.yml."

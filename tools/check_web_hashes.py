@@ -23,10 +23,10 @@ import urllib.request
 
 WEB = "https://brisvia.com"
 BASE = "https://github.com/brisvia/brisvia-desktop/releases/latest/download"
-PAGINAS = ["descargas.html", "downloads.html"]  # Spanish + English publish the same hashes
+PAGES = ["descargas.html", "downloads.html"]  # Spanish + English publish the same hashes
 UA = {"User-Agent": "Mozilla/5.0"}
 
-ARCHIVOS = {
+FILES = {
     "hash-win": "Brisvia-Miner-Windows.exe",
     "hash-mac": "Brisvia-Miner-macOS.dmg",
     "hash-linux": "Brisvia-Miner-Linux.AppImage",
@@ -46,42 +46,42 @@ def sha256_url(url):
 
 def main():
     print("Comparing the hashes " + WEB + " publishes against the real installers.\n")
-    reales = {}
-    for hid, nombre in ARCHIVOS.items():
+    real_hashes = {}
+    for hid, name in FILES.items():
         try:
-            reales[hid] = sha256_url(BASE + "/" + nombre)
-            print("  %-32s %s..." % (nombre, reales[hid][:24]))
+            real_hashes[hid] = sha256_url(BASE + "/" + name)
+            print("  %-32s %s..." % (name, real_hashes[hid][:24]))
         except Exception as e:
-            print("  FAIL downloading %s: %s" % (nombre, e))
+            print("  FAIL downloading %s: %s" % (name, e))
             return 1
 
-    fallos = []
-    for pag in PAGINAS:
+    failures = []
+    for page in PAGES:
         try:
-            req = urllib.request.Request(WEB + "/" + pag, headers=UA)
+            req = urllib.request.Request(WEB + "/" + page, headers=UA)
             s = urllib.request.urlopen(req, timeout=60).read().decode("utf-8", "ignore")
         except Exception as e:
-            fallos.append("%s does not respond: %s" % (pag, e))
-            print("\n  %s: NO RESPONSE" % pag)
+            failures.append("%s does not respond: %s" % (page, e))
+            print("\n  %s: NO RESPONSE" % page)
             continue
-        print("\n%s:" % pag)
-        for hid, real in reales.items():
+        print("\n%s:" % page)
+        for hid, real in real_hashes.items():
             m = re.search(r'id="' + hid + r'">([a-f0-9]{64})<', s)
             if not m:
-                fallos.append("%s: does not publish the hash %s" % (pag, hid))
+                failures.append("%s: does not publish the hash %s" % (page, hid))
                 print("  %s: NOT PUBLISHED" % hid)
                 continue
             if m.group(1) == real:
                 print("  %s: OK" % hid)
             else:
-                fallos.append("%s/%s: publishes %s... and the file is %s..."
-                              % (pag, hid, m.group(1)[:16], real[:16]))
+                failures.append("%s/%s: publishes %s... and the file is %s..."
+                              % (page, hid, m.group(1)[:16], real[:16]))
                 print("  %s: BAD  (publishes %s... / the file is %s...)" % (hid, m.group(1)[:16], real[:16]))
 
     print()
-    if fallos:
+    if failures:
         print("FAIL: the site publishes hashes that are NOT those of the file people download.\n")
-        for f in fallos:
+        for f in failures:
             print("  - " + f)
         print("\nAnyone who verifies the download -- as the site asks them to -- will believe they were handed a")
         print("tampered file. Fix with: python tools/actualizar_hashes_web.py --aplicar (in cripto-pow)")

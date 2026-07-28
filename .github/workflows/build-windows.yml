@@ -33,7 +33,7 @@ jobs:
           echo "OK: version and tag in sync ($TC)"
 
       # PRODUCT guards (not logic). They exist because of real bugs the owner found in 2 minutes and
-      # an earlier review missed: a Spanish text with the language set to English, and a raw node error
+      # a 20-agent audit missed: a Spanish text with the language set to English, and a raw node error
       # on screen. They look at the product as people see it, not at the code in isolation.
       - name: Guard - texts (complete languages, no mixes, no hardcoded text in the HTML)
         shell: bash
@@ -50,7 +50,7 @@ jobs:
           # Pin the node source to the commit with the mainnet port move (P2P 9342, RPC 9338). Core `main` still
           # has Litecoin's old 9333/9332; the fix lives on mainnet-ports-9342 (one commit ahead, same genesis).
           # Without this pin the packaged node shipped on 9333. TODO: merge that branch into main, then drop the pin.
-          ref: 69c48b2dfcf20fba70f6b5aef6958786e61ab7ed
+          ref: 8195a1b0c71d236eb32b8675ffc245e1f6f7fcb1
           submodules: recursive
           path: core
 
@@ -125,10 +125,13 @@ jobs:
           Copy-Item $cli.FullName src-tauri/binaries/bitcoin-cli.exe
           Copy-Item $mw.FullName  src-tauri/binaries/brisvia-worker.exe
 
-          # Record the hash of what we staged: the packaged sidecar is compared against this after the build.
+          # Log the UNSIGNED hash for traceability only. The CANONICAL hash the packaged-node guard compares
+          # against is recorded AFTER Authenticode signing (the sidecars are signed before Tauri bundles them,
+          # which changes their bytes) — see the "Sign the sidecars" step below. Fixing the identity at the
+          # SIGNED bytes keeps the same guarantee ("the shipped node is exactly what this job produced") while
+          # letting Defender/SmartScreen see a signed node and worker.
           $h = (Get-FileHash src-tauri/binaries/bitcoind.exe -Algorithm SHA256).Hash.ToLower()
-          "SIDECAR_SHA256=$h" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "sidecar bitcoind.exe SHA-256: $h"
+          Write-Host "sidecar bitcoind.exe SHA-256 (UNSIGNED, pre-signing, for traceability): $h"
           Get-ChildItem src-tauri/binaries
 
       # After staging the sidecar binaries, so the Tauri build script finds the resources it validates.
@@ -149,11 +152,212 @@ jobs:
       - name: Install frontend dependencies
         run: npm install
 
-      - name: Build the Tauri app (NSIS installer + signed updater artifact)
+      - name: Set up CodeSignTool (SSL.com eSigner) and validate credentials
+        shell: pwsh
+        env:
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+        run: |
+          # Pinned version of SSL.com's CodeSignTool (bundles its own Java). The wrapper invokes it per file.
+          $url = "https://github.com/SSLcom/CodeSignTool/releases/download/v1.3.2/CodeSignTool-v1.3.2-windows.zip"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP/cst.zip"
+          Expand-Archive "$env:RUNNER_TEMP/cst.zip" -DestinationPath "$env:RUNNER_TEMP/codesigntool" -Force
+          $bat = Get-ChildItem "$env:RUNNER_TEMP/codesigntool" -Recurse -Filter CodeSignTool.bat | Select-Object -First 1
+          if (-not $bat) { throw "CodeSignTool.bat not found after extracting the zip" }
+          $cstHome = $bat.Directory.FullName
+          # CodeSignTool.bat resolves its bundled Java and jar RELATIVE to the current directory unless
+          # CODE_SIGN_TOOL_PATH is set. Invoking it by absolute path from another folder makes it look for
+          # .\jdk-11.0.2\bin\java in the wrong place and fail with "The system cannot find the path specified".
+          # Setting CODE_SIGN_TOOL_PATH makes the .bat use absolute paths. We export two names to later steps:
+          # CODESIGNTOOL_HOME is what the sign wrapper uses to locate the .bat; CODE_SIGN_TOOL_PATH is what the
+          # .bat itself reads to find its own Java and jar.
+          $env:CODE_SIGN_TOOL_PATH = $cstHome
+          "CODESIGNTOOL_HOME=$cstHome" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CODE_SIGN_TOOL_PATH=$cstHome" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "CODESIGNTOOL_HOME=$cstHome"
+          # Validate the credentials WITHOUT building the release (credential_info needs no TOTP). Fail loud if wrong.
+          & "$cstHome/CodeSignTool.bat" credential_info -username="$env:ES_USERNAME" -password="$env:ES_PASSWORD" -credential_id="$env:ES_CREDENTIAL_ID"
+          if ($LASTEXITCODE -ne 0) { throw "eSigner credential_info failed — check the ES_* secrets" }
+          # CRITICAL: Tauri's signCommand spawns the wrapper WITHOUT this step's `env:` vars — only job-level
+          # env (GITHUB_ENV) reaches it. That is why CODESIGNTOOL_HOME arrived at the wrapper but the ES_* did
+          # NOT, so the wrapper aborted with "env ES_USERNAME is not set" — which Tauri surfaces only as its
+          # opaque "failed to run powershell". Promote the eSigner credentials to job-level env so the wrapper
+          # Tauri spawns can read them. GitHub keeps masking these values in logs (they come from secrets).
+          "ES_USERNAME=$env:ES_USERNAME"           | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ES_PASSWORD=$env:ES_PASSWORD"           | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ES_CREDENTIAL_ID=$env:ES_CREDENTIAL_ID" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ES_TOTP_SECRET=$env:ES_TOTP_SECRET"     | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      # #9 fix: Authenticode-sign the three sidecars (node, worker, cli) BEFORE Tauri bundles them. Windows
+      # Defender/SmartScreen scan child processes on their own: an unsigned bitcoind.exe or brisvia-worker.exe
+      # can be quarantined even when launched by the signed app, leaving the app open but unable to mine. We
+      # sign here, VERIFY each signature, and record the SIGNED hashes — those become the canonical values the
+      # packaged-node guard checks, so "shipped == built" holds on the signed bytes (the identity is simply
+      # fixed at the signed bytes instead of the unsigned ones). The sign-wrapper then SKIPS these already-signed
+      # sidecars during the Tauri build so they are never double-signed.
+      - name: Sign the sidecars (Authenticode via eSigner) before bundling
+        shell: pwsh
+        env:
+          EXPECT_THUMBPRINT: ${{ secrets.ES_CERT_THUMBPRINT }}
+          EXPECT_SERIAL: ${{ secrets.ES_CERT_SERIAL }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:CODE_SIGN_TOOL_PATH = $env:CODESIGNTOOL_HOME
+          $tool = Join-Path $env:CODESIGNTOOL_HOME 'CodeSignTool.bat'
+          if (-not (Test-Path $tool)) { throw "sign-sidecars: CodeSignTool.bat not found at $tool" }
+
+          function Sign-InPlace($path) {
+            $name = Split-Path $path -Leaf
+            $outDir = Join-Path $env:RUNNER_TEMP ("signsc_" + [System.Guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+            # Sign into a fresh dir so the original is never half-overwritten on failure; args are not echoed.
+            $o = & $tool sign -username="$env:ES_USERNAME" -password="$env:ES_PASSWORD" `
+                   -credential_id="$env:ES_CREDENTIAL_ID" -totp_secret="$env:ES_TOTP_SECRET" `
+                   -input_file_path="$path" -output_dir_path="$outDir" 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "sign-sidecars: CodeSignTool failed for '$name' (exit $LASTEXITCODE): $($o | Out-String)" }
+            $signed = Join-Path $outDir $name
+            if (-not (Test-Path $signed)) { throw "sign-sidecars: signed output not found for '$name' in $outDir" }
+            Move-Item -Force -Path $signed -Destination $path
+            Remove-Item -Recurse -Force -Path $outDir -ErrorAction SilentlyContinue
+            Write-Host "signed sidecar: $name"
+          }
+
+          # A. Explicit Authenticode verification (present, valid, expected cert by thumbprint+serial, timestamp).
+          #    Runs in a normal pwsh step (NOT the console-less process Tauri spawns), so Get-AuthenticodeSignature
+          #    works here — the same call the dedicated 'Verify Authenticode' step already makes successfully.
+          function Assert-Signed($path, $label) {
+            $sig = Get-AuthenticodeSignature $path
+            $c = $sig.SignerCertificate
+            $tp = if ($c) { "$($c.Thumbprint)" } else { '' }
+            $sn = if ($c) { "$($c.SerialNumber)" } else { '' }
+            $hasTs = $sig.TimeStamperCertificate -ne $null
+            Write-Host "$label : status=$($sig.Status) thumb=$tp serial=$sn timestamp=$hasTs"
+            if ($sig.Status -ne 'Valid') { throw "FAIL: $label is not validly signed (status $($sig.Status))" }
+            if ($tp -ne "$env:EXPECT_THUMBPRINT") { throw "FAIL: $label thumbprint '$tp' != expected '$env:EXPECT_THUMBPRINT'" }
+            if ($sn -ne "$env:EXPECT_SERIAL") { throw "FAIL: $label serial '$sn' != expected '$env:EXPECT_SERIAL'" }
+            # B. Mandatory timestamp: without it the signature stops being valid once the cert expires.
+            if (-not $hasTs) { throw "FAIL: $label has no timestamp" }
+          }
+
+          $bd  = "src-tauri/binaries/bitcoind.exe"
+          $cli = "src-tauri/binaries/bitcoin-cli.exe"
+          $mw  = "src-tauri/binaries/brisvia-worker.exe"
+          # Sign one at a time with a gap: eSigner's TOTP window is 30 s and it rejects a reused OTP, so back-to-back
+          # signatures can fail. The 35 s wait guarantees a fresh window per file. (To be confirmed in the CI run.)
+          $files = @($bd, $cli, $mw)
+          for ($i = 0; $i -lt $files.Count; $i++) {
+            if ($i -gt 0) { Start-Sleep -Seconds 35 }
+            Sign-InPlace $files[$i]
+          }
+          Assert-Signed $bd  'sidecar bitcoind.exe'
+          Assert-Signed $cli 'sidecar bitcoin-cli.exe'
+          Assert-Signed $mw  'sidecar brisvia-worker.exe'
+
+          # C. Record the SIGNED hashes + sizes as the canonical guard values (double guard: hash + size + signature).
+          $hbd  = (Get-FileHash $bd  -Algorithm SHA256).Hash.ToLower()
+          $hmw  = (Get-FileHash $mw  -Algorithm SHA256).Hash.ToLower()
+          $hcli = (Get-FileHash $cli -Algorithm SHA256).Hash.ToLower()
+          $szbd  = (Get-Item $bd).Length
+          $szmw  = (Get-Item $mw).Length
+          $szcli = (Get-Item $cli).Length
+          "SIDECAR_SHA256=$hbd" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "WORKER_SHA256=$hmw"  | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CLI_SHA256=$hcli"    | Out-File -FilePath $env:GITHUB_ENV -Append
+          "SIDECAR_SIZE=$szbd"  | Out-File -FilePath $env:GITHUB_ENV -Append
+          "WORKER_SIZE=$szmw"   | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CLI_SIZE=$szcli"     | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "signed sidecar hashes -> bitcoind=$hbd worker=$hmw cli=$hcli"
+
+          # D. Traceability evidence artifact: signed SHA + size + cert + timestamp + build/commit identity.
+          $sigbd = Get-AuthenticodeSignature $bd
+          $ev = Join-Path $env:RUNNER_TEMP 'sidecar-signing-evidence.txt'
+          @(
+            "file=bitcoind.exe sha256=$hbd size=$szbd",
+            "file=brisvia-worker.exe sha256=$hmw size=$szmw",
+            "file=bitcoin-cli.exe sha256=$hcli size=$szcli",
+            "cert_thumbprint=$($sigbd.SignerCertificate.Thumbprint)",
+            "cert_serial=$($sigbd.SignerCertificate.SerialNumber)",
+            "cert_subject=$($sigbd.SignerCertificate.Subject)",
+            "timestamped=$($sigbd.TimeStamperCertificate -ne $null)",
+            "core_ref=8195a1b0c71d236eb32b8675ffc245e1f6f7fcb1",
+            "github_run_id=$env:GITHUB_RUN_ID",
+            "github_sha=$env:GITHUB_SHA",
+            "github_ref=$env:GITHUB_REF",
+            "job_start_utc=$env:JOB_START_UTC",
+            "built_utc=$((Get-Date).ToUniversalTime().ToString('o'))"
+          ) | Out-File -FilePath $ev -Encoding ascii
+          Write-Host "wrote signing evidence to $ev"
+
+      - name: Build the Tauri app and sign (miner + installer) via eSigner
         run: npm run tauri build -- --features mainnet
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+
+      - name: Show the sign-wrapper log (what signing actually did)
+        if: always()
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'sign-wrapper.log'
+          if (Test-Path $log) { Write-Host "===== sign-wrapper.log ====="; Get-Content $log }
+          else { Write-Host "no sign-wrapper.log — the wrapper never ran or failed before logging" }
+
+      - name: Verify Authenticode signatures (installer + the app binary INSIDE it)
+        shell: pwsh
+        env:
+          EXPECT_THUMBPRINT: ${{ secrets.ES_CERT_THUMBPRINT }}
+          EXPECT_SERIAL: ${{ secrets.ES_CERT_SERIAL }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Verify the two things a user actually runs: the NSIS installer, and the brisvia-miner.exe that is
+          # INSIDE it (extracted from the finished installer, the same way the packaged-node guard does).
+          # We deliberately do NOT verify src-tauri/target/release/brisvia-miner.exe: a -Recurse there can
+          # pick up an unsigned build artifact from deps/ and give a false "NotSigned".
+          # Identity is checked by certificate THUMBPRINT + SERIAL (a name like "Fernando Del Collado" can be
+          # forged; a thumbprint cannot), plus a valid status and a present timestamp.
+          function Assert-Signed($path, $label) {
+            $sig = Get-AuthenticodeSignature $path
+            $c = $sig.SignerCertificate
+            $tp = if ($c) { "$($c.Thumbprint)" } else { '' }
+            $sn = if ($c) { "$($c.SerialNumber)" } else { '' }
+            $hasTs = $sig.TimeStamperCertificate -ne $null
+            Write-Host "$label : status=$($sig.Status) thumb=$tp serial=$sn timestamp=$hasTs subject=$($c.Subject)"
+            if ($sig.Status -ne 'Valid') { throw "FAIL: $label is not validly signed (status $($sig.Status))" }
+            if ($tp -ne "$env:EXPECT_THUMBPRINT") { throw "FAIL: $label thumbprint '$tp' != expected '$env:EXPECT_THUMBPRINT'" }
+            if ($sn -ne "$env:EXPECT_SERIAL") { throw "FAIL: $label serial '$sn' != expected '$env:EXPECT_SERIAL'" }
+            if (-not $hasTs) { throw "FAIL: $label has no timestamp (the signature would stop being valid when the cert expires)" }
+          }
+          # 1) the installer itself
+          $setup = Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter *-setup.exe | Select-Object -First 1
+          if (-not $setup) { throw 'FAIL: cannot find the installer to verify' }
+          Assert-Signed $setup.FullName 'installer'
+          # 2) the app binary that is actually shipped inside the installer
+          $out = Join-Path $env:RUNNER_TEMP 'verify-unpack'
+          Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue
+          & 7z x "$($setup.FullName)" "-o$out" -y | Out-Null
+          $inner = Get-ChildItem -Path $out -Recurse -Filter brisvia-miner.exe | Select-Object -First 1
+          if (-not $inner) { throw 'FAIL: the installer does not contain brisvia-miner.exe' }
+          Assert-Signed $inner.FullName 'packaged brisvia-miner.exe'
+          # 3) #9 fix: the sidecars users' machines actually run as child processes must also be signed, or
+          #    Defender/SmartScreen can quarantine them even though the app is signed. Verify each inside the installer.
+          foreach ($sc in @('bitcoind.exe', 'brisvia-worker.exe', 'bitcoin-cli.exe')) {
+            $f = Get-ChildItem -Path $out -Recurse -Filter $sc | Select-Object -First 1
+            if (-not $f) { throw "FAIL: the installer does not contain $sc" }
+            Assert-Signed $f.FullName "packaged $sc"
+          }
+          # 4) Catch a NEW executable that nobody remembered to sign: enumerate every *.exe in the installer and
+          #    fail on anything outside the known set. uninstall.exe is NSIS-generated and (today) not signed, so
+          #    it is allowed but not asserted-signed; any OTHER unknown .exe is a hard failure.
+          $known = @('brisvia-miner.exe', 'bitcoind.exe', 'brisvia-worker.exe', 'bitcoin-cli.exe', 'uninstall.exe')
+          $unexpected = Get-ChildItem -Path $out -Recurse -Filter *.exe | Where-Object { $known -notcontains $_.Name }
+          if ($unexpected) { throw "FAIL: the installer contains unexpected executable(s) not in the signed set: $($unexpected.Name -join ', '). Add them to the signing step and this list." }
+          Write-Host "OK: the installer and every binary inside it (app + node + worker + cli) are validly signed by the expected certificate; no unexpected executables."
 
       - name: Stage the installer with a fixed (versionless) name for a permanent link
         shell: pwsh
@@ -181,15 +385,23 @@ jobs:
           $out = Join-Path $env:RUNNER_TEMP 'unpack'
           Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue
           & 7z x "$($setup.FullName)" "-o$out" -y | Out-Null
-          $packed = Get-ChildItem -Path $out -Recurse -Filter bitcoind.exe | Select-Object -First 1
-          if (-not $packed) { throw 'FAIL: the installer does not contain bitcoind.exe' }
-          $ph = (Get-FileHash $packed.FullName -Algorithm SHA256).Hash.ToLower()
-          Write-Host "packaged node : $ph"
-          Write-Host "compiled node : $env:SIDECAR_SHA256"
-          if ($ph -ne $env:SIDECAR_SHA256) {
-            throw "FAIL: the node INSIDE the installer ($ph) is not the one this job compiled ($env:SIDECAR_SHA256)."
+          # Double guard (hash + size) for BOTH the node and the worker: the canonical values were recorded
+          # from the SIGNED sidecars, so a match proves the installer ships exactly the signed bytes this job
+          # produced. Checking size too covers the astronomically-unlikely case of a human-set expected SHA.
+          function Assert-PackagedMatches($filter, $expectedSha, $expectedSize, $label) {
+            $packed = Get-ChildItem -Path $out -Recurse -Filter $filter | Select-Object -First 1
+            if (-not $packed) { throw "FAIL: the installer does not contain $filter" }
+            $ph = (Get-FileHash $packed.FullName -Algorithm SHA256).Hash.ToLower()
+            $psz = (Get-Item $packed.FullName).Length
+            Write-Host "packaged $label : sha=$ph size=$psz"
+            Write-Host "compiled $label : sha=$expectedSha size=$expectedSize"
+            if ($ph -ne $expectedSha) { throw "FAIL: the $label inside the installer ($ph) is not the one this job signed ($expectedSha)." }
+            if ("$psz" -ne "$expectedSize") { throw "FAIL: the $label inside the installer has size $psz, expected $expectedSize." }
           }
-          Write-Host 'OK: the packaged node is exactly the one this job compiled'
+          Assert-PackagedMatches 'bitcoind.exe'       $env:SIDECAR_SHA256 $env:SIDECAR_SIZE 'node'
+          Assert-PackagedMatches 'brisvia-worker.exe' $env:WORKER_SHA256  $env:WORKER_SIZE  'worker'
+          Assert-PackagedMatches 'bitcoin-cli.exe'    $env:CLI_SHA256     $env:CLI_SIZE     'cli'
+          Write-Host 'OK: the packaged node, worker and cli are exactly the signed binaries this job produced'
 
       - name: Guard - the packaged node really is the Brisvia main network
         shell: pwsh
@@ -218,10 +430,18 @@ jobs:
           if ($chain -notmatch '"chain":\s*"brisvia"') { throw 'FAIL: the packaged node is not on the brisvia network' }
           Write-Host 'OK: the packaged node is the real Brisvia network (genesis aa6bc268...)'
 
+      - name: Upload sidecar signing evidence (traceability)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sidecar-signing-evidence
+          path: ${{ runner.temp }}/sidecar-signing-evidence.txt
+          if-no-files-found: ignore
+
       - name: Attach the installer and the signed updater artifact to the release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.1.0
+          tag_name: v1.1.3
           draft: true
           files: |
             src-tauri/target/release/bundle/nsis/*-setup.exe

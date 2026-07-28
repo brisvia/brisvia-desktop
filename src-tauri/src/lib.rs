@@ -127,6 +127,34 @@ struct AppState {
     // poll would be wasteful, so the expensive scan is reused for a few seconds; the unlocked/notified logic on
     // top of it is always evaluated fresh.
     ach_cache: Arc<Mutex<Option<(Instant, WalletMetrics)>>>,
+    // Last node-startup failure, so it reaches the UI instead of dying in an eprintln the user never sees.
+    // The node starts on a background thread; if it cannot start (missing binary, disk full, another instance,
+    // permissions, a repair that keeps failing) the UI would otherwise stay on "connecting…" forever. We stash
+    // the ERR:NODE_* code here and node_status surfaces it. Cleared once the node actually connects.
+    node_error: Arc<Mutex<Option<String>>>,
+    // Monotonic start-attempt counter. A slow failing attempt must not clobber a newer one that already
+    // succeeded: each attempt captures its number and only writes node_error if it is still the current one.
+    node_attempt: Arc<AtomicU64>,
+    // TEMP-fatal: true when there is no permanent per-user data dir (no APPDATA/HOME) and no BRISVIA_DATADIR
+    // override, so the datadir would fall back to the OS temp dir (ephemeral). Writing a wallet or seed there
+    // could lose funds on the next cleanup, so the app refuses to start the node, create a wallet, write the
+    // seed or mine. Read-only after startup, so a plain bool is enough.
+    datadir_fatal: bool,
+    // Result of prepare_wallet_layout on the last node start: "ok" (nothing to do / migrated cleanly),
+    // "conflict" (two different wallets on disk, nothing touched) or "recovery" (an encrypted seed exists but
+    // no wallet.dat). Surfaced by node_status so a conflict/recovery is never a silent empty screen.
+    wallet_layout: Arc<Mutex<String>>,
+    // Serializes node startup. start_node runs prepare_wallet_layout, which INSPECTS, COPIES and RENAMES wallet
+    // files; the initial background start racing a user-triggered retry could otherwise run two migrations at
+    // once on the same datadir. This guard is taken before any of that, so only one startup touches wallets.
+    node_start: Arc<Mutex<()>>,
+    // When the solo miner first saw 0 peers (None = has peers / not applicable). Used by miner_status to raise a
+    // sustained-peer-loss warning only after the isolation has lasted a while, and to clear it when a peer returns.
+    no_peers_since: Arc<Mutex<Option<Instant>>>,
+    // Whether the RUNNING miner is effectively solo (pool_url.is_none() at launch) — the real backend, not the UI
+    // mode name. The peer-loss warning reads this so "custom without an address" (which falls back to solo) is
+    // covered and a real pool session never triggers it. Set on each miner_start.
+    mining_is_solo: Arc<AtomicBool>,
 }
 
 // Real-mining start on the main network: 2026-08-01 15:00:00 UTC (12:00 Argentina). Kept in sync with the
@@ -621,12 +649,22 @@ fn repair_blocked(datadir: &Path) -> bool {
 /// always replaced. A user can never be silently stranded on an old port. It sets ONLY the RPC port; the P2P
 /// port is the chainparams default (9342 mainnet) and is deliberately never written here, so no stale P2P port
 /// can linger either. `peers.dat` may still hold old-port peers, but the addnode seeds bootstrap recovery.
-fn node_conf(chain: &str, net_lines: &str, rpc_port: u16, seeds: &str) -> String {
+fn node_conf(chain: &str, net_lines: &str, rpc_port: u16, seeds: &str, walletdir: &str) -> String {
     format!(
         // The node connects to the network on its own (dnsseed + fixed seed), accepts inbound if the router
         // allows it (natpmp tries to open the port), and validates everything locally. RPC stays on 127.0.0.1 only.
-        "chain={chain}\nserver=1\n{net_lines}rpcthreads=16\nrpcworkqueue=128\n[{chain}]\nrpcport={port}\nrpcbind=127.0.0.1\nrpcallowip=127.0.0.1\n{seeds}",
+        // walletdir is pinned to one fixed, absolute path so Core never silently changes where it looks for the
+        // wallet between versions (see prepare_wallet_layout). It MUST live INSIDE the [chain] section, not the
+        // global one: Core treats -walletdir as network-specific and refuses to start on a non-default network
+        // (regtest/testnet) when it sits globally ("Config setting for -walletdir only applied on <net> network
+        // when in section"). On the default network (our brisvia mainnet) it is honoured either way, so the
+        // [chain] section is the single placement that works on EVERY network -- including the e2e regtest.
+        // prune=0 is network-agnostic and pinned on purpose: a leftover prune setting from any older config must
+        // never quietly delete blocks, which would then make a restore-from-seed rescan impossible. The chain is
+        // new; there is nothing to prune, and we do not offer pruned nodes yet.
+        "chain={chain}\nserver=1\nprune=0\n{net_lines}rpcthreads=16\nrpcworkqueue=128\n[{chain}]\nwalletdir={walletdir}\nrpcport={port}\nrpcbind=127.0.0.1\nrpcallowip=127.0.0.1\n{seeds}",
         chain = chain,
+        walletdir = walletdir,
         net_lines = net_lines,
         port = rpc_port,
         seeds = seeds
@@ -634,6 +672,16 @@ fn node_conf(chain: &str, net_lines: &str, rpc_port: u16, seeds: &str) -> String
 }
 
 fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
+    // TEMP-fatal (same failure family as the walletdir bug: an implicit path deciding where funds live). If the
+    // datadir would sit on ephemeral TEMP storage, refuse to bring up the node -- and therefore any wallet, seed
+    // or mining -- rather than write keys somewhere the OS may wipe.
+    if state.datadir_fatal {
+        return Err("ERR:DATADIR_UNAVAILABLE".into());
+    }
+    // Serialize the whole startup so prepare_wallet_layout (which copies/renames wallet files, below) can never
+    // run concurrently with another start_node -- e.g. the initial background start racing a "Try again" retry.
+    // Held to the end of the function. A poisoned lock means a previous start panicked mid-flight; refuse.
+    let _start_guard = state.node_start.lock().map_err(|_| "ERR:NODE_START_FAILED".to_string())?;
     let bitcoind = find_binary(app, &format!("bitcoind{EXE_SUFFIX}")).ok_or("ERR:NODE_BINARY_MISSING")?;
     std::fs::create_dir_all(&state.datadir).map_err(|e| e.to_string())?;
     // Wide rpcthreads/rpcworkqueue: the miner (getblocktemplate + submitblock) plus the UI polling make several
@@ -663,7 +711,16 @@ fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
         "listen=1\ndiscover=1\ndnsseed=1\nnatpmp=1\nfallbackfee=0.02\nminrelaytxfee=0.01\nincrementalrelayfee=0.01\ndustrelayfee=0.03\nblockmintxfee=0.01\nmaxmempool=50\nmempoolexpiry=24\npersistmempool=1\n"
     };
     let seeds = if isolated { "" } else { seeds };
-    let conf = node_conf(&chain, net_lines, rpc_port(), seeds);
+    // Pin the wallet directory to one fixed, absolute path so Core never drifts between <chain>/ and
+    // <chain>/wallets across versions (the drift is exactly what orphaned wallets from older builds). Then, while
+    // the node is still stopped, rescue any wallet left in the old location into this directory.
+    let walletdir = state.datadir.join(net_subdir()).join("wallets");
+    std::fs::create_dir_all(&walletdir).map_err(|e| e.to_string())?; // -walletdir must point at an existing dir
+    let layout = prepare_wallet_layout(&state.datadir);
+    *state.wallet_layout.lock().unwrap() = layout.as_str().to_string();
+    // bitcoin.conf reads paths with forward slashes on every platform; backslashes would need escaping.
+    let walletdir_str = walletdir.display().to_string().replace('\\', "/");
+    let conf = node_conf(&chain, net_lines, rpc_port(), seeds, &walletdir_str);
     // Write atomically (temp file + rename). The app fully owns this file — it rewrites the whole thing on every
     // start and there are no user-set options to preserve — but a crash MID-WRITE must never leave the node a
     // half-written conf to read. rename() over the target is atomic on the same filesystem (Windows included).
@@ -671,23 +728,57 @@ fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
     let conf_tmp = state.datadir.join("bitcoin.conf.new");
     std::fs::write(&conf_tmp, &conf).map_err(|e| e.to_string())?;
     std::fs::rename(&conf_tmp, &conf_path).map_err(|e| e.to_string())?;
+    let _ = std::fs::write(state.datadir.join("node-stderr.log"), b""); // fresh node stderr capture for this start
     // Remember how big the log is BEFORE launching, so we only ever read what THIS attempt writes.
     let mark = log_size(&state.datadir);
     let mut child = spawn_node(&bitcoind, &state.datadir, None)?;
 
-    // A healthy node stays up. One that cannot open its database dies within a couple of seconds, so give it a
-    // short window: if it is still alive after that, this is a normal start and we get out of the way.
-    let died = wait_for_early_exit(&mut child, Duration::from_secs(6));
-    if !died {
-        *state.child.lock().unwrap() = Some(child);
-        let _ = std::fs::remove_file(repair_marker(&state.datadir)); // healthy start: clear any old marker
-        return Ok(());
+    // Readiness gate. BEFORE launch and through the 2 h transition window, the future-dated genesis makes the
+    // node exit LATE on the 2nd+ start (up to ~14 s, verifying the RandomX genesis), so we must wait for a REAL
+    // RPC answer on our chain instead of the fixed 6 s "still alive = healthy" check -- otherwise the app
+    // enables the wallet on a node about to die. AFTER the window the node starts normally and we keep the exact
+    // audited 1.1.1 behaviour, so launch day is untouched. The window is read ONCE here (not re-evaluated
+    // mid-attempt) so a clock crossing cannot switch branches during a single start.
+    let extended_readiness = (ahora_secs() as i64) < MAINNET_START + 2 * 3600;
+    if extended_readiness {
+        match wait_until_ready_or_dead(&mut child, &state.datadir, Duration::from_secs(120)) {
+            NodeReady::Answering => {
+                *state.child.lock().unwrap() = Some(child);
+                let _ = std::fs::remove_file(repair_marker(&state.datadir)); // healthy start: clear any old marker
+                return Ok(());
+            }
+            NodeReady::Exited => {} // fall through: classify the failure and repair
+            NodeReady::TimedOut | NodeReady::ProbeFailed => {
+                // Alive but never proved ready (or uninspectable). Fail CLOSED: never enable the wallet on a
+                // node we cannot confirm. Keep any repair marker, stop the half-started process, and surface an
+                // honest error the UI can retry -- a process that "has not died yet" is NOT ready.
+                let _ = child.kill();
+                return Err("ERR:NODE_NOT_READY".into());
+            }
+        }
+    } else {
+        // Post-transition: the audited 1.1.1 path, unchanged. A healthy node stays up; one that cannot open its
+        // database dies within a couple of seconds. Still alive after the short window = a normal start.
+        let died = wait_for_early_exit(&mut child, Duration::from_secs(6));
+        if !died {
+            *state.child.lock().unwrap() = Some(child);
+            let _ = std::fs::remove_file(repair_marker(&state.datadir));
+            return Ok(());
+        }
     }
 
     // It died on startup. Only this attempt's log decides what happens next.
     let what = classify_failure(&log_since(&state.datadir, mark));
     let flag = match what {
-        Repair::None => return Err("ERR:NODE_START_FAILED".into()), // died for a reason we do not know
+        Repair::None => {
+            // Surface the node's own stderr (a bad config option, an unreadable datadir) so an otherwise
+            // "unknown" death is diagnosable instead of vanishing into a null pipe.
+            let se = std::fs::read_to_string(state.datadir.join("node-stderr.log")).unwrap_or_default();
+            let tail = se.lines().filter(|l| !l.trim().is_empty()).collect::<Vec<_>>();
+            let tail = tail.iter().rev().take(12).rev().cloned().collect::<Vec<_>>().join(" | ");
+            eprintln!("node died on startup (stderr): {tail}");
+            return Err("ERR:NODE_START_FAILED".into()); // died for a reason we do not know
+        }
         Repair::Blocked("disk") => return Err("ERR:NODE_DISK_FULL".into()),
         Repair::Blocked("locked") => return Err("ERR:NODE_ALREADY_RUNNING".into()),
         Repair::Blocked(_) => return Err("ERR:NODE_PERMISSIONS".into()),
@@ -710,8 +801,22 @@ fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
     }
     let mark = log_size(&state.datadir);
     let mut child = spawn_node(&bitcoind, &state.datadir, Some(flag))?;
-    // A rebuild takes a while, so we only check it did not die immediately again.
-    if wait_for_early_exit(&mut child, Duration::from_secs(6)) {
+    // The -reindex empties the chainstate and re-verifies the genesis proof-of-work (RandomX), so wait for the
+    // RPC to actually answer on our chain -- not a fixed 6 s -- or the wallet fails again right after a
+    // "successful" repair. ONLY a real Answering counts as success: a late exit, a timeout or an uninspectable
+    // process are all a FAILED repair, so keep the marker (the next start must still know a repair was needed)
+    // and stop the half-repaired process. There is at most ONE automatic repair per start, so no repair loop.
+    // Post-transition keeps the audited 1.1.1 check.
+    if extended_readiness {
+        if wait_until_ready_or_dead(&mut child, &state.datadir, Duration::from_secs(180)) != NodeReady::Answering {
+            let _ = child.kill();
+            let what = classify_failure(&log_since(&state.datadir, mark));
+            return Err(match what {
+                Repair::Blocked("disk") => "ERR:NODE_DISK_FULL".into(),
+                _ => "ERR:NODE_REPAIR_FAILED".to_string(),
+            });
+        }
+    } else if wait_for_early_exit(&mut child, Duration::from_secs(6)) {
         let what = classify_failure(&log_since(&state.datadir, mark));
         return Err(match what {
             Repair::Blocked("disk") => "ERR:NODE_DISK_FULL".into(),
@@ -728,9 +833,22 @@ fn start_node(app: &AppHandle, state: &AppState) -> Result<(), String> {
 // Launches bitcoind, optionally with a repair flag.
 fn spawn_node(bitcoind: &Path, datadir: &Path, repair_flag: Option<&str>) -> Result<Child, String> {
     let mut cmd = Command::new(bitcoind);
+    // Capture the node's stderr to a file instead of discarding it. Core writes EARLY config/init errors (bad
+    // option, unreadable datadir) to stderr BEFORE its debug.log exists, so with stderr going to null those
+    // deaths were invisible and classify_failure could only report "unknown". start_node reads this on failure.
+    let stderr = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(datadir.join("node-stderr.log"))
+        .map(Stdio::from)
+        .unwrap_or_else(|_| Stdio::null());
     cmd.arg(format!("-datadir={}", datadir.display()))
+        // Ignore any settings.json left in the datadir: Core reads it AFTER bitcoin.conf and it can silently
+        // override chain / walletdir / prune / ports. The app fully owns its config (bitcoin.conf rewritten on
+        // every start + critical flags on the CLI), so an inherited settings.json must never speak for us.
+        .arg("-nosettings")
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(stderr);
     // maxtipage ONLY in an isolated (regtest) run, and it goes on the COMMAND LINE, not in the config file:
     // it is a DEBUG_ONLY option and the node ignores it from bitcoin.conf (which is why the first attempt at
     // this changed nothing and the mining journey stayed red).
@@ -749,6 +867,12 @@ fn spawn_node(bitcoind: &Path, datadir: &Path, repair_flag: Option<&str>) -> Res
         // still reported "syncing". The first attempt failed exactly there. This has to keep working years
         // from now, so the window is far wider than the gap it must span.
         cmd.arg("-maxtipage=3153600000");
+    } else {
+        // Mainnet: pin the 24 h window explicitly instead of inheriting Core's default. The whole launch design
+        // depends on this exact value (the genesis is stamped at the launch instant so the chain becomes minable
+        // at 15:00 UTC); if a future Core changed DEFAULT_MAX_TIP_AGE, the window must NOT move with it. 86400 s
+        // = the current default, so this changes nothing today and freezes the behaviour for the future.
+        cmd.arg("-maxtipage=86400");
     }
     if let Some(f) = repair_flag {
         cmd.arg(f);
@@ -759,6 +883,9 @@ fn spawn_node(bitcoind: &Path, datadir: &Path, repair_flag: Option<&str>) -> Res
 }
 
 // True if the process exited within `window`. Polls instead of blocking so a healthy node is not delayed.
+// Kept for the POST-launch startup path (see start_node): after the transition window the node starts
+// normally, so the audited 1.1.1 behaviour ("still alive after a short window = healthy") is preserved
+// exactly and launch day is untouched.
 fn wait_for_early_exit(child: &mut Child, window: Duration) -> bool {
     let deadline = std::time::Instant::now() + window;
     while std::time::Instant::now() < deadline {
@@ -769,6 +896,73 @@ fn wait_for_early_exit(child: &mut Child, window: Duration) -> bool {
         }
     }
     false
+}
+
+/// One readiness probe with a SHORT, self-contained timeout, so a single hung call cannot swallow the whole
+/// wait window. Returns true only when: the RPC answered, the JSON-RPC body carried NO error, AND the node
+/// reports OUR chain. getblockchaininfo (not uptime) is used on purpose: during warm-up the node answers it
+/// with a "loading" error, so a plain success proves the chainstate is loaded and wallet calls will work.
+/// The chain check rejects a stranger on the same port (an old node, a testnet, a leftover process).
+fn rpc_probe_ready(datadir: &PathBuf, expected_chain: &str) -> bool {
+    let cookie = match read_cookie(datadir) {
+        Some(c) => c,
+        None => return false, // node has not written its cookie yet: not ready
+    };
+    let url = format!("http://{}:{}/", RPC_HOST, rpc_port());
+    let auth = format!("Basic {}", b64(cookie.trim().as_bytes()));
+    let body = json!({ "jsonrpc": "1.0", "id": "brisvia", "method": "getblockchaininfo", "params": [] });
+    match ureq::post(&url).set("Authorization", &auth).timeout(Duration::from_secs(2)).send_json(body) {
+        Ok(r) => match r.into_json::<Value>() {
+            Ok(v) => v["error"].is_null() && v["result"]["chain"].as_str() == Some(expected_chain),
+            Err(_) => false,
+        },
+        Err(_) => false, // refused / timed out / bad status: not ready
+    }
+}
+
+/// Outcome of waiting for a freshly-spawned node to settle. A node is READY only when it ANSWERS its RPC on
+/// our chain AND is still alive; a process that merely "has not died yet" is NOT ready -- that was the 1.1.1
+/// defect (declared healthy at 6 s while dying at ~14 s), and treating a timeout as success would just move
+/// the same defect to the window size. Every non-Answering outcome fails closed.
+#[derive(PartialEq)]
+enum NodeReady {
+    Answering,   // RPC answered on our chain and the process is still alive: genuinely usable
+    Exited,      // the process was OBSERVED to exit: classify the log + repair
+    TimedOut,    // the window elapsed with the process alive but never answering: NOT ready
+    ProbeFailed, // could not even inspect the process (try_wait errored): NOT an observed exit, fail closed
+}
+
+/// Wait until the node ANSWERS its RPC (truly ready), EXITS (needs a repair), or the window runs out.
+///
+/// Replaces the fixed 6 s "still alive = healthy" check, wrong before launch: the mainnet genesis is dated at
+/// the launch instant, so on the 2nd+ start the node loads a tip in the future, spends up to ~14 s
+/// re-verifying the genesis proof-of-work (RandomX) and ONLY THEN exits asking for -reindex. At 6 s it is
+/// still alive (verifying), so the app used to declare it healthy and enable the wallet on a node about to
+/// die -> "node not ready" / "backup without the wallet". We now wait for a real RPC answer. The genesis
+/// death happens during "Verifying blocks" (before warm-up ends), so the probe cannot see a valid answer
+/// before that exit; the extra try_wait AFTER a good probe still guards the "answers once, dies immediately"
+/// race for completeness. Each probe has its own 2 s timeout, so the outer window is a real ceiling.
+fn wait_until_ready_or_dead(child: &mut Child, datadir: &PathBuf, window: Duration) -> NodeReady {
+    let deadline = std::time::Instant::now() + window;
+    let expected_chain = net_chain();
+    while std::time::Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) => return NodeReady::Exited, // observed exit
+            Err(_) => return NodeReady::ProbeFailed, // cannot inspect: fail closed, but NOT an observed exit
+            Ok(None) => {}                           // still running
+        }
+        if rpc_probe_ready(datadir, &expected_chain) {
+            // Answered on our chain. Re-check it is STILL alive: a node can answer once and exit immediately
+            // after (the future-genesis exit lands at the end of verification). Ready only if still alive.
+            return match child.try_wait() {
+                Ok(None) => NodeReady::Answering,
+                Ok(Some(_)) => NodeReady::Exited,
+                Err(_) => NodeReady::ProbeFailed,
+            };
+        }
+        std::thread::sleep(Duration::from_millis(400));
+    }
+    NodeReady::TimedOut
 }
 
 // ---- orderly shutdown: stop mining -> stop RPC -> wait -> kill ----
@@ -939,19 +1133,94 @@ fn node_status(state: State<AppState>) -> Value {
         .map(|v| v["wallets"].as_array().map(|a| a.iter().any(|w| w["name"] == WALLET_NAME)).unwrap_or(false))
         .unwrap_or(false);
     match rpc(&state.datadir, None, "getblockchaininfo", json!([])) {
-        Ok(info) => json!({
-            "connected": true,
-            "blocks": info["blocks"],
-            "headers": info["headers"],
-            "chain": info["chain"],
-            // true = still syncing the shared chain (the UI disables "Mine" until it finishes).
-            "ibd": info["initialblockdownload"],
-            "verificationprogress": info["verificationprogress"],
-            "walletReady": state.wallet_loaded.load(Ordering::SeqCst),
-            "walletOnDisk": on_disk
+        Ok(info) => {
+            // The node answered: it is up. Clear any stale startup error so a past failure (from a repair that
+            // has since succeeded) does not keep haunting the UI.
+            *state.node_error.lock().unwrap() = None;
+            // Wallet-layout problem, decided before the node started. Hand the UI a READY-MADE error code (so it
+            // is never a silent blank wallet), emitted here in Rust so the error-contract guard sees it.
+            let wallet_layout_error = match state.wallet_layout.lock().unwrap().as_str() {
+                "conflict" => Some("ERR:WALLET_CONFLICT"),
+                "recovery" => Some("ERR:WALLET_RECOVERY"),
+                _ => None,
+            };
+            // Clock-skew warning: reuse the SAME measurement that already blocks mining
+            // (getnetworkinfo timeoffset vs the peers' adjusted time, >= 5 min). Surfaced here so the banner can
+            // show even when NOT mining, and it clears itself the moment the offset returns to a safe value.
+            // Mainnet only (a test/regtest run is intentionally offline and has no meaningful peer time).
+            let clock_skew = net_chain() == NET_CHAIN
+                && rpc(&state.datadir, None, "getnetworkinfo", json!([]))
+                    .ok()
+                    .and_then(|ni| ni.get("timeoffset").and_then(|v| v.as_i64()))
+                    .map(|o| o.unsigned_abs() >= 300)
+                    .unwrap_or(false);
+            json!({
+                "connected": true,
+                "blocks": info["blocks"],
+                "headers": info["headers"],
+                "chain": info["chain"],
+                // true = still syncing the shared chain (the UI disables "Mine" until it finishes).
+                "ibd": info["initialblockdownload"],
+                "verificationprogress": info["verificationprogress"],
+                "walletReady": state.wallet_loaded.load(Ordering::SeqCst),
+                "walletOnDisk": on_disk,
+                // true = the machine clock is off by >= 5 min vs the network. The UI shows a persistent banner
+                // (mining is blocked while this is true); it clears itself when the clock is corrected.
+                "clockSkew": clock_skew,
+                // null | "ERR:WALLET_CONFLICT" (two wallets on disk, none touched) | "ERR:WALLET_RECOVERY"
+                // (seed present, wallet gone). The UI shows it as a clear banner instead of a blank wallet.
+                "walletLayoutError": wallet_layout_error
+            })
+        }
+        // Not connected. If the background start actually FAILED, hand the UI the reason (ERR:NODE_*) so it can
+        // explain it in the user's language instead of a forever "connecting…". While the node is merely still
+        // spinning up (no error stashed yet) nodeError is null and the UI keeps showing "connecting…".
+        Err(_) => json!({
+            "connected": false,
+            "walletReady": false,
+            "walletOnDisk": false,
+            // TEMP-fatal is known before the background start runs, so surface it here directly rather than
+            // waiting for the start attempt to stash it -- the app can never work from ephemeral storage.
+            "nodeError": if state.datadir_fatal {
+                Some("ERR:DATADIR_UNAVAILABLE".to_string())
+            } else {
+                state.node_error.lock().unwrap().clone()
+            }
         }),
-        Err(_) => json!({ "connected": false, "walletReady": false, "walletOnDisk": false }),
     }
+}
+
+// Records a start attempt's outcome, but ONLY if it is still the current attempt. A slow attempt that fails
+// late (e.g. the initial start racing a user-triggered retry) must not overwrite a newer attempt that already
+// succeeded — that would flash a stale error over a working node. The newest attempt always wins; RPC success
+// in node_status is the final safety net that clears any error the moment the node actually answers.
+fn record_node_start(state: &AppState, epoch: u64, result: Result<(), String>) {
+    if state.node_attempt.load(Ordering::SeqCst) != epoch {
+        return; // a newer start attempt superseded this one; let it own node_error
+    }
+    match result {
+        Ok(()) => { *state.node_error.lock().unwrap() = None; }
+        Err(e) => {
+            eprintln!("[brisvia] could not start the node: {}", e);
+            *state.node_error.lock().unwrap() = Some(e);
+        }
+    }
+}
+
+// Manual "try again" from the node-error banner: bump the attempt counter, clear the stashed error (so the UI
+// hides the banner while retrying) and re-run the startup on a background thread. start_node has its own
+// repair/anti-loop logic, so this is a user-driven single retry, not a loop.
+#[tauri::command]
+fn node_retry(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    let epoch = state.node_attempt.fetch_add(1, Ordering::SeqCst) + 1;
+    *state.node_error.lock().unwrap() = None;
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        let state = app2.state::<AppState>();
+        let r = start_node(&app2, &state);
+        record_node_start(&state, epoch, r);
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -1072,6 +1341,207 @@ fn wallet_new_address(state: State<AppState>) -> Result<Value, String> {
     *state.receive_addr.lock().unwrap() = a.clone();
     append_address(&state.datadir, &a);
     Ok(json!({ "address": a }))
+}
+
+// ---- wallet directory: keep it stable across versions, and rescue wallets from the old layout ----
+//
+// The bug this solves: the app used to let Bitcoin Core pick the wallet directory. Core's default is
+// <chain>/wallets ONLY once that folder exists; before it exists, Core resolves wallet names against the
+// chain data folder itself. Older builds shipped a Core that did not pre-create <chain>/wallets, so a wallet
+// created back then landed one level up, in <chain>/brisvia. Current Core creates <chain>/wallets on startup,
+// which silently moves the lookup into that subfolder and leaves the old wallet invisible — the person sees an
+// empty wallet after updating. Two things fix it for good: (1) the node is now started with an explicit, fixed
+// -walletdir (see start_node), so the location can never drift again; (2) this migration moves a wallet left in
+// the old location into that fixed directory, once, safely, BEFORE the node starts.
+//
+// Copy-then-promote, never a bare rename: copy the whole wallet folder into a staging directory, verify every
+// byte, promote it into place atomically, and keep the old copy as a dated backup. Nothing is deleted, and a
+// crash mid-copy leaves only an ignorable staging folder. A fresh install has nothing to migrate; a wallet
+// already in the right place is left untouched; and if BOTH locations hold a wallet, we refuse to choose.
+
+// Recursively copy a directory and verify every file byte-for-byte. Used to migrate a wallet without trusting
+// a single copy call with someone's keys.
+fn copy_dir_verified(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_verified(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+            // Read both back and compare: a wallet must arrive identical, not "probably".
+            if std::fs::read(&from)? != std::fs::read(&to)? {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("verify mismatch after copy: {}", to.display()),
+                ));
+            }
+            // Durability: flush the copied file to disk BEFORE it is promoted, so a power cut right after the
+            // rename cannot leave a promoted-but-empty wallet. The original is kept as a backup regardless, so
+            // this is belt-and-braces, not the only line of defence.
+            if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&to) {
+                let _ = f.sync_all();
+            }
+        }
+    }
+    Ok(())
+}
+
+// Move a wallet from the old location into wallets/ safely: stage a verified copy, promote it atomically, and
+// keep the original as a dated backup that this release never deletes.
+fn migrate_legacy_wallet(
+    legacy: &std::path::Path,
+    wallets_dir: &std::path::Path,
+    canonical: &std::path::Path,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(wallets_dir)?;
+    let staging = wallets_dir.join(format!(".brisvia-migrating-{}", ahora_secs()));
+    if staging.exists() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    if let Err(e) = copy_dir_verified(legacy, &staging) {
+        let _ = std::fs::remove_dir_all(&staging); // leave nothing half-copied behind
+        return Err(e);
+    }
+    std::fs::rename(&staging, canonical)?; // atomic promote into the canonical name
+    // Keep the old copy as an explicit, dated backup. Never deleted in this release.
+    let backup = legacy.with_file_name(format!("{}.legacy-backup-{}", WALLET_NAME, ahora_secs()));
+    let _ = std::fs::rename(legacy, &backup);
+    Ok(())
+}
+
+// Outcome of prepare_wallet_layout, surfaced to the UI so a conflict/recovery is never a silent empty screen.
+#[derive(Debug, PartialEq, Eq)]
+enum WalletLayout {
+    Ok,       // nothing to do, already canonical, or migrated cleanly
+    Conflict, // two DIFFERENT wallets on disk, an invalid destination, or a linked path: nothing was touched
+    Recovery, // an encrypted seed exists but there is no wallet.dat anywhere -> offer restore, never auto-create
+}
+impl WalletLayout {
+    fn as_str(&self) -> &'static str {
+        match self {
+            WalletLayout::Ok => "ok",
+            WalletLayout::Conflict => "conflict",
+            WalletLayout::Recovery => "recovery",
+        }
+    }
+}
+
+// True if the path itself is a symlink/junction (not following it). A rename is only atomic within one real
+// filesystem, and a link could aim the "migration" at somewhere outside the datadir entirely.
+fn is_symlink(p: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(p).map(|m| m.file_type().is_symlink()).unwrap_or(false)
+}
+
+// True if two wallet folders have byte-identical contents (same relative files, same bytes). Used to tell the
+// tail of an interrupted migration (a promoted copy plus the not-yet-renamed original) apart from two genuinely
+// different wallets. On any read error it returns false: "not proven identical" must never green-light a move.
+fn dirs_identical(a: &std::path::Path, b: &std::path::Path) -> bool {
+    fn collect(
+        root: &std::path::Path,
+        base: &std::path::Path,
+        out: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+    ) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(root)? {
+            let entry = entry?;
+            let path = entry.path();
+            let rel = path.strip_prefix(base).unwrap_or(&path).to_path_buf();
+            if entry.file_type()?.is_dir() {
+                collect(&path, base, out)?;
+            } else {
+                out.insert(rel, std::fs::read(&path)?);
+            }
+        }
+        Ok(())
+    }
+    let mut ma = std::collections::BTreeMap::new();
+    let mut mb = std::collections::BTreeMap::new();
+    if collect(a, a, &mut ma).is_err() || collect(b, b, &mut mb).is_err() {
+        return false;
+    }
+    ma == mb
+}
+
+// Decide what to do with whatever wallet layout is on disk, and migrate the old layout if needed. Runs BEFORE
+// the node starts, so no wallet database is open while files move. Returns a status the UI can surface.
+fn prepare_wallet_layout(datadir: &std::path::Path) -> WalletLayout {
+    let chain_dir = datadir.join(net_subdir());
+    let legacy = chain_dir.join(WALLET_NAME); // <chain>/brisvia  (pre-wallets/ layout)
+    let wallets_dir = chain_dir.join("wallets");
+    let canonical = wallets_dir.join(WALLET_NAME); // <chain>/wallets/brisvia  (fixed layout)
+
+    // A linked path on any wallet location breaks the "atomic rename within one filesystem" guarantee and could
+    // point outside the datadir. Do not move anything: treat it as a conflict for the user to resolve.
+    if is_symlink(&chain_dir) || is_symlink(&legacy) || is_symlink(&wallets_dir) || is_symlink(&canonical) {
+        eprintln!("wallet layout: a wallet path is a symlink/junction; not migrating");
+        return WalletLayout::Conflict;
+    }
+
+    // Sweep leftover staging dirs from a crash mid-copy. They are never valid wallets and, sitting inside
+    // walletdir, Core could otherwise try to enumerate them as one.
+    if let Ok(rd) = std::fs::read_dir(&wallets_dir) {
+        for e in rd.flatten() {
+            if e.file_name().to_string_lossy().starts_with(".brisvia-migrating-") {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
+
+    let legacy_has = legacy.join("wallet.dat").is_file();
+    let canonical_has = canonical.join("wallet.dat").is_file();
+    match (legacy_has, canonical_has) {
+        (true, false) => {
+            // A canonical FOLDER without a wallet.dat is an invalid/incomplete destination: never migrate into
+            // it (the atomic rename needs the name free) and never delete it. Ask the user to resolve.
+            if canonical.exists() {
+                eprintln!("wallet layout: canonical path exists without wallet.dat; not migrating");
+                return WalletLayout::Conflict;
+            }
+            // The real, common case: a wallet from an older build sits in the old location. Bring it in.
+            match migrate_legacy_wallet(&legacy, &wallets_dir, &canonical) {
+                Ok(()) => WalletLayout::Ok,
+                Err(e) => {
+                    // Nothing destructive happened: the legacy wallet is intact and the encrypted seed still
+                    // blocks a fresh overwrite (refuse_if_wallet_exists). Surface it so the UI does not show a
+                    // blank wallet the user cannot explain.
+                    eprintln!("wallet migration failed ({} -> {}): {}", legacy.display(), canonical.display(), e);
+                    WalletLayout::Conflict
+                }
+            }
+        }
+        (true, true) => {
+            // Both hold a wallet.dat. Either a real conflict (two different wallets) OR the tail of a migration
+            // that promoted the copy but died before renaming the original to a backup. If the two are
+            // byte-identical it is the latter: finish the job by moving the legacy copy aside. Otherwise never
+            // choose, overwrite or delete -- the wallets/ one could be empty while the funds are in the legacy one.
+            if dirs_identical(&legacy, &canonical) {
+                let backup = legacy.with_file_name(format!("{}.legacy-backup-{}", WALLET_NAME, ahora_secs()));
+                match std::fs::rename(&legacy, &backup) {
+                    Ok(()) => WalletLayout::Ok, // interrupted migration completed safely
+                    Err(_) => WalletLayout::Conflict,
+                }
+            } else {
+                eprintln!(
+                    "wallet layout conflict: both {} and {} exist and differ; left untouched",
+                    legacy.display(),
+                    canonical.display()
+                );
+                WalletLayout::Conflict
+            }
+        }
+        (false, false) => {
+            // No wallet anywhere. If an encrypted seed exists, the wallet was lost/removed but the seed can
+            // restore it: tell the UI to offer recovery instead of silently creating a new empty wallet.
+            if enc_seed_path(datadir).exists() {
+                WalletLayout::Recovery
+            } else {
+                WalletLayout::Ok
+            }
+        }
+        (false, true) => WalletLayout::Ok, // already in the right place
+    }
 }
 
 #[tauri::command]
@@ -1423,6 +1893,11 @@ fn activate_wallet(state: &AppState, name: &str) {
 // Create a NEW wallet with a 12-word backup. Returns the words (to show once) + fingerprint.
 #[tauri::command]
 fn wallet_create_bip39(state: State<AppState>, name: String, password: String) -> Result<Value, String> {
+    // Defence in depth: never write a seed/keys to ephemeral TEMP storage. The node would not be up in this
+    // state either (start_node refuses), but the seed write is the irreversible step, so it guards itself too.
+    if state.datadir_fatal {
+        return Err("ERR:DATADIR_UNAVAILABLE".into());
+    }
     // Exclusive: the exists-check below and the phrase write must not interleave with another create.
     let _ops = state.wallet_ops.lock().map_err(|_| "ERR:WALLET_EXISTS".to_string())?;
     // Fail closed BEFORE touching Core. Until now the only thing standing between a second create and a
@@ -1943,11 +2418,19 @@ mod node_conf_tests {
     // and — fed the mainnet RPC port — must never contain Litecoin's 9333/9332.
     #[test]
     fn node_conf_emits_the_given_rpc_port_and_no_p2p_port() {
-        let conf = node_conf("brisvia", "listen=1\n", 9338, "addnode=1.2.3.4\n");
+        let conf = node_conf("brisvia", "listen=1\n", 9338, "addnode=1.2.3.4\n", "/data/brisvia-mainnet/wallets");
         assert!(conf.contains("rpcport=9338"), "must carry the mainnet RPC port: {conf}");
         assert!(!conf.contains("9333"), "must never emit Litecoin's P2P port 9333: {conf}");
         assert!(!conf.contains("9332"), "must never emit Litecoin's RPC port 9332: {conf}");
         assert!(!conf.contains("\nport="), "must not pin a P2P port; the chainparams default (9342) is used: {conf}");
+        // The wallet directory must be pinned, INSIDE the [chain] section. Core treats -walletdir as
+        // network-specific: in the global section it is REJECTED on a non-default network (regtest/testnet, which
+        // killed the e2e node), and it is applied for the active network when it lives in that network's section.
+        assert!(conf.contains("walletdir=/data/brisvia-mainnet/wallets"), "must pin the wallet directory: {conf}");
+        assert!(
+            conf.find("walletdir=").unwrap() > conf.find("[brisvia]").unwrap(),
+            "walletdir must be inside the [brisvia] section: {conf}"
+        );
     }
 
     // The compiled mainnet RPC port is the new, own port — not Litecoin's 9332.
@@ -1955,6 +2438,162 @@ mod node_conf_tests {
     #[test]
     fn mainnet_rpc_port_is_the_new_own_port() {
         assert_eq!(super::RPC_PORT, 9338);
+    }
+
+    // ---- wallet layout migration (the P0 "wallet not found after update" bug) ----
+    use super::{enc_seed_path, net_subdir, prepare_wallet_layout, WalletLayout, WALLET_NAME};
+
+    fn tmp_datadir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("brisvia-migtest-{}-{}", tag, super::ahora_secs()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write_wallet(dir: &std::path::Path, bytes: &[u8]) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("wallet.dat"), bytes).unwrap();
+    }
+
+    // The real user case: a wallet left in the OLD location (<chain>/brisvia) is moved into the fixed
+    // wallets/ directory, byte-for-byte, and the old copy is kept as a dated backup OUTSIDE wallets/.
+    #[test]
+    fn migrates_a_legacy_wallet_into_the_fixed_directory_and_keeps_a_backup() {
+        let dd = tmp_datadir("legacy");
+        let chain = dd.join(net_subdir());
+        let legacy = chain.join(WALLET_NAME);
+        write_wallet(&legacy, b"REAL-WALLET-WITH-KEYS");
+        // Precondition that reproduces the ACTUAL bug: the wallet is in the chain root, wallets/ does not exist.
+        assert!(!chain.join("wallets").exists(), "precondition: the legacy layout has no wallets/ dir yet");
+
+        assert_eq!(prepare_wallet_layout(&dd), WalletLayout::Ok);
+
+        // moved into wallets/brisvia, identical bytes
+        let canonical = chain.join("wallets").join(WALLET_NAME).join("wallet.dat");
+        assert!(canonical.is_file(), "wallet must land in wallets/brisvia");
+        assert_eq!(std::fs::read(&canonical).unwrap(), b"REAL-WALLET-WITH-KEYS");
+        // the plain old name is gone (renamed to a backup), and a dated backup exists with the same bytes
+        assert!(!legacy.join("wallet.dat").exists(), "old location must be renamed away");
+        let backup = std::fs::read_dir(&chain)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.file_name().to_string_lossy().starts_with(&format!("{}.legacy-backup-", WALLET_NAME)))
+            .expect("a dated legacy backup must be kept");
+        // The backup must live in the chain root, NOT inside wallets/, or Core's listwalletdir would enumerate it.
+        assert_eq!(backup.path().parent().unwrap(), chain, "backup must sit outside wallets/");
+        assert_eq!(std::fs::read(backup.path().join("wallet.dat")).unwrap(), b"REAL-WALLET-WITH-KEYS");
+        // no leftover staging dir
+        assert!(
+            std::fs::read_dir(chain.join("wallets")).unwrap().filter_map(|e| e.ok())
+                .all(|e| !e.file_name().to_string_lossy().starts_with(".brisvia-migrating-")),
+            "no staging dir must be left behind"
+        );
+        let _ = std::fs::remove_dir_all(&dd);
+    }
+
+    // A wallet already in the right place must not be touched, and a fresh install (nothing on disk) must not
+    // create anything.
+    #[test]
+    fn leaves_a_canonical_wallet_and_a_fresh_install_untouched() {
+        // already canonical
+        let dd = tmp_datadir("canonical");
+        let canonical = dd.join(net_subdir()).join("wallets").join(WALLET_NAME);
+        write_wallet(&canonical, b"CANON");
+        assert_eq!(prepare_wallet_layout(&dd), WalletLayout::Ok);
+        assert_eq!(std::fs::read(canonical.join("wallet.dat")).unwrap(), b"CANON");
+        assert!(!dd.join(net_subdir()).join(WALLET_NAME).exists(), "must not create an old-location wallet");
+        let _ = std::fs::remove_dir_all(&dd);
+
+        // fresh install: nothing anywhere
+        let dd2 = tmp_datadir("fresh");
+        assert_eq!(prepare_wallet_layout(&dd2), WalletLayout::Ok);
+        assert!(!dd2.join(net_subdir()).join("wallets").join(WALLET_NAME).exists());
+        assert!(!dd2.join(net_subdir()).join(WALLET_NAME).exists());
+        let _ = std::fs::remove_dir_all(&dd2);
+    }
+
+    // The dangerous case: a wallet.dat in BOTH locations with DIFFERENT contents. Never choose, overwrite or
+    // delete — a wallet in wallets/ could be empty while the real funds are in the old one. Both survive.
+    #[test]
+    fn refuses_to_touch_anything_when_both_locations_hold_a_different_wallet() {
+        let dd = tmp_datadir("conflict");
+        let chain = dd.join(net_subdir());
+        let legacy = chain.join(WALLET_NAME);
+        let canonical = chain.join("wallets").join(WALLET_NAME);
+        write_wallet(&legacy, b"OLD-FUNDS");
+        write_wallet(&canonical, b"NEW-EMPTY");
+
+        assert_eq!(prepare_wallet_layout(&dd), WalletLayout::Conflict);
+
+        assert_eq!(std::fs::read(legacy.join("wallet.dat")).unwrap(), b"OLD-FUNDS", "legacy must be untouched");
+        assert_eq!(std::fs::read(canonical.join("wallet.dat")).unwrap(), b"NEW-EMPTY", "canonical must be untouched");
+        let _ = std::fs::remove_dir_all(&dd);
+    }
+
+    // Crash between the two renames: the copy was promoted to wallets/brisvia but the process died before the
+    // legacy folder was renamed to a backup, leaving two BYTE-IDENTICAL copies. On the next start we must NOT
+    // freeze forever as a "conflict"; we recognise the identical pair and finish the job.
+    #[test]
+    fn completes_an_interrupted_migration_when_both_copies_are_identical() {
+        let dd = tmp_datadir("interrupted");
+        let chain = dd.join(net_subdir());
+        let legacy = chain.join(WALLET_NAME);
+        let canonical = chain.join("wallets").join(WALLET_NAME);
+        write_wallet(&legacy, b"SAME-KEYS");
+        write_wallet(&canonical, b"SAME-KEYS");
+
+        assert_eq!(prepare_wallet_layout(&dd), WalletLayout::Ok, "identical pair must complete, not conflict");
+
+        // canonical stays, legacy is moved to a dated backup outside wallets/
+        assert_eq!(std::fs::read(canonical.join("wallet.dat")).unwrap(), b"SAME-KEYS");
+        assert!(!legacy.join("wallet.dat").exists(), "the interrupted legacy copy must be moved aside");
+        let backup = std::fs::read_dir(&chain)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.file_name().to_string_lossy().starts_with(&format!("{}.legacy-backup-", WALLET_NAME)))
+            .expect("the completed migration must leave a dated backup");
+        assert_eq!(std::fs::read(backup.path().join("wallet.dat")).unwrap(), b"SAME-KEYS");
+        let _ = std::fs::remove_dir_all(&dd);
+    }
+
+    // An invalid destination: a canonical FOLDER exists but has no wallet.dat (an interrupted create, an empty
+    // dir, whatever). We must not migrate into it (the atomic rename needs the name free) nor delete it —
+    // classify it as a conflict and leave the legacy wallet exactly where it is.
+    #[test]
+    fn refuses_when_the_canonical_folder_exists_without_a_wallet() {
+        let dd = tmp_datadir("invaliddest");
+        let chain = dd.join(net_subdir());
+        let legacy = chain.join(WALLET_NAME);
+        write_wallet(&legacy, b"LEGACY-FUNDS");
+        std::fs::create_dir_all(chain.join("wallets").join(WALLET_NAME)).unwrap(); // dir exists, no wallet.dat
+
+        assert_eq!(prepare_wallet_layout(&dd), WalletLayout::Conflict);
+        assert_eq!(std::fs::read(legacy.join("wallet.dat")).unwrap(), b"LEGACY-FUNDS", "legacy must be untouched");
+        let _ = std::fs::remove_dir_all(&dd);
+    }
+
+    // A seed exists but there is no wallet.dat anywhere: the wallet was lost/removed. We must report recovery
+    // (so the UI offers restore) and NEVER silently create an empty wallet.
+    #[test]
+    fn reports_recovery_when_a_seed_exists_but_no_wallet() {
+        let dd = tmp_datadir("recovery");
+        std::fs::write(enc_seed_path(&dd), b"\x01encrypted-seed-bytes").unwrap();
+        assert_eq!(prepare_wallet_layout(&dd), WalletLayout::Recovery);
+        // nothing was created
+        assert!(!dd.join(net_subdir()).join("wallets").join(WALLET_NAME).exists());
+        let _ = std::fs::remove_dir_all(&dd);
+    }
+
+    // A leftover staging dir from a crash mid-copy is swept before anything else, so Core never enumerates it.
+    #[test]
+    fn sweeps_a_leftover_staging_dir() {
+        let dd = tmp_datadir("staging");
+        let wallets = dd.join(net_subdir()).join("wallets");
+        let stale = wallets.join(".brisvia-migrating-123");
+        write_wallet(&stale, b"HALF-COPIED");
+        assert_eq!(prepare_wallet_layout(&dd), WalletLayout::Ok);
+        assert!(!stale.exists(), "the leftover staging dir must be swept");
+        let _ = std::fs::remove_dir_all(&dd);
     }
 }
 
@@ -2579,15 +3218,14 @@ mod wallet_key_tests {
     }
 }
 
-// Update the notification-area tooltip so it always matches the current language and mining state.
-// Called on start/stop/intensity change AND on language change, so it never gets stuck in the wrong language.
+// Update the notification-area tooltip so it always matches the current mining state.
+// Called on start/stop/intensity change, so it never gets stuck showing the wrong state.
 fn refresh_tooltip(state: &AppState) {
     let tray_guard = state.tray.lock().unwrap();
     let tray = match tray_guard.as_ref() {
         Some(t) => t,
         None => return,
     };
-    let lang = state.lang.lock().unwrap().clone();
     let tip = if state.mining.load(Ordering::SeqCst) {
         let pct = match state.intensity.lock().unwrap().as_str() {
             "suave" => 25usize,
@@ -2598,15 +3236,43 @@ fn refresh_tooltip(state: &AppState) {
         .clamp(1, 100);
         let threads = state.miner_threads.load(Ordering::SeqCst);
         let cores = state.cores;
-        if lang == "es" {
-            format!("Brisvia — Minando al {}% · {} de {} núcleos", pct, threads, cores) // i18n-es (native tray tooltip, localized in code)
-        } else {
-            format!("Brisvia — Mining at {}% · {} of {} cores", pct, threads, cores)
-        }
+        format!("Brisvia v{} — Mining at {}% · {} of {} cores", env!("CARGO_PKG_VERSION"), pct, threads, cores)
     } else {
-        "Brisvia".to_string()
+        format!("Brisvia v{}", env!("CARGO_PKG_VERSION"))
     };
     let _ = tray.set_tooltip(Some(&tip));
+}
+
+/// Builds the miner worker command. Single source of truth so the first launch and the light-mode retry stay
+/// byte-for-byte identical except for BRISVIA_FORCE_LIGHT. Recreates the events file each call: a retry starts
+/// from a clean log (the follower re-reads the whole file every pass, so truncation is safe). RPC credentials
+/// travel via env, never argv; the pool URL only in pool mode; the plaintext-pool opt-out is always removed.
+fn build_worker_command(miner_bin: &Path, url: &str, addr: &str, cuser: &str, cpass: &str, threads: usize,
+                        pool_url: &Option<String>, events_path: &Path, force_light: bool) -> Command {
+    let out = std::fs::File::create(events_path).map(Stdio::from).unwrap_or_else(|_| Stdio::null());
+    let max_blocks = u64::MAX.to_string();
+    let thr = threads.to_string();
+    let mut cmd = Command::new(miner_bin);
+    cmd.args([url, "", "", addr, max_blocks.as_str(), thr.as_str()])
+        .env("BRISVIA_RPC_USER", cuser)
+        .env("BRISVIA_RPC_PASS", cpass)
+        .env("BRISVIA_JSON", "1")
+        .stdout(out)
+        .stderr(Stdio::null());
+    // Pass the pool URL only in pool mode; in solo mode REMOVE any inherited value so a leftover can never
+    // silently put the worker in pool mode (keeps the audited solo path pristine).
+    match pool_url {
+        Some(purl) => { cmd.env("BRISVIA_POOL_URL", purl); }
+        None => { cmd.env_remove("BRISVIA_POOL_URL"); }
+    }
+    // Never mine unencrypted: an inherited BRISVIA_POOL_PLAIN would downgrade the pool link to plain text, where
+    // a man-in-the-middle can rewrite the payout address. Remove it ALWAYS.
+    cmd.env_remove("BRISVIA_POOL_PLAIN");
+    // Light-mode retry: skip the ~2.1 GB fast dataset and mine in light from the start (used by the supervisor
+    // when a fast worker died before producing any work, e.g. Linux overcommit OOM-killing it mid-init).
+    if force_light { cmd.env("BRISVIA_FORCE_LIGHT", "1"); } else { cmd.env_remove("BRISVIA_FORCE_LIGHT"); }
+    no_window(&mut cmd);
+    cmd
 }
 
 #[tauri::command]
@@ -2710,10 +3376,9 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
     // mining not starting). Instead we redirect its stdout to a file —which never blocks on write, like the node—
     // and follow it (tail) from a thread that re-reads the file every half second.
     let events_path = state.datadir.join("miner-events.log");
-    let out_stdio = std::fs::File::create(&events_path).map(Stdio::from).unwrap_or_else(|_| Stdio::null());
     // Mining mode: solo (against the local node, default) or pool. In pool/custom mode the worker connects to a
     // stratum pool (BRISVIA_POOL_URL) and mines there; only the payout address travels in the login. The solo
-    // arguments below are still passed (the worker ignores them in pool mode) so nothing about solo changes.
+    // arguments are still passed (the worker ignores them in pool mode) so nothing about solo changes.
     let pool_url = {
         let mode = state.mining_mode.lock().unwrap().clone();
         match mode.as_str() {
@@ -2731,35 +3396,20 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
         state.mining.store(false, Ordering::SeqCst);
         return json!({ "mining": false, "error": "ERR:POOL_ADDR_MISSING" });
     }
-    let mut cmd = Command::new(&miner_bin);
-    // RPC credentials go via ENV, not argv: a process command line is readable by other local processes, so we keep
-    // the node cookie user/password out of it. The worker reads BRISVIA_RPC_USER/PASS (with an argv fallback for CLI).
-    let empty = String::new();
-    cmd.args([&url, &empty, &empty, &addr, &u64::MAX.to_string(), &threads.to_string()])
-        .env("BRISVIA_RPC_USER", &cuser)
-        .env("BRISVIA_RPC_PASS", &cpass)
-        .env("BRISVIA_JSON", "1")
-        .stdout(out_stdio)
-        .stderr(Stdio::null());
-    // Explicit mode: pass the pool URL only in pool mode; in solo mode REMOVE any inherited BRISVIA_POOL_URL so a
-    // residual/leftover value can never silently put the worker in pool mode (keeps the audited solo path pristine).
-    match &pool_url {
-        Some(purl) => { cmd.env("BRISVIA_POOL_URL", purl); }
-        None => { cmd.env_remove("BRISVIA_POOL_URL"); }
-    }
-    // The worker encrypts by default and only skips it if BRISVIA_POOL_PLAIN is set (the local e2e harness).
-    // Remove it ALWAYS: an inherited value -- from the user's environment, another program, or something
-    // hostile -- would silently downgrade the connection to plain text, and on a plain link anyone in the
-    // middle can rewrite the payout address and collect the rewards. The app must never mine unencrypted.
-    cmd.env_remove("BRISVIA_POOL_PLAIN");
-    no_window(&mut cmd);
-    let child = match cmd.spawn() {
+    // Record the EFFECTIVE backend for the peer-loss warning: solo iff no pool URL (so "custom without address",
+    // which mines solo, is covered, and a real pool session never raises the isolated-chain warning). Reset the
+    // peer-loss timer so a new session never inherits a stale 0-peers instant from a previous solo run.
+    state.mining_is_solo.store(pool_url.is_none(), Ordering::SeqCst);
+    *state.no_peers_since.lock().unwrap() = None;
+    // First launch: FAST where the RAM allows it (build_worker_command handles args, env creds and pool mode).
+    let child = match build_worker_command(&miner_bin, &url, &addr, &cuser, &cpass, threads, &pool_url, &events_path, false).spawn() {
         Ok(c) => c,
         Err(e) => { state.mining.store(false, Ordering::SeqCst); return json!({ "mining": false, "error": format!("could not start the miner: {e}") }); }
     };
 
     // Thread that follows the events file and updates accepted contributions + real hashrate.
     {
+        let events_path = events_path.clone(); // the follower gets its own copy; the supervisor keeps the original
         let mined = state.mined.clone();
         let stale = state.stale.clone();
         let hashrate = state.hashrate.clone();
@@ -2893,6 +3543,51 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
         });
     }
     *state.miner_child.lock().unwrap() = Some(child);
+
+    // Worker supervisor: watches for an UNEXPECTED worker exit (the follower thread only reads events, it never
+    // notices the process dying). A fast solo worker can be OOM-killed while building the ~2.1 GB dataset — on
+    // Linux, overcommit lets the 2.1 GB reservation "succeed" and then the kernel kills the process when it
+    // touches the pages, so try_new alone does not catch it. In that case we retry ONCE in light mode, so a small
+    // machine still mines (slower) instead of showing "Preparing…" forever. Any later death just stops cleanly.
+    {
+        let miner_child = state.miner_child.clone();
+        let mining = state.mining.clone();
+        let ready = state.miner_ready.clone();
+        let (miner_bin, url, addr, cuser, cpass) =
+            (miner_bin.clone(), url.clone(), addr.clone(), cuser.clone(), cpass.clone());
+        let (pool_url, events_path) = (pool_url.clone(), events_path.clone());
+        let is_solo = pool_url.is_none();
+        std::thread::spawn(move || {
+            let mut retried_light = false;
+            loop {
+                std::thread::sleep(Duration::from_millis(600));
+                if !mining.load(Ordering::SeqCst) { break; } // stopped by the user / another path
+                let mut guard = miner_child.lock().unwrap();
+                let exited = match guard.as_mut() {
+                    Some(child) => matches!(child.try_wait(), Ok(Some(_))),
+                    None => break, // the child was taken elsewhere (stop) -> nothing left to supervise
+                };
+                if !exited { continue; } // still running (a slow but healthy dataset build lands here)
+                // The worker exited on its own. If the user meanwhile stopped, treat it as a normal stop.
+                if !mining.load(Ordering::SeqCst) { *guard = None; break; }
+                // Retry once in light if a SOLO worker died BEFORE it ever produced work (never became ready):
+                // that is the dataset-OOM signature. Pool mode already falls back to light on its own.
+                if is_solo && !retried_light && !ready.load(Ordering::SeqCst) {
+                    retried_light = true;
+                    match build_worker_command(&miner_bin, &url, &addr, &cuser, &cpass, threads, &pool_url, &events_path, true).spawn() {
+                        Ok(c) => { *guard = Some(c); continue; }
+                        Err(_) => { *guard = None; }
+                    }
+                } else {
+                    *guard = None;
+                }
+                // Give up: stop cleanly so the UI stops showing "Mining/Preparing" forever.
+                mining.store(false, Ordering::SeqCst);
+                ready.store(false, Ordering::SeqCst);
+                break;
+            }
+        });
+    }
     json!({ "mining": true })
 }
 
@@ -2944,6 +3639,84 @@ fn physical_cores() -> usize {
     *PHYS.get_or_init(num_cpus::get_physical)
 }
 
+// Total PHYSICAL RAM installed, in MiB (0 = could not detect). Read once. This is the FIXED hardware, NOT the
+// momentarily free memory: a good machine running a heavy game still reports its full RAM, so the "mine in a
+// group" hint (which uses this) never fires on a capable computer that is merely busy right now. Implemented
+// natively per-OS to avoid pulling in a system-info crate.
+fn total_ram_mb() -> u64 {
+    use std::sync::OnceLock;
+    static RAM: OnceLock<u64> = OnceLock::new();
+    *RAM.get_or_init(detect_total_ram_mb)
+}
+
+#[cfg(target_os = "linux")]
+fn detect_total_ram_mb() -> u64 {
+    // /proc/meminfo reports "MemTotal:   <kB> kB". kB -> MiB.
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("MemTotal:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|n| n.parse::<u64>().ok())
+        })
+        .map(|kb| kb / 1024)
+        .unwrap_or(0)
+}
+
+#[cfg(target_os = "macos")]
+fn detect_total_ram_mb() -> u64 {
+    // sysctl hw.memsize returns total physical memory in bytes.
+    std::process::Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(|bytes| bytes / (1024 * 1024))
+        .unwrap_or(0)
+}
+
+#[cfg(target_os = "windows")]
+fn detect_total_ram_mb() -> u64 {
+    // GlobalMemoryStatusEx (kernel32) fills ullTotalPhys with total physical memory in bytes. FFI declared inline
+    // so no extra crate is needed; the struct layout MUST match MEMORYSTATUSEX exactly (order and widths).
+    #[repr(C)]
+    struct MemoryStatusEx {
+        length: u32,
+        memory_load: u32,
+        total_phys: u64,
+        avail_phys: u64,
+        total_page_file: u64,
+        avail_page_file: u64,
+        total_virtual: u64,
+        avail_virtual: u64,
+        avail_extended_virtual: u64,
+    }
+    extern "system" {
+        fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
+    }
+    let mut s: MemoryStatusEx = unsafe { std::mem::zeroed() };
+    s.length = std::mem::size_of::<MemoryStatusEx>() as u32;
+    if unsafe { GlobalMemoryStatusEx(&mut s) } != 0 {
+        s.total_phys / (1024 * 1024)
+    } else {
+        0
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn detect_total_ram_mb() -> u64 {
+    0
+}
+
+// Whether this machine is weak enough that solo mining will be painfully slow and the group is the better fit:
+// 4 GiB or less of RAM (RandomX needs ~2.1 GB just for the fast dataset) OR 2 or fewer logical cores. A RAM
+// reading of 0 means "unknown" and never counts as weak on its own. Fixed hardware only (see total_ram_mb).
+fn hardware_is_weak(ram_mb: u64, cores: usize) -> bool {
+    (ram_mb > 0 && ram_mb <= 4096) || cores <= 2
+}
+
 // The launch instant, as the single canonical UTC source of truth for "is mainnet live yet". In production this
 // is ALWAYS the fixed constant. Only an e2e/CI build (feature "e2e") may override it via BRISVIA_E2E_MAINNET_START,
 // so a test can cross the launch boundary in seconds without touching the machine clock. The override literally
@@ -2990,6 +3763,28 @@ fn miner_status(state: State<AppState>) -> Value {
         else if pool_everjob { "waiting" }
         else { "authenticated" };
     let pool_retry_secs = pool_retry_at.saturating_sub(now_secs);
+    // Sustained peer-loss warning while mining SOLO on mainnet: if the node holds 0
+    // peers for >= 75 s the solo miner may be extending an isolated branch whose blocks get discarded (no funds
+    // lost). We only WARN (persistent yellow banner in the UI) — never stop, switch mode or restart.
+    //
+    // `mining_is_solo` is the EFFECTIVE backend (pool_url.is_none() at launch), not the UI mode name, so a real
+    // pool session never triggers it and "custom without an address" (which mines solo) does. THREE RPC states, so
+    // a transient RPC failure never flips the warning: 0 peers -> start/keep the timer; >=1 peer -> clear timer and
+    // warning; RPC failed -> leave the prior state untouched (the node problem surfaces via node_status, not here).
+    let warn_no_peers = if mining
+        && state.mining_is_solo.load(Ordering::SeqCst)
+        && net_chain() == NET_CHAIN
+    {
+        let mut since = state.no_peers_since.lock().unwrap();
+        match rpc(&state.datadir, None, "getconnectioncount", json!([])).ok().and_then(|v| v.as_u64()) {
+            Some(0) => since.get_or_insert_with(Instant::now).elapsed().as_secs() >= 75,
+            Some(_) => { *since = None; false }                                   // a peer is really back -> clear
+            None => since.map(|t| t.elapsed().as_secs() >= 75).unwrap_or(false),  // RPC failed -> keep prior state
+        }
+    } else {
+        *state.no_peers_since.lock().unwrap() = None;
+        false
+    };
     json!({
         "mining": mining,
         "preparing": preparing,
@@ -3004,6 +3799,14 @@ fn miner_status(state: State<AppState>) -> Value {
         // core count, shown alongside it so "24 cores / 32 threads" reads honestly (mining runs on threads).
         "cores": state.cores as u64,
         "physicalCores": physical_cores() as u64,
+        // Fixed hardware (RAM installed + cores) + whether it's weak enough that the app should suggest group
+        // mining. Uses TOTAL installed RAM, never momentary free memory, so a capable machine busy with a game is
+        // never flagged. ramMb = 0 means "unknown". The frontend shows the group-hint popup once when weak.
+        "hardware": {
+            "ramMb": total_ram_mb(),
+            "cores": state.cores as u64,
+            "weak": hardware_is_weak(total_ram_mb(), state.cores),
+        },
         // Which mode the app is ACTUALLY running (normalised: never "pool" while POOL_ENABLED is off).
         "mode": state.mining_mode.lock().unwrap().clone(),
         // Pool-mode live status for the honest UI. `sharesSent` is what left the miner; `sharesAccepted` is what
@@ -3028,7 +3831,10 @@ fn miner_status(state: State<AppState>) -> Value {
         "mainnetStartMs": mainnet_start_ms,
         "autoStart": auto_start,
         "autoIntensity": auto_intensity,
-        "totalSeconds": total
+        "totalSeconds": total,
+        // Sustained-peer-loss warning for solo mining (computed above): true only after >= 75 s at 0 peers.
+        // The UI shows a persistent yellow banner; nothing about the mining itself changes.
+        "warnNoPeers": warn_no_peers
     })
 }
 
@@ -3444,45 +4250,89 @@ fn set_language(app: AppHandle, state: State<AppState>, lang: String) {
 // don't have to re-download it when real mining starts. Updates are signed (minisign);
 // the download step verifies the signature before anything is installed.
 
-// Builds an Updater. Honors BRISVIA_UPDATE_ENDPOINT (end-to-end testing only); otherwise
-// uses the endpoint from tauri.conf (GitHub Releases).
-fn build_updater(app: &tauri::AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
+// Update endpoints, tried IN ORDER by `find_update`: GitHub FIRST (its global CDN is the robust common
+// path), with a SHORT timeout so a user on a network that blocks GitHub (e.g. China's Great Firewall) waits
+// only those few seconds before falling back to the Brisvia mirror instead of hanging forever. The Brisvia
+// mirror (our VPS) is the SECOND, backup endpoint. The fallback is done EXPLICITLY here (two separate checks)
+// rather than relying on the plugin's multi-endpoint behavior, which is ambiguous across plugin versions.
+// Both serve the SAME signed artifact; the minisign signature is verified before install regardless of which
+// endpoint answered. The short GitHub timeout is the whole reason this doesn't reproduce the China hang.
+const GITHUB_ENDPOINT: &str =
+    "https://github.com/brisvia/brisvia-desktop/releases/latest/download/latest.json";
+const MIRROR_ENDPOINT: &str = "https://brisvia.com/updates/latest.json";
+// Short first-endpoint timeout: long enough for a slow-but-working connection, short enough that a blocked
+// GitHub falls back to the mirror quickly. The mirror gets a slightly longer window as the last resort.
+const GITHUB_TIMEOUT_SECS: u64 = 8;
+const MIRROR_TIMEOUT_SECS: u64 = 12;
+
+// Maps an updater failure to one of the ERR:UPDATE_* codes the UI knows. UNREACHABLE (timeout/connect/dns/
+// tls) is the default; a reachable-but-broken feed is METADATA_INVALID; a bad signature is its own code.
+fn classify_update_error(e: &str) -> &'static str {
+    let el = e.to_lowercase();
+    if el.contains("signature") || el.contains("minisign") {
+        "ERR:UPDATE_SIGNATURE_INVALID"
+    } else if el.contains("json") || el.contains("parse") || el.contains("deserialize")
+        || el.contains("expected value") || el.contains("metadata")
+    {
+        "ERR:UPDATE_METADATA_INVALID"
+    } else {
+        "ERR:UPDATE_UNREACHABLE"
+    }
+}
+
+// Checks ONE endpoint for a signed update, with a bounded timeout so a black-holed connection (a firewall
+// that silently drops packets, not just a DNS failure) can't hang forever. `test_certs` relaxes TLS only for
+// the local self-test server (BRISVIA_UPDATE_ENDPOINT); production keeps full validation.
+async fn check_at(app: &tauri::AppHandle, endpoint: &str, timeout_secs: u64, test_certs: bool)
+    -> Result<Option<tauri_plugin_updater::Update>, String> {
     use tauri_plugin_updater::UpdaterExt;
-    match std::env::var("BRISVIA_UPDATE_ENDPOINT") {
-        Ok(ep) if !ep.is_empty() => {
-            let url = tauri::Url::parse(&ep).map_err(|e| e.to_string())?;
-            // Test-only: when the override endpoint is set (local end-to-end/self-test), accept the
-            // self-signed TLS cert of the local HTTPS server. This only affects the transport of the
-            // controlled test endpoint; the minisign signature check on the artifact is untouched.
-            // Production uses app.updater() (below), which keeps full TLS validation.
-            app.updater_builder()
-                .endpoints(vec![url])
-                .map_err(|e| e.to_string())?
-                .configure_client(|c| {
-                    c.danger_accept_invalid_certs(true)
-                        .danger_accept_invalid_hostnames(true)
-                })
-                .build()
-                .map_err(|e| e.to_string())
+    let url = tauri::Url::parse(endpoint).map_err(|e| e.to_string())?;
+    let mut builder = app
+        .updater_builder()
+        .endpoints(vec![url])
+        .map_err(|e| e.to_string())?
+        .timeout(std::time::Duration::from_secs(timeout_secs));
+    if test_certs {
+        builder = builder.configure_client(|c| {
+            c.danger_accept_invalid_certs(true).danger_accept_invalid_hostnames(true)
+        });
+    }
+    let updater = builder.build().map_err(|e| e.to_string())?;
+    updater.check().await.map_err(|e| e.to_string())
+}
+
+// Finds a signed update: GitHub first (short timeout), the Brisvia mirror second. Only when BOTH fail do we
+// return a classified error (typically ERR:UPDATE_UNREACHABLE). A test override short-circuits to one endpoint.
+async fn find_update(app: &tauri::AppHandle) -> Result<Option<tauri_plugin_updater::Update>, String> {
+    if let Ok(ep) = std::env::var("BRISVIA_UPDATE_ENDPOINT") {
+        if !ep.is_empty() {
+            return check_at(app, &ep, 15, true)
+                .await
+                .map_err(|e| classify_update_error(&e).to_string());
         }
-        _ => app.updater().map_err(|e| e.to_string()),
+    }
+    // GitHub first (short timeout), then the Brisvia mirror. Only when BOTH fail do we classify and report.
+    match check_at(app, GITHUB_ENDPOINT, GITHUB_TIMEOUT_SECS, false).await {
+        Ok(u) => Ok(u),
+        Err(_github) => match check_at(app, MIRROR_ENDPOINT, MIRROR_TIMEOUT_SECS, false).await {
+            Ok(u) => Ok(u),
+            Err(mirror) => Err(classify_update_error(&mirror).to_string()),
+        },
     }
 }
 
 async fn check_update_inner(app: &tauri::AppHandle) -> Result<serde_json::Value, String> {
-    let updater = build_updater(app)?;
-    match updater.check().await {
-        Ok(Some(u)) => Ok(json!({
+    match find_update(app).await? {
+        Some(u) => Ok(json!({
             "available": true,
             "version": u.version,
             "currentVersion": u.current_version,
             "notes": u.body,
         })),
-        Ok(None) => Ok(json!({
+        None => Ok(json!({
             "available": false,
             "currentVersion": app.package_info().version.to_string(),
         })),
-        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -3495,11 +4345,8 @@ async fn check_update(app: tauri::AppHandle) -> Result<serde_json::Value, String
 // Frontend: download the newer version (verifies signature), install it and relaunch.
 #[tauri::command]
 async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
-    let updater = build_updater(&app)?;
-    let update = updater
-        .check()
-        .await
-        .map_err(|e| e.to_string())?
+    let update = find_update(&app)
+        .await?
         .ok_or_else(|| "ERR:NO_UPDATE".to_string())?;
     // The node has to be COMPLETELY gone before the installer touches a single file.
     //
@@ -3520,10 +4367,23 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
             return Err("ERR:NODE_STILL_RUNNING".to_string());
         }
     }
+    // Tauri verifies the minisign signature of the downloaded artifact before installing it; a bad or
+    // altered package is rejected here. Classify the failure so the UI can tell the user whether it was a
+    // download problem (retry / bad network), a signature problem (do not trust the file), or an install
+    // problem, instead of a raw error string.
     update
         .download_and_install(|_chunk, _total| {}, || {})
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            let sl = e.to_string().to_lowercase();
+            if sl.contains("signature") || sl.contains("minisign") || sl.contains("verify") {
+                "ERR:UPDATE_SIGNATURE_INVALID".to_string()
+            } else if sl.contains("install") || sl.contains("extract") || sl.contains("permission") {
+                "ERR:UPDATE_INSTALL_FAILED".to_string()
+            } else {
+                "ERR:UPDATE_DOWNLOAD_FAILED".to_string()
+            }
+        })?;
     app.restart();
 }
 
@@ -3552,6 +4412,10 @@ pub fn run() {
     let datadir = std::env::var("BRISVIA_DATADIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| dirs_data_dir().join("BrisviaSim"));
+    // TEMP-fatal: an explicit BRISVIA_DATADIR is a deliberate (test/advanced) choice and is trusted. Otherwise,
+    // if there is no permanent per-user data dir, `datadir` above is under the OS temp dir -- flag it so the app
+    // refuses to start the node, create a wallet, write the seed or mine instead of putting keys on TEMP.
+    let datadir_fatal = std::env::var("BRISVIA_DATADIR").is_err() && permanent_data_dir().is_none();
     let total_secs_initial = load_total_mined(&datadir);
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
 
@@ -3559,6 +4423,9 @@ pub fn run() {
     let state = AppState {
         child: Arc::new(Mutex::new(None)),
         datadir,
+        datadir_fatal,
+        wallet_layout: Arc::new(Mutex::new("ok".into())),
+        node_start: Arc::new(Mutex::new(())),
         wallet_loaded: Arc::new(AtomicBool::new(false)),
         sending: Arc::new(Mutex::new(())),
         wallet_ops: Arc::new(Mutex::new(())),
@@ -3592,6 +4459,10 @@ pub fn run() {
         miner_threads: Arc::new(AtomicU64::new(0)),
         total_mined_secs: Arc::new(Mutex::new(total_secs_initial)),
         ach_cache: Arc::new(Mutex::new(None)),
+        node_error: Arc::new(Mutex::new(None)),
+        node_attempt: Arc::new(AtomicU64::new(0)),
+        no_peers_since: Arc::new(Mutex::new(None)),
+        mining_is_solo: Arc::new(AtomicBool::new(true)),
     };
 
     let mut builder = tauri::Builder::default();
@@ -3627,19 +4498,18 @@ pub fn run() {
                 let h = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     let mut out = String::new();
-                    match build_updater(&h) {
-                        Ok(updater) => match updater.check().await {
-                            Ok(Some(update)) => {
-                                out.push_str(&format!("SELFTEST_CHECK available version={} current={}\n", update.version, update.current_version));
-                                match update.download(|_c, _t| {}, || {}).await {
-                                    Ok(bytes) => out.push_str(&format!("SELFTEST_DOWNLOAD ok signature_valid bytes={}\n", bytes.len())),
-                                    Err(e) => out.push_str(&format!("SELFTEST_DOWNLOAD fail {}\n", e)),
-                                }
+                    // Exercise the SAME path the app uses (find_update: GitHub then the Brisvia mirror, with the
+                    // BRISVIA_UPDATE_ENDPOINT test override), so the self-test covers the real fallback logic.
+                    match find_update(&h).await {
+                        Ok(Some(update)) => {
+                            out.push_str(&format!("SELFTEST_CHECK available version={} current={}\n", update.version, update.current_version));
+                            match update.download(|_c, _t| {}, || {}).await {
+                                Ok(bytes) => out.push_str(&format!("SELFTEST_DOWNLOAD ok signature_valid bytes={}\n", bytes.len())),
+                                Err(e) => out.push_str(&format!("SELFTEST_DOWNLOAD fail {}\n", e)),
                             }
-                            Ok(None) => out.push_str("SELFTEST_CHECK none already_latest\n"),
-                            Err(e) => out.push_str(&format!("SELFTEST_CHECK error {}\n", e)),
-                        },
-                        Err(e) => out.push_str(&format!("SELFTEST_UPDATER error {}\n", e)),
+                        }
+                        Ok(None) => out.push_str("SELFTEST_CHECK none already_latest\n"),
+                        Err(e) => out.push_str(&format!("SELFTEST_CHECK error {}\n", e)),
                     }
                     print!("{}", out);
                     if let Ok(p) = std::env::var("BRISVIA_SELFTEST_OUT") { let _ = std::fs::write(&p, &out); }
@@ -3655,9 +4525,11 @@ pub fn run() {
                 std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_millis(700));
                     let state = node_handle.state::<AppState>();
-                    if let Err(e) = start_node(&node_handle, &state) {
-                        eprintln!("[brisvia] could not start the node: {}", e);
-                    }
+                    // Claim this attempt's number so a later retry can supersede us. record_node_start surfaces
+                    // the ERR:NODE_* code to the UI (via node_status) instead of leaving an endless "connecting…".
+                    let epoch = state.node_attempt.fetch_add(1, Ordering::SeqCst) + 1;
+                    let r = start_node(&node_handle, &state);
+                    record_node_start(&state, epoch, r);
                 });
             }
             let state = app.state::<AppState>();
@@ -3703,14 +4575,35 @@ pub fn run() {
             let wallet_loaded = state.wallet_loaded.clone();
             let receive_addr = state.receive_addr.clone();
             std::thread::spawn(move || {
-                for _ in 0..90 {
+                // Wait for the node's RPC before touching the wallet. The ceiling matches the worst-case
+                // pre-launch startup (up to ~120 s initial + ~180 s reindex in start_node), so a slow repair
+                // never makes this thread give up early and leave the wallet unloaded while the node is still
+                // coming up. A normal start answers in seconds and breaks out immediately.
+                for _ in 0..300 {
                     if rpc(&datadir, None, "getblockcount", json!([])).is_ok() {
                         break;
                     }
                     std::thread::sleep(Duration::from_secs(1));
                 }
+                // Before touching the wallet, make sure the RPC we reached is OUR node, not a stranger that
+                // happened to be on the same port (an old Brisvia, a manually started node, a testnet, a leftover
+                // process after an update). getblockcount answering is not proof of identity; the chain name is.
+                // If it is not ours, do NOT load the wallet into it — leave the app on its "connecting" state
+                // rather than operate against an unknown node.
+                let expected_chain = net_chain();
+                if let Ok(info) = rpc(&datadir, None, "getblockchaininfo", json!([])) {
+                    // Only refuse on a DEFINITE mismatch: the node answered and it is a different chain. A
+                    // transient RPC error here does not block the wallet (getblockcount already proved the node
+                    // is up), so a slow startup never strands the user with an unloadable wallet.
+                    if info["chain"].as_str() != Some(expected_chain.as_str()) {
+                        eprintln!("startup: node on the RPC port is not our '{expected_chain}' chain; wallet not loaded");
+                        return;
+                    }
+                }
                 // Load the "brisvia" wallet ONLY if it already exists (created earlier with 12 words). If it does
                 // not exist, it is NOT created automatically: the UI shows the onboarding to create or import.
+                // Any wallet left in the pre-wallets/ location by an older build was already moved into the fixed
+                // wallet directory by prepare_wallet_layout(), which runs before the node starts (see start_node).
                 let exists = rpc(&datadir, None, "listwalletdir", json!([]))
                     .map(|v| {
                         v["wallets"].as_array().map(|a| a.iter().any(|w| w["name"] == WALLET_NAME)).unwrap_or(false)
@@ -3742,6 +4635,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             node_status,
+            node_retry,
             wallet_exists,
             wallet_seed_on_disk,
             wallet_validate_phrase,
@@ -3808,21 +4702,24 @@ fn docs_dir() -> PathBuf {
     dirs_data_dir()
 }
 
-// User data directory, cross-platform with no extra dependencies.
-fn dirs_data_dir() -> PathBuf {
+// The OS's PERMANENT per-user data dir, or None if the platform's expected variable is missing/empty. When this
+// is None, the only fallback would be TEMP (ephemeral) -- run() treats that as fatal instead of writing keys there.
+fn permanent_data_dir() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            return PathBuf::from(appdata).join("Brisvia");
-        }
+        return std::env::var("APPDATA").ok().filter(|p| !p.is_empty()).map(|p| PathBuf::from(p).join("Brisvia"));
     }
     #[cfg(not(target_os = "windows"))]
     {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(".brisvia");
-        }
+        return std::env::var("HOME").ok().filter(|p| !p.is_empty()).map(|p| PathBuf::from(p).join(".brisvia"));
     }
-    std::env::temp_dir().join("Brisvia")
+}
+
+// User data directory, cross-platform with no extra dependencies. Falls back to TEMP only as a last resort;
+// run() detects that fallback (via permanent_data_dir) and marks the app datadir_fatal rather than writing keys
+// to ephemeral storage. Non-critical callers (e.g. docs_dir) tolerate the TEMP fallback.
+fn dirs_data_dir() -> PathBuf {
+    permanent_data_dir().unwrap_or_else(|| std::env::temp_dir().join("Brisvia"))
 }
 
 // Error messages that reach the user must be translated codes, never Core's raw English.
@@ -4267,6 +5164,72 @@ mod rpc_wire_format_tests {
 // A comment saying "do not kill it" does not stop anyone from killing it. These tests do: if a kill
 // ever reappears on the node's path, they turn red.
 // ============================================================================================
+// ============================================================================================
+// The heart of the 1.1.2 fix: a node is READY only when it answers its RPC AND is still alive. A process
+// that merely "has not died yet" must NOT be reported as ready -- that was the defect that enabled the
+// wallet on a node about to die from the future-dated genesis. These tests pin that contract.
+// ============================================================================================
+#[cfg(test)]
+mod node_readiness_tests {
+    use super::*;
+
+    // A process that will not close on its own, standing in for a node still verifying the genesis.
+    fn stubborn() -> std::process::Child {
+        #[cfg(target_os = "windows")]
+        let c = Command::new("cmd").args(["/c", "ping -n 60 127.0.0.1 >nul"]).spawn();
+        #[cfg(not(target_os = "windows"))]
+        let c = Command::new("sleep").arg("60").spawn();
+        c.expect("could not spawn the test process")
+    }
+
+    // A process that exits immediately.
+    fn quick() -> std::process::Child {
+        #[cfg(target_os = "windows")]
+        let c = Command::new("cmd").args(["/c", "exit 0"]).spawn();
+        #[cfg(not(target_os = "windows"))]
+        let c = Command::new("true").spawn();
+        c.expect("could not spawn the test process")
+    }
+
+    // THE regression test: alive but no usable RPC (no cookie => the probe can never succeed) must time out,
+    // NEVER be treated as ready. This is exactly the case that used to slip through the fixed 6 s window and
+    // let the app enable the wallet on a node seconds from dying.
+    #[test]
+    fn alive_but_no_rpc_never_reports_ready() {
+        let dir = std::env::temp_dir().join(format!("brisvia-ready-timeout-{}", ahora_secs()));
+        let _ = std::fs::create_dir_all(&dir); // no .cookie inside: rpc_probe_ready always fails
+        let mut child = stubborn();
+        let out = wait_until_ready_or_dead(&mut child, &dir, Duration::from_millis(900));
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(out == NodeReady::TimedOut, "an alive node with no RPC must be TimedOut, never Answering");
+    }
+
+    // A process that has already exited is reported Exited, so start_node classifies the log and repairs
+    // (with -reindex for the future genesis) instead of declaring a dead node healthy.
+    #[test]
+    fn a_process_that_exited_is_reported_exited() {
+        let dir = std::env::temp_dir().join(format!("brisvia-ready-exited-{}", ahora_secs()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut child = quick();
+        std::thread::sleep(Duration::from_millis(300)); // let it exit before we look
+        let out = wait_until_ready_or_dead(&mut child, &dir, Duration::from_secs(2));
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(out == NodeReady::Exited, "a process that already exited must be Exited");
+    }
+
+    // A missing/garbage cookie must make the readiness probe fail closed, never pass.
+    #[test]
+    fn probe_fails_closed_without_a_valid_cookie() {
+        let dir = std::env::temp_dir().join(format!("brisvia-ready-nocookie-{}", ahora_secs()));
+        let _ = std::fs::create_dir_all(&dir);
+        assert!(!rpc_probe_ready(&dir, &net_chain()), "no cookie must never read as ready");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 #[cfg(test)]
 mod node_shutdown_tests {
     use super::*;

@@ -43,7 +43,7 @@ exports.config = {
         autoDownloadEdgeDriver: true, // downloads the msedgedriver matching the machine's WebView2
         captureBackendLogs: true, // Rust backend logs in the report
         captureFrontendLogs: true, // frontend console.* in the report
-        startTimeout: 60000, // the app starts the node in the background; give it room
+        startTimeout: 150000, // the app starts the node in the background; a cold CI runner needs real room
       },
     ],
   ],
@@ -58,7 +58,11 @@ exports.config = {
   reporters: ['spec'],
   mochaOpts: {
     ui: 'bdd',
-    timeout: 180000, // node/mining journeys can take a while; the real cutoff is done by the internal waitFor calls
+    // This is the HARD per-test ceiling and it must stay ABOVE the sum of a spec's internal waitFor timeouts,
+    // or Mocha kills the test first and the internal waits never get their full budget. First launch on a cold
+    // CI runner can spend a few minutes bringing the node up (version chip 60s + waitRpcUp 240s + onboarding
+    // 60s), so give the ceiling real room. Fast runners still finish in seconds; this is only a cap.
+    timeout: 600000,
   },
 
   // Note: the per-command focus handling of @wdio/tauri-service (ensureActiveWindowFocus, which runs

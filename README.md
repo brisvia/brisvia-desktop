@@ -36,25 +36,22 @@ anyone — including anyone claiming to be from Brisvia.
 
 ## Download
 
-**Recommended download: 1.1.2** — fixes a startup issue (on some computers the wallet could be slow to
-open, or error when creating/reopening it) plus Linux compatibility. Get it from the
-[1.1.2 release page](https://github.com/brisvia/brisvia-desktop/releases/tag/v1.1.2) or from
-[brisvia.com](https://brisvia.com), with their checksums. Automatic updates currently remain on 1.1.1, so
-1.1.2 is an optional manual download for now. Every release is listed on the
-[Releases page](https://github.com/brisvia/brisvia-desktop/releases):
+Installers for the current release are on the
+[Releases page](https://github.com/brisvia/brisvia-desktop/releases/latest), and are also linked from
+[brisvia.com](https://brisvia.com) with their checksums:
 
 | System  | File                                  | Notes                        |
 |---------|---------------------------------------|------------------------------|
 | Windows | `Brisvia-Miner-Windows.exe`           | Windows 10 and 11, 64-bit    |
 | macOS   | `Brisvia-Miner-macOS.dmg`             | Apple Silicon                |
 | Linux   | `Brisvia.Miner_<version>_amd64.deb`   | Debian and Ubuntu, 64-bit    |
-| Linux   | `Brisvia.Miner_<version>_amd64.AppImage` | 64-bit — Ubuntu 22.04+, Debian 12+, Fedora 44 |
+| Linux   | `Brisvia.Miner_<version>_amd64.AppImage` | 64-bit — **see the warning below** |
 
-> **AppImage compatibility (since 1.1.2).** The 1.1.2 AppImage opens on Ubuntu 22.04 / 24.04 / 26.04,
-> Debian 12 and Fedora 44 — each validated in a real container. It no longer bundles GLib or its low-level
-> dependencies (libmount, PCRE, libffi, …), so the host provides a coherent set instead of clashing with an
-> older bundled copy. The 1.1.0 / 1.1.1 AppImage did not start on Ubuntu 24.04+ or Fedora 44; the `.deb`
-> was never affected because it always uses the host's libraries.
+> **On Ubuntu 24.04 or newer, take the `.deb`.** The 1.1.0 AppImage does not start there: it bundles an
+> older GLib than those systems ship, and their GIO/GVFS modules — which are loaded from the system
+> whatever the AppImage carries — call a function that older GLib does not export. Reproduced inside a
+> real Ubuntu 26.04 container and fixed in the build for the next release. Ubuntu 22.04 and Debian 12
+> are unaffected, and the `.deb` never had the problem because it uses the host's GLib.
 
 After installing, open Brisvia Miner, save your 12 words, and press **Start**.
 

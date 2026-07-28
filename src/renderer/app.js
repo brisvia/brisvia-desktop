@@ -25,6 +25,9 @@ function transError(err) {
       NODE_REPAIR_FAILED: 'errors.node_repair_failed',
       NODE_START_FAILED: 'errors.node_start_failed',
       NODE_BINARY_MISSING: 'errors.node_binary_missing',
+      DATADIR_UNAVAILABLE: 'errors.datadir_unavailable',
+      WALLET_CONFLICT: 'errors.wallet_conflict',
+      WALLET_RECOVERY: 'errors.wallet_recovery',
       INVALID_AMOUNT: 'errors.invalid_amount', SEND_IN_PROGRESS: 'errors.send_in_progress',
       AMOUNT_TOO_SMALL: 'errors.amount_too_small',
       OPERATION_FAILED: 'errors.operation_failed', SEND_STATUS_UNKNOWN: 'errors.send_status_unknown',
@@ -35,6 +38,11 @@ function transError(err) {
       POOL_ADDR_LOCAL: 'errors.pool_addr_local',
       NO_UPDATE: 'errors.no_update',
       NODE_STILL_RUNNING: 'errors.node_still_running',
+      UPDATE_UNREACHABLE: 'errors.update_unreachable',
+      UPDATE_METADATA_INVALID: 'errors.update_metadata_invalid',
+      UPDATE_DOWNLOAD_FAILED: 'errors.update_download_failed',
+      UPDATE_SIGNATURE_INVALID: 'errors.update_signature_invalid',
+      UPDATE_INSTALL_FAILED: 'errors.update_install_failed',
     };
     const key = map[err.slice(4)];
     if (key) return T(key);
@@ -287,15 +295,35 @@ function fmtDuration(secs) {
   if (m > 0) return `${u(m, 'unit_min')} ${u(s, 'unit_s')}`;
   return u(s, 'unit_s');
 }
+// One-time "mine in a group" suggestion for weak hardware. Fires ONCE (persisted in localStorage), only when the
+// machine is weak (little installed RAM / few cores — fixed hardware, never momentary free memory), mining is
+// actually available right now (network open, not syncing, not already mining) and the user is still on solo.
+// Never forced: the popup lets the user keep solo, informed. The group uses the official pool, live once mainnet is.
+function maybeShowGroupHint(s) {
+  if (!s || !s.hardware || !s.hardware.weak) return;
+  if (currentMiningMode !== 'solo') return;              // already in a group -> nothing to suggest
+  if (localStorage.getItem('brisvia_group_hint_shown')) return;
+  if (isWaitMode() || syncing || mining) return;         // only when mining is available and the user is idle
+  localStorage.setItem('brisvia_group_hint_shown', '1'); // show at most once, ever
+  const m = $('#modal-group-hint');
+  if (m) m.hidden = false;
+}
+
 async function refreshMine() {
   const s = await window.brisvia.getStatus();
   mining = s.mining;
+  // Sustained peer-loss warning strip while mining SOLO (backend raises it after >= 75 s at 0 peers). Purely
+  // informational: the mining is not stopped or switched; the strip clears itself the moment a peer returns.
+  { const sib = $('#solo-isolated-banner'); if (sib) sib.hidden = !(s && s.warnNoPeers); }
+  // Live mining indicator in the topbar (visible from any tab): show it only while mining is on.
+  const miningInd = $('#mining-ind'); if (miningInd) miningInd.hidden = !mining;
   // Single source of truth from the backend: the canonical launch instant and the persisted auto-start choice
   // (re-armed after a restart). We do not overwrite the local armed flag while a start is mid-flight.
   if (typeof s.mainnetStartMs === 'number') backendMainnetMs = s.mainnetStartMs;
   if (typeof s.autoStart === 'boolean' && !autoStarting) autoArmed = s.autoStart;
   if (typeof s.autoIntensity === 'string') autoIntensity = s.autoIntensity;
   renderMineMode(s); // keep the in-tab mode box in sync with the REAL active mode (before any early return)
+  maybeShowGroupHint(s); // one-time "mine in a group" suggestion for weak hardware (little RAM / few cores)
   evalAutoStart(s);  // honour the voluntary auto-start-at-launch (never without consent, never pool->solo)
   // Suppress the "Preparing…" flash for a few seconds after a live power change (the engine relaunches behind the scenes).
   const preparing = mining && s.preparing && Date.now() > suppressPreparingUntil;
@@ -451,19 +479,39 @@ function refreshPowLabel() {
 }
 // Which named preset the slider value maps to (Light/Balanced/High/Max), by nearest range.
 function nearestPreset(pct) { return pct <= 37 ? 25 : pct <= 62 ? 50 : pct <= 87 ? 75 : 100; }
+// The label of the CPU preset currently active in the Mining-tab slider (Light/Balanced/High/Max), already
+// translated. The auto-start summary reuses it so "CPU: …" always mirrors what the slider actually shows.
+function activePresetLabel() {
+  // Only the INTENSITY presets carry data-pct; the mining-mode buttons (Solo/Pool/Custom) share the
+  // .mine-grid .seg-btn class, so this MUST be scoped to [data-pct] or the auto-start summary would show the
+  // mining MODE (e.g. "Solo") instead of the CPU intensity ("High"). Real bug caught by journey 16.
+  const b = $('.mine-grid .seg-btn.active[data-pct]');
+  return b ? b.textContent.trim() : '';
+}
 function setPower(pct, apply) {
   pct = Math.max(1, Math.min(100, parseInt(pct, 10) || 50));
   const r = $('#pow-range'); if (r) r.value = pct;
   refreshPowLabel();
-  // Auto-select the nearest named preset in BOTH controls (Mine and Settings) so they stay in sync.
+  // Auto-select the nearest named preset in BOTH controls (Mine and Settings) so they stay in sync. Scope to the
+  // INTENSITY presets ([data-pct]): the mining-mode buttons (Solo/Pool/Custom) also match .mine-grid .seg-btn and
+  // would be wrongly DEACTIVATED on every intensity change (the mode selection would blank out) without the filter.
   const np = nearestPreset(pct);
-  $$('.mine-grid .seg-btn, #set-intensity .seg-btn').forEach((x) => x.classList.toggle('active', parseInt(x.dataset.pct, 10) === np));
+  $$('.mine-grid .seg-btn[data-pct], #set-intensity .seg-btn').forEach((x) => x.classList.toggle('active', parseInt(x.dataset.pct, 10) === np));
   if (apply) {
     window.brisvia.setIntensity(String(pct)); // applies live (backend relaunches the engine)
     window.brisvia.settings.set('defaultIntensity', String(pct)); // remember as the default too
     try { localStorage.setItem('brv_intensity', String(pct)); } catch {} // persist across restarts (audit N7/N8)
     if (mining) suppressPreparingUntil = Date.now() + 6000; // hide the brief "Preparing…" flash during the relaunch
+    // If auto-start is armed, re-capture the chosen CPU so the scheduled launch uses THIS preset, not the one
+    // picked when the toggle was first armed (real bug: summary said Balanced while the slider was on High).
+    if (autoArmed) {
+      autoIntensity = currentIntensity();
+      try { window.brisvia.mining.setAutoStart(true, autoIntensity); } catch {}
+    }
   }
+  // The auto-start summary ("CPU: …") must always mirror the preset shown in the slider, apply or not.
+  const cpuEl = $('#auto-start-cpu');
+  if (cpuEl) cpuEl.textContent = activePresetLabel() || cpuEl.textContent;
 }
 $$('.mine-grid .seg-btn').forEach((b) => b.addEventListener('click', () => setPower(b.dataset.pct, true)));
 {
@@ -838,10 +886,22 @@ async function loadSettings() {
 $('#set-autostart').addEventListener('change', (e) => window.brisvia.settings.set('autostart', e.target.checked));
 $('#set-tray').addEventListener('change', (e) => window.brisvia.settings.set('tray', e.target.checked));
 $$('#set-intensity .seg-btn').forEach((b) => b.addEventListener('click', () => setPower(parseInt(b.dataset.pct, 10), true)));
+// Static text (data-i18n) is re-applied by I18N.setLang. Text PAINTED BY JS (the auto-start summary, the
+// power label, the balances) is NOT, so a live language change would leave it in the old language until the
+// next refresh. Re-render those explicitly. Same class of bug as the CPU-summary one.
+function reRenderForLanguage() {
+  try { refreshPowLabel(); } catch {}
+  // refreshMine and loadWallet are async: a sync try/catch would NOT swallow a rejected promise (locked
+  // wallet, node down, slow backend), so catch on the promise itself. T() always reads the CURRENT
+  // language, so a late-arriving response can never repaint the previous language.
+  refreshMine().catch(() => {});    // mine tab + auto-start summary (#auto-start-cpu / mode / status)
+  loadWallet().catch(() => {});     // balances + movements
+}
 // Language selector
 $$('#set-language .seg-btn').forEach((b) => b.addEventListener('click', () => {
   window.I18N.setLang(b.dataset.lang);
   if (window.brisvia.setLanguage) window.brisvia.setLanguage(b.dataset.lang); // rebuilds the tray menu
+  reRenderForLanguage();
 }));
 // Mining mode selector (solo / grouped). The Brisvia pool is being set up; until it is live, choosing "grouped"
 // reveals the pool row with a "being set up" status and mining keeps running solo. When the pool is live this
@@ -902,8 +962,11 @@ function renderMineMode(s) {
   const poolEnabled = !!(s && s.pool && s.pool.enabled);
   // The mode the backend is REALLY running (normalised: never "pool" while POOL_ENABLED is off).
   const active = (s && (s.mode === 'pool' || s.mode === 'custom')) ? 'pool' : 'solo';
+  // Label shows the REAL active mode, including a custom/other pool (owner's call 24-jul): Mining must read
+  // "OTHER POOL" when the user picked one in Settings, not be flattened to "official pool".
+  const rawMode = (s && s.mode) === 'custom' ? 'custom' : active;
   const activeEl = $('#mine-mode-active');
-  if (activeEl) activeEl.textContent = T('settings.mode_' + active).toUpperCase();
+  if (activeEl) activeEl.textContent = T('settings.mode_' + rawMode).toUpperCase();
   // The per-mode explanation lives in Settings now; the Mining screen stays uncluttered (owner's call).
   const desc = $('#mine-mode-desc');
   if (desc) desc.hidden = true;
@@ -957,6 +1020,15 @@ $$('#mine-mode-seg .seg-btn').forEach((b) => b.addEventListener('click', () => {
   if (b.dataset.mode === currentMiningMode) return;
   changeMiningMode(b.dataset.mode);
 }));
+
+// Group-hint popup actions. "Group" switches to the official pool; "solo" just closes (solo is the default).
+if ($('#ghint-group')) $('#ghint-group').addEventListener('click', () => {
+  const m = $('#modal-group-hint'); if (m) m.hidden = true;
+  changeMiningMode('pool');
+});
+if ($('#ghint-solo')) $('#ghint-solo').addEventListener('click', () => {
+  const m = $('#modal-group-hint'); if (m) m.hidden = true;
+});
 
 // ===================== Voluntary auto-start when mainnet goes live (Mining tab) =====================
 // A one-shot the user must arm on purpose (off by default). Guarantees, in order of importance:
@@ -1027,7 +1099,7 @@ function renderAutoStart(s) {
   const modeEl = $('#auto-start-mode');
   if (modeEl) modeEl.textContent = T('settings.mode_' + (currentMiningMode === 'pool' ? 'pool' : 'solo')).toUpperCase();
   const cpuEl = $('#auto-start-cpu');
-  if (cpuEl) cpuEl.textContent = T('autostart.cpu_' + (autoIntensity || 'equilibrado'));
+  if (cpuEl) cpuEl.textContent = activePresetLabel() || T('autostart.cpu_' + (autoIntensity || 'equilibrado'));
   const retry = $('#auto-start-retry'); if (retry) retry.hidden = autoState !== 'failed';
   const cancel = $('#auto-start-cancel'); if (cancel) cancel.hidden = !autoArmed;
 }
@@ -1260,36 +1332,77 @@ function showAchievementToast(id) {
 // On startup (and every 6 h) it checks for a newer signed version; if there is one, it shows a pop-up with a button
 // that downloads it, verifies its signature, installs and restarts. It can also be checked manually from Settings.
 let updatePendingVersion = null;
+let updateBusy = false; // single-flight: only ONE update operation (check or install) runs at a time
 // The version actually running, read once from the app itself (app_version). Anything that needs to show
 // the current version reads THIS, never the text on screen.
 let runningVersion = '';
 async function checkForUpdate(manual) {
+  if (updateBusy) return;                 // single-flight: ignore overlapping checks (startup + manual + 6h timer)
+  updateBusy = true;
+  try { await _checkForUpdate(manual); } finally { updateBusy = false; }
+}
+async function _checkForUpdate(manual) {
   const btn = $('#set-update');
   if (manual && btn) { btn.disabled = true; btn.textContent = T('update.checking'); }
-  let res = null;
-  try { res = window.brisvia.checkUpdate ? await window.brisvia.checkUpdate() : null; } catch {}
+  let res = null, errCode = null;
+  // A rejected command carries a classified ERR:UPDATE_* code; a null/undefined rejection is treated as
+  // unreachable. This is what lets us tell "no update" (res with available:false) apart from a real failure.
+  try { res = window.brisvia.checkUpdate ? await window.brisvia.checkUpdate() : null; }
+  catch (e) { errCode = (e == null || e === '') ? 'ERR:UPDATE_UNREACHABLE' : String(e); }
+  if (btn) { btn.disabled = false; btn.textContent = T('update.check'); }
   if (res && res.available) {
     updatePendingVersion = res.version;
     const cur = runningVersion ? 'v' + runningVersion : '';
     if ($('#upd-ver')) $('#upd-ver').textContent = T('update.version_line', { v: res.version, cur });
+    // Show the release's patch notes if it provided any. They come from the REMOTE latest.json, so treat them
+    // as untrusted: strip control chars (keep tab/newline), cap the length so oversized notes can't distort
+    // or freeze the modal, and render as PLAIN TEXT (textContent, never HTML).
+    { const box = $('#upd-notes-box'), body = $('#upd-notes');
+      let n = (res.notes || '').split('').filter(c => { const x = c.charCodeAt(0); return x >= 32 || x === 9 || x === 10 || x === 13; }).join('').trim();
+      if (n.length > 1500) n = n.slice(0, 1500) + '…';
+      if (box && body) { if (n) { body.textContent = n; box.hidden = false; } else { box.hidden = true; } } }
     let dismissed = null; try { dismissed = localStorage.getItem('brv_update_dismissed'); } catch {}
     // On the automatic check, don't nag again if the user already chose "Later" for THIS version.
-    if (!manual && dismissed === res.version) { if (btn) { btn.disabled = false; btn.textContent = T('update.check'); } return; }
+    if (!manual && dismissed === res.version) return;
     openModal('modal-update'); // pop-up: OK installs, Later dismisses
-    if (btn) { btn.disabled = false; btn.textContent = T('update.check'); }
+  } else if (errCode) {
+    // A REAL error (not "no update"). The automatic check at startup stays SILENT so a temporary network
+    // hiccup never throws an intrusive modal in the user's face; only a MANUAL check opens the clear error
+    // window (with the message in the user's language + Retry + Download from brisvia.com).
+    if (manual) showUpdateError(errCode);
   } else if (manual && btn) {
-    btn.disabled = false;
-    btn.textContent = res ? T('update.none') : T('update.error');
+    // "No update available": brief inline note on the manual button, then back to normal.
+    btn.textContent = T('update.none');
     setTimeout(() => { btn.textContent = T('update.check'); }, 4000);
   }
 }
+
+// The clear update-error window: shows the failure explained in the user's language (via transError, which
+// maps ERR:UPDATE_* to a translated message), plus Retry and "Download from brisvia.com".
+function showUpdateError(errCode) {
+  const el = $('#upd-err-msg');
+  if (el) el.textContent = transError(errCode);
+  openModal('modal-update-error');
+}
 async function installUpdate() {
+  if (updateBusy) return;                 // single-flight: never start a second check/install concurrently
+  updateBusy = true;
+  try { await _installUpdate(); } finally { updateBusy = false; }
+}
+async function _installUpdate() {
   const b = $('#upd-ok');
   if (b) { b.disabled = true; b.textContent = T('update.installing'); }
   // If mining now, remember it so mining resumes automatically after the app restarts with the new version.
   try { if (mining) localStorage.setItem('brv_resume_mining', '1'); } catch {}
   try { await window.brisvia.installUpdate(); } // downloads, verifies the signature, installs and restarts
-  catch { if (b) { b.disabled = false; b.textContent = T('update.install_now'); } }
+  catch (e) {
+    // Don't swallow it: a failed signature check, a failed download, or a node that is still running all
+    // come back classified from the backend. Reset the button and show the clear error window (in the
+    // user's language) instead of leaving them staring at a stuck "Installing…".
+    if (b) { b.disabled = false; b.textContent = T('update.install_now'); }
+    closeModal('modal-update');
+    showUpdateError((e == null || e === '') ? 'ERR:UPDATE_DOWNLOAD_FAILED' : String(e));
+  }
 }
 if ($('#set-update')) $('#set-update').addEventListener('click', () => checkForUpdate(true));
 if ($('#upd-ok')) $('#upd-ok').addEventListener('click', installUpdate);
@@ -1297,6 +1410,10 @@ if ($('#upd-later')) $('#upd-later').addEventListener('click', () => {
   try { if (updatePendingVersion) localStorage.setItem('brv_update_dismissed', updatePendingVersion); } catch {}
   closeModal('modal-update');
 });
+// Update-error window: Retry re-runs the manual check; Download opens the official downloads page (the one
+// place a user in a blocked network can still get the new version by hand). openUrl only allows brisvia.com.
+if ($('#upd-err-retry')) $('#upd-err-retry').addEventListener('click', () => { closeModal('modal-update-error'); checkForUpdate(true); });
+if ($('#upd-err-download')) $('#upd-err-download').addEventListener('click', () => { try { window.brisvia.openUrl('https://brisvia.com/'); } catch {} });
 
 // The tempting "view my 12 words" button was removed on purpose: the recovery phrase is shown ONLY once,
 // when the wallet is created (with a mandatory backup verification). To re-check a backup afterwards the user
@@ -1373,6 +1490,30 @@ function setNet(connected, key) {
   const lbl = $('#net-label');
   if (lbl) lbl.textContent = T(key);
 }
+// Node-startup error strip. `code` is an ERR:NODE_* string when the node failed to start, or null/empty when it
+// is fine (or still spinning up). transError turns the code into a message in the user's language.
+function updateNodeErrorBanner(code) {
+  const banner = $('#node-error-banner');
+  if (!banner) return;
+  if (code) {
+    const msg = $('#neb-msg');
+    if (msg) msg.textContent = transError(code);
+    banner.hidden = false;
+  } else {
+    banner.hidden = true;
+  }
+}
+// "Try again" re-runs the node startup (start_node keeps its own repair/anti-loop logic). Hide the strip right
+// away; pollNet re-shows it within a second if it fails again, so a resolved problem (freed disk, closed other
+// instance) clears the banner and a persisting one brings it back — no false "fixed".
+if ($('#neb-retry')) $('#neb-retry').addEventListener('click', async () => {
+  const btn = $('#neb-retry');
+  if (btn) btn.disabled = true;
+  try { await window.brisvia.nodeRetry(); } catch {}
+  const banner = $('#node-error-banner');
+  if (banner) banner.hidden = true;
+  setTimeout(() => { if (btn) btn.disabled = false; }, 2500);
+});
 let syncing = false, syncProgress = 0;
 // Whether THIS build targets the real network (mainnet). Read from the node's reported network
 // (node_info().network === 'brisvia'), which comes from the compile-time build, so it is right even
@@ -1394,6 +1535,17 @@ async function pollNet() {
   // even before the node connects. Drives the wait mode + the launch notice below.
   if (info && info.network) { isMainnetBuild = info.network === 'brisvia'; netInfoReceived = true; }
   const connected = !!(info && info.connected);
+  // Node-startup error (missing binary / disk full / another instance / permissions): show the reason in the
+  // user's language instead of an endless "connecting…". node_status only fills nodeError on a REAL start
+  // failure, so while the node is merely still spinning up this stays null and no banner appears.
+  // A wallet-layout problem is decided BEFORE the node starts, so here the node is connected. The backend hands
+  // us a ready-made ERR: code (conflict = two wallets on disk, none touched; recovery = a seed exists but the
+  // wallet is gone) so it is never a silent blank wallet the user cannot explain.
+  const layoutCode = connected && st ? (st.walletLayoutError || null) : null;
+  updateNodeErrorBanner(!connected ? (st && st.nodeError) : layoutCode);
+  // Clock-skew warning strip: shown whenever the node reports the machine clock is off by >= 5 min vs the
+  // network (mainnet only). Informational; it clears itself the moment the clock is corrected.
+  { const csb = $('#clock-skew-banner'); if (csb) csb.hidden = !(connected && st && st.clockSkew); }
   const walletReady = !!(st && st.walletReady);
   // Wait mode (real-network build, before launch): the node may still be catching up, but we must NOT show
   // "Syncing" — before the launch date the honest state is "waiting for launch", not a sync in progress.

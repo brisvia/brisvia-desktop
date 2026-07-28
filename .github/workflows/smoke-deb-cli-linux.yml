@@ -1,0 +1,130 @@
+name: Smoke - .deb install/uninstall + terminal miner runs (Linux)
+
+# Two gaps the other checks do not cover:
+#   - the .deb package: installs cleanly, ships the app + its sidecars, and uninstalls without leftovers.
+#   - the terminal miner (CLI): the exact sealed binary actually runs (--version / --help) on a clean box.
+# Authenticity of both (sha256 + minisign) is already proven by verify-candidate; this is the functional smoke.
+# It downloads the sealed assets from the (possibly draft) release over the authenticated API and never publishes.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag holding the sealed assets (e.g. v1.1.1)"
+        required: true
+        default: "v1.1.1"
+
+permissions:
+  contents: write        # draft releases are only visible to write-level tokens
+
+jobs:
+  deb:
+    name: .deb installs, ships app + sidecars, uninstalls clean
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:24.04
+      options: --privileged
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - name: Install a desktop Ubuntu's baseline + apt (to resolve the .deb deps)
+        run: |
+          set -eux
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            curl ca-certificates jq file
+
+      - name: Download the .deb from the (draft) release over the authenticated API
+        run: |
+          set -eux
+          V="${TAG#v}"
+          NAME="Brisvia.Miner_${V}_amd64.deb"
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          # A draft has no public download URL and is not served by /releases/tags/<tag>; LIST /releases
+          # (a push-scoped token sees drafts), filter by tag_name, then pull the bytes as octet-stream.
+          AID=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "$API/releases?per_page=100" \
+            | jq -r --arg T "$TAG" --arg N "$NAME" '.[] | select(.tag_name==$T) | .assets[] | select(.name==$N) | .id')
+          test -n "$AID" || { echo "asset $NAME not found in release $TAG"; exit 1; }
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" \
+            -o app.deb "$API/releases/assets/${AID}"
+          echo "deb sha256: $(sha256sum app.deb | cut -d' ' -f1)"
+
+      - name: Install with apt (resolves the runtime deps a desktop would already have)
+        run: |
+          set -eux
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y ./app.deb
+
+      - name: Package is installed, version matches, app + sidecars are shipped
+        run: |
+          set -eux
+          PKG=$(dpkg-deb -f app.deb Package)
+          VER=$(dpkg-deb -f app.deb Version)
+          echo "package=$PKG version=$VER"
+          case "$VER" in ${TAG#v}*) echo "OK: version matches ${TAG#v}";; *) echo "FAIL: deb version $VER != ${TAG#v}"; exit 1;; esac
+          dpkg -s "$PKG" | grep -q "Status: install ok installed" || { echo "FAIL: package not installed"; exit 1; }
+          FILES=$(dpkg -L "$PKG")
+          APP=$(echo "$FILES" | grep -E '/(brisvia-miner|brisvia miner)$' | head -1)
+          [ -n "$APP" ] && [ -x "$APP" ] || { echo "FAIL: the app binary is not in the package"; echo "$FILES" | grep -i brisvia; exit 1; }
+          echo "OK: app binary shipped at $APP"
+          for s in bitcoind bitcoin-cli brisvia-worker; do
+            echo "$FILES" | grep -qE "/$s$" && echo "OK: sidecar $s shipped" || { echo "FAIL: sidecar $s missing from the .deb"; exit 1; }
+          done
+
+      - name: Uninstall and confirm nothing is left installed
+        run: |
+          set -eux
+          PKG=$(dpkg-deb -f app.deb Package)
+          DEBIAN_FRONTEND=noninteractive apt-get remove -y "$PKG"
+          if dpkg -s "$PKG" 2>/dev/null | grep -q "Status: install ok installed"; then
+            echo "FAIL: $PKG is still installed after removal"; exit 1
+          fi
+          echo "OK: $PKG uninstalled clean"
+
+  cli:
+    name: the terminal miner binary runs (--version / --help)
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:24.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - name: Baseline tools
+        run: |
+          set -eux
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            curl ca-certificates jq file
+
+      - name: Download the sealed CLI + its sha256 from the (draft) release
+        run: |
+          set -eux
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          fetch () {
+            local NAME="$1" OUT="$2"
+            local AID
+            AID=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              "$API/releases?per_page=100" \
+              | jq -r --arg T "$TAG" --arg N "$NAME" '.[] | select(.tag_name==$T) | .assets[] | select(.name==$N) | .id')
+            test -n "$AID" || { echo "asset $NAME not found in release $TAG"; exit 1; }
+            curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" -o "$OUT" "$API/releases/assets/${AID}"
+          }
+          fetch "brisvia-miner-linux-x86_64" brisvia-miner
+          fetch "brisvia-miner-linux-x86_64.sha256" brisvia-miner.sha256
+
+      - name: The downloaded bytes match the published sha256, then the binary runs
+        run: |
+          set -eux
+          EXP=$(grep -oE '[0-9a-f]{64}' brisvia-miner.sha256 | head -1)
+          GOT=$(sha256sum brisvia-miner | cut -d' ' -f1)
+          echo "expected=$EXP got=$GOT"
+          [ "$EXP" = "$GOT" ] || { echo "FAIL: CLI sha256 mismatch"; exit 1; }
+          echo "OK: CLI bytes match the published sha256"
+          file brisvia-miner
+          chmod +x brisvia-miner
+          echo "--- --version ---"; ./brisvia-miner --version
+          echo "--- --help ---";    ./brisvia-miner --help | head -30
+          echo "OK: the terminal miner runs on a clean box"

@@ -15,6 +15,7 @@
       isReal: true, // running inside Tauri with the real node
       nodeStatus: () => call('node_status'),
       nodeInfo: () => call('node_info'),
+      nodeRetry: () => call('node_retry'),
       openUrl: (url) => call('open_url', { url }),
       systemLocale: () => call('system_locale'),
       setLanguage: (lang) => call('set_language', { lang }),
@@ -143,6 +144,7 @@
       kind: async () => ({ kind: 'preview_wallet', has_seed_phrase: false }),
     },
     nodeInfo: async () => ({ connected: true, chain: 'regtest', network: 'brisvia-test', blocks: 12, headers: 12, peers: 0, difficulty: 0, bestblockhash: '0'.repeat(64), networkhashps: 0 }),
+    nodeRetry: async () => null,
 
     settings: {
       get: async () => LS.get('brv_settings', { autostart: false, tray: true, defaultIntensity: 'equilibrado' }),

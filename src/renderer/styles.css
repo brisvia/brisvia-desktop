@@ -31,8 +31,13 @@ h1, h2, h3 { margin: 0; }
 .logo.lg { width: 62px; height: 62px; margin: 0 auto 6px; }
 
 /* Topbar + nav */
-.topbar { display: flex; align-items: center; gap: 18px; padding: 12px 22px; border-bottom: 1px solid var(--border); }
+.topbar { display: flex; align-items: center; gap: 18px; padding: 12px 22px; border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 50; background: var(--bg); }
 .brand { display: flex; align-items: center; gap: 10px; }
+/* Live "mining" indicator in the topbar: a pulsing dot + label, shown only while mining is on. */
+.mining-ind { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 700; color: var(--brand); white-space: nowrap; }
+.mining-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--brand); animation: mining-pulse 1.4s ease-out infinite; }
+@keyframes mining-pulse { 0% { box-shadow: 0 0 0 0 rgba(53,191,197,.5); } 70% { box-shadow: 0 0 0 8px rgba(53,191,197,0); } 100% { box-shadow: 0 0 0 0 rgba(53,191,197,0); } }
+@media (prefers-reduced-motion: reduce) { .mining-dot { animation: none; } }
 .brand-name { font-weight: 700; letter-spacing: .01em; }
 .nav { display: flex; gap: 4px; margin-left: 6px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 4px; }
 .nav-btn { font: inherit; font-weight: 600; color: var(--muted); background: transparent; border: 0; border-radius: 9px; padding: 7px 16px; cursor: pointer; transition: all .15s ease; }
@@ -277,6 +282,8 @@ h1 { font-size: 26px; line-height: 1.1; letter-spacing: -.02em; max-width: 18ch;
 
 /* modals */
 .modal { width: min(420px, 92vw); padding: 26px 28px; position: relative; }
+/* The Receive modal shows the address list: wider so a full bech32 address fits on one line without wrapping. */
+#modal-receive .modal { width: min(560px, 94vw); }
 .modal h2 { font-size: 20px; margin-bottom: 8px; }
 .modal-x { position: absolute; right: 14px; top: 12px; background: none; border: 0; color: var(--muted); font-size: 24px; line-height: 1; cursor: pointer; }
 .modal-x:hover { color: var(--text); }
@@ -324,6 +331,20 @@ h1 { font-size: 26px; line-height: 1.1; letter-spacing: -.02em; max-width: 18ch;
 .update-banner strong { color: #2FC7D4; font-weight: 700; }
 .update-banner .ub-text { display: inline; }
 .update-banner .btn.xs { padding: 4px 13px; font-size: 12px; line-height: 1.25; min-height: 0; }
+/* Node-startup error strip: sober red warning below the top bar. Persistent while the node cannot start. */
+.node-error-banner { display: flex; align-items: center; justify-content: center; gap: 10px 14px; flex-wrap: wrap; padding: 8px 16px; font-size: 12.5px; line-height: 1.35; background: rgba(224,90,90,.12); border-bottom: 1px solid rgba(224,90,90,.32); color: var(--text); text-align: center; }
+.node-error-banner strong { color: #e05a5a; font-weight: 700; }
+.node-error-banner .neb-text { display: inline; }
+.node-error-banner .btn.xs { padding: 4px 13px; font-size: 12px; line-height: 1.25; min-height: 0; }
+/* Amber warning strips (clock skew, solo isolation): informational, never block the app like the red one above. */
+.warn-banner { display: flex; align-items: center; justify-content: center; gap: 10px 14px; flex-wrap: wrap; padding: 8px 16px; font-size: 12.5px; line-height: 1.35; background: rgba(213,166,111,.13); border-bottom: 1px solid rgba(213,166,111,.36); color: var(--text); text-align: center; }
+.warn-banner strong { color: var(--sand); font-weight: 700; }
+.warn-banner .warn-text { display: inline; }
+/* Group-mining suggestion popup (weak hardware): two option cards, "group" recommended. */
+.ghint-opts { display: flex; flex-direction: column; gap: 9px; margin: 14px 0 4px; }
+.ghint-opt { padding: 11px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); }
+.ghint-opt.reco { border-color: rgba(53,191,197,.45); background: linear-gradient(180deg, rgba(53,191,197,.09), rgba(53,191,197,.02)); }
+.ghint-opt strong { display: block; font-size: 13.5px; margin-bottom: 2px; }
 
 @media (max-width: 720px) {
   .mine-grid { grid-template-columns: 1fr; }

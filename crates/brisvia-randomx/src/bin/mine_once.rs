@@ -126,7 +126,7 @@ fn build_candidate(tmpl: &Value, payout_script: &ScriptBuf, extranonce: u64) -> 
 /// Searches for a valid nonce with `threads` threads (fast/dataset). One thread watches the tip: if a new block
 /// appears, it bails out (to avoid mining stale work). Returns (nonce, hashes, stale=bailed out due to new tip).
 #[allow(clippy::too_many_arguments)]
-fn mine_block(cache: Arc<Cache>, dataset: Arc<Dataset>, header: &[u8], target_be: &[u8; 32], threads: usize,
+fn mine_block(cache: Arc<Cache>, dataset: Option<Arc<Dataset>>, header: &[u8], target_be: &[u8; 32], threads: usize,
               max_nonces: u64, url: &str, user: &str, pass: &str, prev_hash: &str, json_mode: bool) -> (Option<u32>, u64, bool) {
     let found = AtomicBool::new(false);
     let stale = AtomicBool::new(false);
@@ -163,7 +163,12 @@ fn mine_block(cache: Arc<Cache>, dataset: Arc<Dataset>, header: &[u8], target_be
         for t in 0..threads {
             let (cache, dataset, found, winner, hashes) = (cache.clone(), dataset.clone(), &found, &winner, &hashes);
             s.spawn(move || {
-                let vm = Vm::new_fast(cache, dataset);
+                // FAST (dataset) where the RAM allowed it; LIGHT (cache only) as a fallback on a small machine.
+                // Both produce the SAME hash, so switching modes never affects consensus — only speed.
+                let vm = match dataset {
+                    Some(ds) => Vm::new_fast(cache, ds),
+                    None => Vm::new_light(cache),
+                };
                 let mut local = header.to_vec();
                 let mut count = 0u64;
                 let mut nonce = t as u64;
@@ -265,6 +270,10 @@ fn main() {
 
     if json_mode { ev(json!({"event":"started","threads":threads})); }
     else { println!("Brisvia miner · {threads} threads"); }
+    // FAST needs ~2.1 GB for the dataset. BRISVIA_FORCE_LIGHT=1 skips it and mines in LIGHT from the start.
+    // The backend sets it to retry in light after a fast worker died building the dataset (Linux overcommit can
+    // OOM-kill the process mid-init, so try_new alone is not enough); it also lets a test force light on purpose.
+    let force_light = std::env::var("BRISVIA_FORCE_LIGHT").map(|v| v != "0" && !v.is_empty()).unwrap_or(false);
     let mut mined = 0u64;
     let mut cur_seed: Option<[u8; 32]> = None;
     let mut cache: Option<Arc<Cache>> = None;
@@ -294,17 +303,32 @@ fn main() {
 
         if cur_seed != Some(seed_key) {
             let t_ds = Instant::now();
+            // Free the previous epoch's dataset AND cache BEFORE building the new ones. At a seed change the
+            // worker only needs ~2.1 GB (the new dataset), not a ~4.2 GB peak of old+new alive at once. On a
+            // machine that can hold one dataset but not two, this lets try_new fall to LIGHT cleanly instead
+            // of the OS OOM-killing the process mid-rebuild at the first epoch boundary (~3 days after launch).
+            // Safe here: mine_block joined all its VMs before returning, so no VM still references old cache/dataset.
+            // Use take()+drop (not `= None`) so the intent — release the old Arc NOW — is explicit and the
+            // compiler never treats it as a dead store.
+            drop(dataset.take());
+            drop(cache.take());
             let c = Cache::new(&seed_key);
-            let d = Dataset::new(&c, threads); // ~2.1GB, multithreaded init (once per seed)
+            // FAST mode builds a ~2.1 GB dataset (~10x faster). On a machine that cannot allocate it,
+            // try_new returns None and we mine in LIGHT mode (cache only): slower, but it NEVER crashes.
+            // This is the same fallback the pool path uses — solo must not be the one mode that dies on a
+            // small PC. Both modes yield identical hashes, so this only trades speed, never validity.
+            let d = if force_light { None } else { Dataset::try_new(&c, threads) }; // ~2.1GB when RAM allows; None -> light
             let ds_s = t_ds.elapsed().as_secs_f64();
-            if json_mode { ev(json!({"event":"seed_ready","seconds":ds_s})); }
-            else { eprintln!("(RandomX dataset ready in {ds_s:.0}s)"); }
+            let mode = if d.is_some() { "fast" } else { "light" };
+            if json_mode { ev(json!({"event":"seed_ready","seconds":ds_s,"mode":mode})); }
+            else if d.is_some() { eprintln!("(RandomX dataset ready in {ds_s:.0}s)"); }
+            else { eprintln!("(low free memory: mining in light mode — slower but stable)"); }
             cache = Some(c);
-            dataset = Some(d);
+            dataset = d;
             cur_seed = Some(seed_key);
         }
         let cache_ref = cache.clone().unwrap();
-        let dataset_ref = dataset.clone().unwrap();
+        let dataset_ref = dataset.clone();
 
         let t_block = Instant::now();
         let (found, hashes, stale) = mine_block(cache_ref, dataset_ref, &header_bytes, &target_be, threads, max_nonces, url, user, pass, &prev_hash, json_mode);

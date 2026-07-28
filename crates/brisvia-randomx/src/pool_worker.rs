@@ -283,15 +283,18 @@ where
                 let guard = guard.clone();
                 let hashes_mine = hashes.clone();
                 let mine = move |mj: &MiningJob, threads: usize, nonce_start: u64, max_nonces: u64, cancel: &AtomicBool| -> Option<Solution> {
-                    // Reuse the cache while the seed is unchanged; refuse a rebuild burst (returns None → skip).
-                    let cache = match guard.lock().unwrap().cache_for(&mj.seed_key) {
-                        Ok(c) => c,
+                    // Reuse the cache/dataset while the seed is unchanged; refuse a rebuild burst (None → skip).
+                    // engine_for builds the ~2.1 GB fast dataset once per seed when the RAM is there, and falls
+                    // back to light on a small machine — the miner runs fast where it can, everywhere else it
+                    // still mines (same hash), just slower.
+                    let (cache, dataset) = match guard.lock().unwrap().engine_for(&mj.seed_key, threads) {
+                        Ok(cd) => cd,
                         Err(_) => {
                             std::thread::sleep(Duration::from_millis(500)); // don't spin while churn is rate-limited
                             return None;
                         }
                     };
-                    crate::pool_miner::mine_with_cache_counted(mj, &cache, threads, nonce_start, max_nonces, cancel, &hashes_mine)
+                    crate::pool_miner::mine_with_cache_counted(mj, &cache, dataset.as_ref(), threads, nonce_start, max_nonces, cancel, &hashes_mine)
                 };
                 // Only a session that actually LOGGED IN counts as progress and resets the backoff. Resetting on
                 // the raw TCP connect was a bug: a pool that accepts the socket and then drops it (e.g. while
@@ -535,8 +538,8 @@ mod tests {
     fn a_permanent_rejection_stops_the_worker_instead_of_reconnecting() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
-        let intentos = Arc::new(AtomicU64::new(0));
-        let intentos_c = intentos.clone();
+        let attempts = Arc::new(AtomicU64::new(0));
+        let attempts_c = attempts.clone();
         // Non-blocking accept loop: count every reconnection for 2s. A correct worker connects ONCE and gives up.
         listener.set_nonblocking(true).unwrap();
         let server = std::thread::spawn(move || {
@@ -544,7 +547,7 @@ mod tests {
             while std::time::Instant::now() < deadline {
                 match listener.accept() {
                     Ok((sock, _)) => {
-                        intentos_c.fetch_add(1, Ordering::SeqCst);
+                        attempts_c.fetch_add(1, Ordering::SeqCst);
                         sock.set_nonblocking(false).unwrap();
                         let mut reader = BufReader::new(sock.try_clone().unwrap());
                         let mut writer = sock;
@@ -558,18 +561,18 @@ mod tests {
             }
         });
         let stop = AtomicBool::new(false);
-        let mut errores = Vec::new();
+        let mut errors = Vec::new();
         // run_pool_worker blocks; a correct one returns on its own after the permanent rejection.
         run_pool_worker(&addr, "brv1qbad", "rig1", 1, false, &stop, |e| {
             if let PoolEvent::Disconnected(m) = e {
-                errores.push(m);
+                errors.push(m);
             }
         });
         server.join().unwrap(); // let the 2s counting window finish: a buggy worker would reconnect within it
-        assert_eq!(intentos.load(Ordering::SeqCst), 1, "must connect ONCE, not retry a definitive answer");
-        assert_eq!(errores.len(), 1);
-        assert!(!errores[0].starts_with(PERMANENT_PREFIX), "the user must read the reason, not the marker");
-        assert!(errores[0].contains("rejected"), "the reason must reach the user, got: {:?}", errores[0]);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "must connect ONCE, not retry a definitive answer");
+        assert_eq!(errors.len(), 1);
+        assert!(!errors[0].starts_with(PERMANENT_PREFIX), "the user must read the reason, not the marker");
+        assert!(errors[0].contains("rejected"), "the reason must reach the user, got: {:?}", errors[0]);
     }
 
     // A TEMPORARY drop (server closes without answering the login) must announce a reconnect countdown with an
