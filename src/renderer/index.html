@@ -593,8 +593,33 @@
     </div>
   </div>
 
+  <!-- Mode-change confirmation: switching mining type stops and restarts mining, so confirm first (house style:
+       no native confirm()). Cancel keeps the current mode; Confirm applies the switch. -->
+  <div id="modal-mode-confirm" class="overlay" data-testid="modal-mode-confirm" hidden>
+    <div class="card modal">
+      <h2 data-i18n="mine.confirm_title"></h2>
+      <p class="muted small" id="mode-confirm-text"></p>
+      <div class="row-gap">
+        <button id="mode-confirm-cancel" class="btn ghost" data-i18n="mine.confirm_cancel"></button>
+        <button id="mode-confirm-ok" class="btn primary" data-i18n="mine.confirm_switch"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- "What's new" after an update: per-language notes baked into the app (changelog.js + maybeShowWhatsNew). -->
+  <div id="modal-whatsnew" class="overlay" data-testid="modal-whatsnew" hidden>
+    <div class="card modal">
+      <h2 id="whatsnew-title"></h2>
+      <p class="muted small" id="whatsnew-body" style="white-space: pre-line;"></p>
+      <div class="row-gap">
+        <button id="whatsnew-ok" class="btn primary"></button>
+      </div>
+    </div>
+  </div>
+
   <script src="locales.js"></script>
   <script src="i18n.js"></script>
+  <script src="changelog.js"></script>
   <script src="tauri-bridge.js"></script>
   <script src="app.js"></script>
 </body>

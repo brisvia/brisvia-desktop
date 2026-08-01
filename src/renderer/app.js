@@ -269,7 +269,7 @@ $('#import-ok').addEventListener('click', async () => {
   startPassStep('import'); // ask for a password to encrypt the restored wallet
 });
 
-function finishSetup() { $('#setup').hidden = true; showView('wallet'); if (window.brisvia.isReal) loadWallet(); }
+function finishSetup() { $('#setup').hidden = true; showView('wallet'); if (window.brisvia.isReal) loadWallet(); try { if (runningVersion) localStorage.setItem('brv_lastseen_version', runningVersion); } catch {} }
 
 // ===================== Mining =====================
 let mining = false;
@@ -377,10 +377,24 @@ async function refreshMine() {
   }
   $('#toggle').textContent = mining ? T('mine.stop') : T('mine.start');
   $('#toggle').className = 'btn giant ' + (mining ? 'mineral' : 'primary');
-  // Show BRVA mined (more motivating and correct for partial mining) instead of raw block count.
-  // Each accepted block currently pays 50 BRVA on this network.
-  $('#m-blocks').textContent = window.I18N.fmtNum((s.accepted || 0) * 50);
-  $('#m-speed').innerHTML = fmtHashrate(mining ? (s.hashrate || 0) : 0);
+  // "Your contribution" tile. In SOLO you win whole blocks, so show BRVA earned this session (accepted x 50).
+  // In POOL/CUSTOM the reward is decided by the pool and paid in batches to the Wallet, so the app cannot know
+  // the exact BRVA locally: showing "0 BRVA" reads as "you earned nothing" and confuses. Show the accepted shares
+  // (the real, growing session contribution) with a matching label instead; the exact BRVA lives in the Wallet.
+  {
+    const blocksEl = $('#m-blocks');
+    const lblEl = blocksEl ? blocksEl.nextElementSibling : null;
+    if (s.mode === 'pool' || s.mode === 'custom') {
+      blocksEl.textContent = window.I18N.fmtNum((s.pool && s.pool.sharesAccepted) || 0);
+      if (lblEl) lblEl.textContent = T('mine.contrib_shares');
+    } else {
+      blocksEl.textContent = window.I18N.fmtNum((s.accepted || 0) * 50);
+      if (lblEl) lblEl.textContent = T('mine.blocks_found');
+    }
+  }
+  // While mining, show "Calculating speed…" until the first real sample, instead of a misleading 0 H/s.
+  if (mining && !(s.hashrate > 0)) { $('#m-speed').textContent = T('mine.calculating'); }
+  else { $('#m-speed').innerHTML = fmtHashrate(mining ? (s.hashrate || 0) : 0); }
   const pct = (s.cores > 0) ? Math.round((s.threads / s.cores) * 100) : 0;
   $('#m-cpu').textContent = (mining ? pct : 0) + '%';
   $('#m-session').innerHTML = fmtDuration(s.secondsMining || 0);
@@ -513,7 +527,10 @@ function setPower(pct, apply) {
   const cpuEl = $('#auto-start-cpu');
   if (cpuEl) cpuEl.textContent = activePresetLabel() || cpuEl.textContent;
 }
-$$('.mine-grid .seg-btn').forEach((b) => b.addEventListener('click', () => setPower(b.dataset.pct, true)));
+// IMPORTANT: scope to [data-pct] (the intensity presets). The mining-mode buttons (Solo/Pool/Custom) also match
+// `.mine-grid .seg-btn` but carry data-mode, not data-pct — binding setPower to them made a mode switch call
+// setPower(undefined) -> reset the power to 50%. Users lost their chosen intensity every time they changed mode.
+$$('.mine-grid .seg-btn[data-pct]').forEach((b) => b.addEventListener('click', () => setPower(b.dataset.pct, true)));
 {
   const r = $('#pow-range');
   if (r) {
@@ -981,7 +998,19 @@ function renderMineMode(s) {
   // pretend it is pooled. Do not clobber a live "switching/switched" message (dataset.busy guards it).
   const st = $('#mine-mode-status');
   if (st && !st.dataset.busy) {
-    if (currentMiningMode !== active) { st.hidden = false; st.textContent = T('mine.mode_mismatch'); }
+    // "Still solo" warning: only when the user chose a GROUP (pool/custom) but mining is actually running SOLO.
+    // Compare by FAMILY (solo vs group) so an active custom pool is never flagged. Never infer 'solo' from a
+    // missing s.mode (startup/stop/transient) — that produced a false warning; require a real mode while mining.
+    // Tag the element with dataset.status (a structural marker) instead of matching translated text, so a
+    // language change still clears it and we never touch switching/switched/error messages set elsewhere.
+    const running = s && s.mode;                                    // 'solo' | 'pool' | 'custom' | undefined
+    const known = mining && (running === 'solo' || running === 'pool' || running === 'custom');
+    const choseGroup = currentMiningMode !== 'solo';
+    if (known && choseGroup && running === 'solo') {
+      st.hidden = false; st.textContent = T('mine.mode_mismatch'); st.dataset.status = 'mode-mismatch';
+    } else if (st.dataset.status === 'mode-mismatch') {
+      st.hidden = true; st.textContent = ''; delete st.dataset.status;
+    }
   }
 }
 
@@ -1015,11 +1044,30 @@ async function changeMiningMode(mode) {
       : T('mine.mode_mismatch');
   }
 }
+let pendingModeSwitch = null;
 $$('#mine-mode-seg .seg-btn').forEach((b) => b.addEventListener('click', () => {
   if (b.disabled) return;
   if (b.dataset.mode === currentMiningMode) return;
-  changeMiningMode(b.dataset.mode);
+  requestModeSwitch(b.dataset.mode);
 }));
+// Switching mining type stops and restarts mining, so confirm first — a mis-click must never change it silently.
+// Cancel keeps the current mode (nothing changed yet); Confirm applies it. Custom modal, never a native confirm().
+function requestModeSwitch(mode) {
+  pendingModeSwitch = mode;
+  const txt = $('#mode-confirm-text');
+  if (txt) txt.textContent = T('mine.confirm_body', {
+    from: T('settings.mode_' + currentMiningMode).toUpperCase(),
+    to: T('settings.mode_' + mode).toUpperCase(),
+  });
+  openModal('modal-mode-confirm');
+}
+if ($('#mode-confirm-cancel')) $('#mode-confirm-cancel').addEventListener('click', () => {
+  pendingModeSwitch = null; closeModal('modal-mode-confirm');
+});
+if ($('#mode-confirm-ok')) $('#mode-confirm-ok').addEventListener('click', () => {
+  const m = pendingModeSwitch; pendingModeSwitch = null; closeModal('modal-mode-confirm');
+  if (m) changeMiningMode(m);
+});
 
 // Group-hint popup actions. "Group" switches to the official pool; "solo" just closes (solo is the default).
 if ($('#ghint-group')) $('#ghint-group').addEventListener('click', () => {
@@ -1038,6 +1086,10 @@ if ($('#ghint-solo')) $('#ghint-solo').addEventListener('click', () => {
 //   4) the choice is consumed the instant mining actually starts, so a restart never re-fires it.
 // The state machine runs on the existing 1s refresh; persistence lives in the backend (survives a restart).
 async function evalAutoStart(s) {
+  // Auto-start ("comenzar a minar el 1 de agosto") removed post-launch (owner's call, 1-ago): it is obsolete now
+  // that mainnet is live. Never arm it, never auto-start from it; keep the code below only as dead reference.
+  autoArmed = false; autoState = 'idle'; renderAutoStart(s); return;
+  // eslint-disable-next-line no-unreachable
   if (!isMainnetBuild) { autoState = 'idle'; renderAutoStart(s); return; }   // testnet/preview: not applicable
   if (!autoArmed) { autoState = 'idle'; autoFailReason = null; renderAutoStart(s); return; }
   if (autoFailReason) { autoState = 'failed'; renderAutoStart(s); return; }  // parked until the user retries/cancels
@@ -1082,7 +1134,10 @@ async function consumeAutoStart() {
 function renderAutoStart(s) {
   const box = $('#auto-start');
   if (!box) return;
-  box.hidden = !isMainnetBuild;
+  // Auto-start "1 de agosto" removed post-launch (obsolete once mainnet is live). Keep the element in the DOM
+  // (e2e/tests reference its ids) but never show it. Everything below is intentionally left unreached.
+  box.hidden = true; return;
+  // eslint-disable-next-line no-unreachable
   if (!isMainnetBuild) return;
   const toggle = $('#auto-start-toggle'); if (toggle) toggle.checked = autoArmed;
   const panel = $('#auto-start-panel'); if (panel) panel.hidden = !autoArmed;
@@ -1733,6 +1788,33 @@ setInterval(() => {
 }, 1000);
 
 // ===================== Startup =====================
+// Shows this version's "What's new" once, right after an update, in the user's language, from the baked-in
+// CHANGELOG (changelog.js). It runs only on the wallet-exists path (returning user). A fresh install records the
+// running version in finishSetup, so it never sees notes for the version it installed brand new. Never twice.
+function maybeShowWhatsNew() {
+  if (!runningVersion) return;
+  let last = null; try { last = localStorage.getItem('brv_lastseen_version'); } catch {}
+  if (last === runningVersion) return;                 // already seen this version (and every fresh install)
+  const cl = window.CHANGELOG || {};
+  const lang = (window.I18N && window.I18N.lang) || 'en';
+  const notes = (cl[runningVersion] && (cl[runningVersion][lang] || cl[runningVersion].en)) || '';
+  if (!notes) return;                                  // no notes for this version -> do NOT mark as seen
+  // Never cover a critical modal (recovery / wallet error / password / protect). If one is open, retry next
+  // launch (do NOT mark as seen).
+  if (document.querySelector('.overlay:not([hidden])')) return;
+  const ui = (cl._ui && (cl._ui[lang] || cl._ui.en)) || { title: "What's new", ok: 'OK' };
+  const titleEl = $('#whatsnew-title'); if (titleEl) titleEl.textContent = ui.title + ' v' + runningVersion;
+  const okEl = $('#whatsnew-ok'); if (okEl) okEl.textContent = ui.ok;
+  const body = $('#whatsnew-body'); if (body) body.textContent = notes;
+  openModal('modal-whatsnew');
+  // Marked as seen when the user DISMISSES it (the OK handler below), not here — so it re-appears next launch
+  // if they never actually saw/closed it (e.g. the app quit while it was open).
+}
+if ($('#whatsnew-ok')) $('#whatsnew-ok').addEventListener('click', () => {
+  closeModal('modal-whatsnew');
+  try { if (runningVersion) localStorage.setItem('brv_lastseen_version', runningVersion); } catch {}
+});
+
 async function init() {
   // Language: the saved one; or the OS one on first run (systemLocale from the real backend; navigator.language in preview).
   let lang = null;
@@ -1829,6 +1911,8 @@ async function init() {
       showView('wallet');
       loadWallet();
     }
+    // Just updated? Show this version's "What's new" once, in the user's language (baked-in changelog).
+    maybeShowWhatsNew();
     setInterval(pollNet, 3000);
     }
   } else {

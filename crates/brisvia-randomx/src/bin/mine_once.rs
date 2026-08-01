@@ -128,6 +128,10 @@ fn build_candidate(tmpl: &Value, payout_script: &ScriptBuf, extranonce: u64) -> 
 #[allow(clippy::too_many_arguments)]
 fn mine_block(cache: Arc<Cache>, dataset: Option<Arc<Dataset>>, header: &[u8], target_be: &[u8; 32], threads: usize,
               max_nonces: u64, url: &str, user: &str, pass: &str, prev_hash: &str, json_mode: bool) -> (Option<u32>, u64, bool) {
+    // Publish the shared hash counter every N hashes so the live-hashrate watcher has fresh data within ~2s
+    // even on slow CPUs (LIGHT mode, few threads). Small N -> snappier first reading; the cost is one cheap
+    // Relaxed fetch_add, negligible next to a RandomX hash. 64 gives the first reading in ~1-2s on slow HW.
+    const HASH_PROGRESS_BATCH: u64 = 64;
     let found = AtomicBool::new(false);
     let stale = AtomicBool::new(false);
     let winner = AtomicU32::new(0);
@@ -171,10 +175,17 @@ fn mine_block(cache: Arc<Cache>, dataset: Option<Arc<Dataset>>, header: &[u8], t
                 };
                 let mut local = header.to_vec();
                 let mut count = 0u64;
+                let mut flushed = 0u64;
                 let mut nonce = t as u64;
                 while nonce <= max_nonces && nonce <= u32::MAX as u64 {
-                    if count % 512 == 0 && found.load(Ordering::Relaxed) {
-                        break;
+                    if count % HASH_PROGRESS_BATCH == 0 {
+                        if found.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        // Publish progress so the live-hashrate watcher sees a growing counter DURING
+                        // the round, not only when the thread finishes (fixes 0 H/s shown in solo mode).
+                        hashes.fetch_add(count - flushed, Ordering::Relaxed);
+                        flushed = count;
                     }
                     local[76..80].copy_from_slice(&(nonce as u32).to_le_bytes());
                     let mut h = vm.hash(&local);
@@ -187,7 +198,7 @@ fn mine_block(cache: Arc<Cache>, dataset: Option<Arc<Dataset>>, header: &[u8], t
                     }
                     nonce += threads as u64;
                 }
-                hashes.fetch_add(count, Ordering::Relaxed);
+                hashes.fetch_add(count - flushed, Ordering::Relaxed);
             });
         }
     });

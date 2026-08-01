@@ -121,8 +121,9 @@ window.LOCALES = {
       mode_switching: 'Cambiando de modo…',
       mode_switched: 'Modo activo: {m}',
       mode_switch_err: 'No se pudo cambiar de modo. Seguís en el modo anterior.',
+      confirm_title: 'Cambiar tipo de minado', confirm_body: 'Vas a pasar de {from} a {to}. Se detiene y reinicia el minado. ¿Confirmás?', confirm_cancel: 'Cancelar', confirm_switch: 'Cambiar',
       mode_mismatch: 'El grupo todavía no está disponible: seguís minando en solitario.',
-      speed: 'Velocidad', blocks_found: 'BRVA (esta sesión)', cpu_use: 'Uso del procesador',
+      speed: 'Velocidad', blocks_found: 'BRVA (esta sesión)', contrib_shares: 'Aportes aceptados (sesión)', calculating: 'Calculando velocidad…', cpu_use: 'Uso del procesador',
       session_time: 'Esta sesión', total_time: 'Tiempo total minado',
       unit_d: 'd', unit_min: 'min', unit_h: 'h', unit_s: 's',
       note: 'Estadísticas de esta sesión y de tu actividad total de minado.',
@@ -504,8 +505,9 @@ window.LOCALES = {
       mode_switching: 'Switching mode…',
       mode_switched: 'Active mode: {m}',
       mode_switch_err: 'Could not switch mode. Still on the previous mode.',
+      confirm_title: 'Change mining type', confirm_body: 'You are switching from {from} to {to}. Mining will stop and restart. Confirm?', confirm_cancel: 'Cancel', confirm_switch: 'Switch',
       mode_mismatch: 'The pool is not available yet: you keep mining solo.',
-      speed: 'Speed', blocks_found: 'BRVA (this session)', cpu_use: 'Processor usage',
+      speed: 'Speed', blocks_found: 'BRVA (this session)', contrib_shares: 'Accepted shares (session)', calculating: 'Calculating speed…', cpu_use: 'Processor usage',
       session_time: 'This session', total_time: 'Total mining time',
       unit_d: 'd', unit_min: 'min', unit_h: 'h', unit_s: 's',
       note: 'Statistics for this session and your total mining activity.',
@@ -918,7 +920,7 @@ window.LOCALES = {
       cores_of: '{n} de {t} núcleos',
       your_contribution: 'Sua contribuição',
       speed: 'Velocidade',
-      blocks_found: 'BRVA (esta sessão)',
+      blocks_found: 'BRVA (esta sessão)', contrib_shares: 'Contribuições aceitas (sessão)', calculating: 'Calculando velocidade…',
       cpu_use: 'Uso do processador',
       session_time: 'Esta sessão',
       total_time: 'Tempo total minerado',
@@ -941,6 +943,7 @@ window.LOCALES = {
       mode_switching: 'Trocando de modo…',
       mode_switched: 'Modo ativo: {m}',
       mode_switch_err: 'Não foi possível trocar de modo. Você continua no modo anterior.',
+      confirm_title: 'Alterar tipo de mineração', confirm_body: 'Você vai passar de {from} para {to}. A mineração para e reinicia. Confirmar?', confirm_cancel: 'Cancelar', confirm_switch: 'Alterar',
       mode_mismatch: 'A pool ainda não está disponível: você continua minerando sozinho.'
     },
     ach: {
@@ -1493,7 +1496,7 @@ window.LOCALES = {
       cores_of: '{t} 个核心中的 {n} 个',
       your_contribution: '你的贡献',
       speed: '速度',
-      blocks_found: 'BRVA（本次）',
+      blocks_found: 'BRVA（本次）', contrib_shares: '已接受的份额（本次）', calculating: '正在计算算力…',
       cpu_use: '处理器占用',
       session_time: '本次时长',
       total_time: '累计挖矿时长',
@@ -1516,6 +1519,7 @@ window.LOCALES = {
       mode_switching: '正在切换模式…',
       mode_switched: '当前模式：{m}',
       mode_switch_err: '无法切换模式。仍在使用之前的模式。',
+      confirm_title: '更改挖矿类型', confirm_body: '你将从 {from} 切换到 {to}。挖矿会停止并重启。确认？', confirm_cancel: '取消', confirm_switch: '切换',
       mode_mismatch: '矿池尚不可用：你继续单独挖矿。'
     },
     ach: {
@@ -2071,7 +2075,7 @@ window.LOCALES = {
       cores_of: '{n} из {t} ядер',
       your_contribution: 'Ваш вклад',
       speed: 'Скорость',
-      blocks_found: 'BRVA (за сеанс)',
+      blocks_found: 'BRVA (за сеанс)', contrib_shares: 'Принятые доли (сессия)', calculating: 'Вычисление скорости…',
       cpu_use: 'Загрузка процессора',
       session_time: 'Этот сеанс',
       total_time: 'Всего времени майнинга',
@@ -2094,6 +2098,7 @@ window.LOCALES = {
       mode_switching: 'Смена режима…',
       mode_switched: 'Активный режим: {m}',
       mode_switch_err: 'Не удалось сменить режим. Остаётся прежний режим.',
+      confirm_title: 'Сменить тип майнинга', confirm_body: 'Вы переходите с {from} на {to}. Майнинг остановится и перезапустится. Подтвердить?', confirm_cancel: 'Отмена', confirm_switch: 'Сменить',
       mode_mismatch: 'Пул пока недоступен: вы продолжаете майнить соло.'
     },
     ach: {
