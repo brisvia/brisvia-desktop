@@ -24,6 +24,7 @@
       checkUpdate: () => call('check_update'),
       installUpdate: () => invoke('install_update'),
       getStatus: () => invoke('miner_status'),
+      checkPoolReachable: (target) => invoke('check_pool_reachable', { target }).catch(() => ({ status: 'unreachable' })),
       start: (intensity) => invoke('miner_start', { intensity }),
       stop: () => invoke('miner_stop'),
       setIntensity: (intensity) => invoke('miner_set_intensity', { intensity }),

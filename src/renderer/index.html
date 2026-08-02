@@ -280,6 +280,7 @@
                an accepted share is not a guaranteed payout. Values come from miner_status().pool. -->
           <div id="pool-status" class="pool-status" hidden>
             <div class="pool-conn"><span id="pool-conn-dot" class="conn-dot"></span><span id="pool-conn-text"></span></div>
+            <p id="pool-dest" class="muted small" data-testid="pool-dest" hidden></p>
             <p id="pool-error" class="pool-err small" data-testid="pool-error" hidden></p>
           </div>
         </aside>
@@ -324,7 +325,7 @@
         </div>
         <p id="pool-soon" class="muted small pool-soon" data-i18n="settings.pool_soon" hidden></p>
         <div class="set-row" id="pool-info-row" hidden>
-          <div><div class="set-title" data-i18n="settings.pool_name_title"></div><div class="muted small" id="pool-status-setup" data-i18n="settings.pool_status_setup"></div></div>
+          <div><div class="set-title" data-i18n="settings.pool_name_title"></div><div class="muted small pool-health-line"><span id="official-health-dot" class="conn-dot"></span> <span id="official-health-text"></span></div></div>
           <div class="muted small" id="pool-addr" data-i18n="settings.pool_addr_info"></div>
         </div>
         <div class="set-row" id="pool-custom-row" hidden>
@@ -333,6 +334,7 @@
             <input type="text" id="set-pool-addr" class="pool-addr-input" data-i18n-attr="placeholder:settings.pool_addr_ph" spellcheck="false" autocomplete="off" autocapitalize="off">
             <button id="set-pool-save" class="btn small ghost" data-i18n="settings.pool_save"></button>
             <span id="set-pool-saved" class="pool-saved muted small" hidden data-i18n="settings.pool_saved"></span>
+            <div class="pool-health-line"><button id="custom-check" class="btn small ghost" data-i18n="settings.pool_check"></button> <span id="custom-health-dot" class="conn-dot"></span> <span id="custom-health-text" class="muted small"></span></div>
           </div>
         </div>
         <div class="set-row">
@@ -580,6 +582,22 @@
       <div class="row-gap">
         <button id="mode-confirm-cancel" class="btn ghost" data-i18n="mine.confirm_cancel"></button>
         <button id="mode-confirm-ok" class="btn primary" data-i18n="mine.confirm_switch"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Custom-pool confirmation: a persisted custom pool must be confirmed once per app launch before it can
+       receive hashrate. The prefs file is editable, so the destination is shown explicitly and the user must
+       re-confirm it in THIS session — a silent redirect is impossible. -->
+  <div id="modal-custom-confirm" class="overlay" data-testid="modal-custom-confirm" hidden>
+    <div class="card modal">
+      <h2 data-i18n="settings.custom_confirm_title"></h2>
+      <p id="custom-confirm-body"></p>
+      <p class="muted small" data-i18n="settings.custom_confirm_note"></p>
+      <p class="muted small" id="custom-confirm-payout" hidden></p>
+      <div class="row-gap">
+        <button id="custom-confirm-cancel" class="btn ghost" data-i18n="settings.custom_confirm_cancel"></button>
+        <button id="custom-confirm-ok" class="btn primary" data-i18n="settings.custom_confirm_ok"></button>
       </div>
     </div>
   </div>

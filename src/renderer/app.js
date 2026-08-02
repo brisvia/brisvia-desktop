@@ -420,6 +420,16 @@ async function refreshMine() {
         phaseTxt += ' ' + T('pool.retry_in', { s: p.retrySecs });
       }
       $('#pool-conn-text').textContent = phaseTxt;
+      // Always show WHERE the hashrate goes (operator + host:port), resolved by the backend. Transparency: the
+      // user can never be redirected without seeing it.
+      const dest = $('#pool-dest');
+      if (dest) {
+        const pt = s.poolTarget;
+        if (pt && pt.hostPort) {
+          dest.textContent = T('settings.pool_sending_to') + ': ' + (pt.operator || '') + ' (' + pt.hostPort + ')';
+          dest.hidden = false;
+        } else dest.hidden = true;
+      }
       const connected = phase === 'working' || phase === 'waiting' || phase === 'authenticated';
       const suspended = phase === 'suspended';
       // While the miner is connecting, auto-reconnecting or the pool is under maintenance, the status line
@@ -456,7 +466,7 @@ $('#toggle').addEventListener('click', async () => {
   } else {
     // Read the backend's answer: if it refused to start (no peers, clock skew, syncing, wallet/worker not
     // ready...), show WHY instead of silently doing nothing (audit N2).
-    const r = await window.brisvia.start(currentIntensity());
+    const r = await startWithConfirm(currentIntensity());
     if (r && r.error && mm) { mm.textContent = transError(r.error); mm.hidden = false; }
   }
   refreshMine();
@@ -469,7 +479,7 @@ $('#mine-retry')?.addEventListener('click', async () => {
   try {
     await window.brisvia.stop();
     refreshMine._prepSince = 0;
-    const res = await window.brisvia.start(currentIntensity());
+    const res = await startWithConfirm(currentIntensity());
     if (res && res.error && mm) { mm.textContent = transError(res.error); mm.hidden = false; }
   } catch {}
   if (r) r.disabled = false;
@@ -938,7 +948,25 @@ function applyMiningMode(mode) {
   if (poolRow) poolRow.hidden = m !== 'pool';
   const customRow = $('#pool-custom-row');
   if (customRow) customRow.hidden = m !== 'custom';
+  // Show whether the selected pool responds (green) or not (red) before the user starts mining.
+  if (m === 'pool') checkPoolHealth('official', '#official-health-dot', '#official-health-text');
+  if (m === 'custom') checkPoolHealth('custom', '#custom-health-dot', '#custom-health-text');
 }
+// Reachability check of a pool (by catalog id or the saved custom). "reachable" means the port answers -- it does
+// NOT prove the pool mines Brisvia; the live mining connection is what confirms that (the pool status dot).
+async function checkPoolHealth(target, dotSel, textSel) {
+  const dot = $(dotSel), txt = $(textSel);
+  if (dot) dot.className = 'conn-dot wait';
+  if (txt) txt.textContent = T('settings.pool_health_checking');
+  const res = await window.brisvia.checkPoolReachable(target);
+  const st = res && res.status;
+  let cls = 'bad', label = T('settings.pool_health_down');
+  if (st === 'reachable') { cls = 'on'; label = target === 'official' ? T('settings.pool_health_ok') : T('settings.pool_health_reachable'); }
+  else if (st === 'unset' || st === 'invalid') { cls = 'wait'; label = ''; }
+  if (dot) dot.className = 'conn-dot ' + cls;
+  if (txt) txt.textContent = label;
+}
+$('#custom-check')?.addEventListener('click', () => checkPoolHealth('custom', '#custom-health-dot', '#custom-health-text'));
 $$('#set-mining-mode .seg-btn').forEach((b) => b.addEventListener('click', () => {
   if (b.disabled) return;
   applyMiningMode(b.dataset.mode);
@@ -1524,6 +1552,43 @@ $('#reveal-go').addEventListener('click', async () => {
 // ===================== Modals =====================
 function openModal(id) { $('#' + id).hidden = false; }
 function closeModal(id) { $('#' + id).hidden = true; }
+
+// ===== Custom pool: confirm once per app launch =====
+// A persisted custom pool is never mined until the user re-confirms its exact destination in THIS process (the
+// backend refuses an unarmed custom with ERR:CUSTOM_NEEDS_CONFIRM). This shows the destination and, only if the
+// user confirms, arms it and retries. No silent redirect: the user always sees where the hashrate goes.
+let _customConfirmResolve = null;
+async function confirmCustomPool(target) {
+  const body = $('#custom-confirm-body');
+  if (body) body.textContent = T('settings.custom_confirm_body', { t: target || '' });
+  const pay = $('#custom-confirm-payout');
+  if (pay) {
+    pay.hidden = true;
+    try {
+      const addrs = await window.brisvia.wallet.addresses();
+      const a = addrs && addrs[0];
+      if (a) { pay.textContent = T('settings.custom_confirm_payout', { a }); pay.hidden = false; }
+    } catch {}
+  }
+  openModal('modal-custom-confirm');
+  return new Promise((resolve) => { _customConfirmResolve = resolve; });
+}
+function _resolveCustomConfirm(v) { closeModal('modal-custom-confirm'); if (_customConfirmResolve) { _customConfirmResolve(v); _customConfirmResolve = null; } }
+$('#custom-confirm-cancel')?.addEventListener('click', () => _resolveCustomConfirm(false));
+$('#custom-confirm-ok')?.addEventListener('click', () => _resolveCustomConfirm(true));
+
+// Start mining, handling the custom-pool confirmation transparently. Returns the backend's final answer (or a
+// {cancelled:true} marker if the user declined the custom destination, so callers show no error).
+async function startWithConfirm(intensity) {
+  let r = await window.brisvia.start(intensity);
+  if (r && r.error === 'ERR:CUSTOM_NEEDS_CONFIRM') {
+    const ok = await confirmCustomPool(r.poolTarget);
+    if (!ok) return { mining: false, cancelled: true };
+    await window.brisvia.settings.set('confirmCustomPool', true);
+    r = await window.brisvia.start(intensity);
+  }
+  return r;
+}
 $$('[data-close]').forEach((b) => b.addEventListener('click', (e) => { const ov = e.target.closest('.overlay'); if (ov) ov.hidden = true; }));
 // Pop-ups do NOT close on an outside click (they persist, so they aren't dismissed by accident and lose typed input):
 // they close only via the X, the buttons (Cancel/etc.) or the Escape key.
