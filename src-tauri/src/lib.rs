@@ -1878,13 +1878,41 @@ fn import_descriptors(datadir: &PathBuf, wallet: &str, ext: &str, int: &str, res
     Ok(())
 }
 
+// The wallet's FIXED first receiving address (external chain, index 0). Deterministic and stable across restarts,
+// and safe across a restore: it always reflects the CURRENT wallet's descriptor (never a persisted stale value),
+// and the wallet owns it (verified ismine on mainnet). Returns None if the descriptor is not available yet.
+fn wallet_main_address(datadir: &PathBuf, name: &str) -> Option<String> {
+    let descs = rpc(datadir, Some(name), "listdescriptors", json!([])).ok()?;
+    for d in descs["descriptors"].as_array()?.iter() {
+        // The external (receiving) wpkh descriptor; derive index 0 -> the wallet's main address.
+        if d["internal"].as_bool() == Some(false) {
+            if let Some(desc) = d["desc"].as_str() {
+                if !desc.contains("wpkh") { continue; }
+                if let Ok(a) = rpc(datadir, None, "deriveaddresses", json!([desc, [0, 0]])) {
+                    if let Some(first) = a.as_array().and_then(|x| x.first()).and_then(|x| x.as_str()) {
+                        return Some(first.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 // If it's the main wallet, mark it active (receive address + wallet_loaded) so the app can operate.
 fn activate_wallet(state: &AppState, name: &str) {
     if name == WALLET_NAME {
-        if let Ok(addr) = rpc(&state.datadir, Some(name), "getnewaddress", json!([])) {
-            if let Some(a) = addr.as_str() {
-                *state.receive_addr.lock().unwrap() = a.to_string();
-            }
+        // Use the wallet's FIXED first address (index 0) instead of a fresh getnewaddress on every launch. Before,
+        // each start showed a different "Receive" address and solo rewards landed on a new address each session, so
+        // users thought every run created a new wallet and their coins were split — they were always one wallet. A
+        // stable main address keeps the shown address and the mining payouts on one visible address. getnewaddress
+        // remains only as a fallback if descriptor derivation is not available yet.
+        let addr = wallet_main_address(&state.datadir, name).or_else(|| {
+            rpc(&state.datadir, Some(name), "getnewaddress", json!([]))
+                .ok().and_then(|a| a.as_str().map(|s| s.to_string()))
+        });
+        if let Some(a) = addr {
+            *state.receive_addr.lock().unwrap() = a;
         }
         state.wallet_loaded.store(true, Ordering::SeqCst);
     }
@@ -4611,10 +4639,17 @@ pub fn run() {
                     .unwrap_or(false);
                 if exists {
                     let _ = rpc(&datadir, None, "loadwallet", json!([WALLET_NAME]));
-                    if let Ok(addr) = rpc(&datadir, Some(WALLET_NAME), "getnewaddress", json!([])) {
-                        if let Some(a) = addr.as_str() {
-                            *receive_addr.lock().unwrap() = a.to_string();
-                        }
+                    // Use the wallet's FIXED first address (index 0), stable across restarts, instead of a fresh
+                    // getnewaddress on every launch (which made each run show a new address and solo rewards land on
+                    // a new address every session, so users thought their coins were split — always one wallet).
+                    // loadwallet has completed here, so descriptor derivation is available; getnewaddress stays as a
+                    // fallback only if it is not.
+                    let addr = wallet_main_address(&datadir, WALLET_NAME).or_else(|| {
+                        rpc(&datadir, Some(WALLET_NAME), "getnewaddress", json!([]))
+                            .ok().and_then(|a| a.as_str().map(|s| s.to_string()))
+                    });
+                    if let Some(a) = addr {
+                        *receive_addr.lock().unwrap() = a;
                     }
                     wallet_loaded.store(true, Ordering::SeqCst);
                 }
