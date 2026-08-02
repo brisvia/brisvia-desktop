@@ -462,3 +462,17 @@ h1 { font-size: 26px; line-height: 1.1; letter-spacing: -.02em; max-width: 18ch;
 .pool-health-line .conn-dot { flex: 0 0 auto; }
 .conn-dot.bad { background: #e5534b; box-shadow: 0 0 0 3px rgba(229,83,75,.18); }
 .pool-plain-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; cursor: pointer; }
+
+/* Language flags in the top bar (replace the Settings language row; click to switch). */
+.lang-flags { display: flex; align-items: center; gap: 6px; margin-right: 4px; }
+.lang-flag { display: inline-flex; padding: 2px; background: transparent; border: 1px solid transparent; border-radius: 4px; cursor: pointer; opacity: .5; transition: opacity .15s ease, border-color .15s ease; }
+.lang-flag svg { width: 22px; height: 15px; border-radius: 2px; display: block; box-shadow: 0 0 0 1px rgba(255,255,255,.08); }
+.lang-flag:hover { opacity: 1; }
+.lang-flag.active { opacity: 1; border-color: var(--brand); }
+/* Wider Send + Transaction-detail dialogs (owner request), so the hash and amounts don't wrap awkwardly. */
+#modal-send .modal, #modal-txdetail .modal { width: min(560px, 94vw); }
+/* Custom-pool inline bar (Mine tab): left-aligned with the mode segment (where "Solo" starts). */
+.mine-custom-row { margin-top: 10px; }
+.mine-custom-row .pool-addr-wrap { justify-content: flex-start; margin-left: 4px; }
+.tx-link { cursor: pointer; }
+.tx-link:hover { color: var(--brand); text-decoration: underline; }

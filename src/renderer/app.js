@@ -706,9 +706,11 @@ async function openTxDetail(h) {
      ${d.blockheight ? `<div class="dr"><span class="muted">${T('tx.block')}</span><span class="val">${d.blockheight}</span></div>` : ''}
      <div class="dr"><span class="muted">${T('tx.date')}</span><span class="val">${fmtDate(d.time) || '—'}</span></div>
      <div class="dr"><span class="muted">${T('tx.txid')}</span></div>
-     <div class="copy-line"><code class="mono">${d.txid || '—'}</code><button class="copy-btn" id="txd-copy">${T('common.copy')}</button></div>`;
+     <div class="copy-line"><code class="mono tx-link" id="txd-hash" title="${T('tx.open_explorer')}">${d.txid || '—'}</code><button class="copy-btn" id="txd-copy">${T('common.copy')}</button></div>`;
   const cp = $('#txd-copy');
   if (cp) cp.addEventListener('click', async () => { try { await navigator.clipboard.writeText(d.txid); cp.textContent = T('common.copied'); } catch {} });
+  const hl = $('#txd-hash');
+  if (hl && d.txid) hl.addEventListener('click', () => { try { window.brisvia.openUrl('https://explorer.brisvia.com/tx/' + d.txid); } catch {} });
 }
 
 // Balance chips (Maturing / Incoming): tapping them explains why that part can't be used yet.
@@ -935,6 +937,16 @@ $$('#set-language .seg-btn').forEach((b) => b.addEventListener('click', () => {
   if (window.brisvia.setLanguage) window.brisvia.setLanguage(b.dataset.lang); // rebuilds the tray menu
   reRenderForLanguage();
 }));
+// Language flags in the top bar (replace the Settings language row; click to switch).
+$$('#lang-flags .lang-flag').forEach((b) => b.addEventListener('click', () => {
+  window.I18N.setLang(b.dataset.lang);
+  if (window.brisvia.setLanguage) window.brisvia.setLanguage(b.dataset.lang);
+  reRenderForLanguage();
+  refreshLangFlags();
+}));
+function refreshLangFlags() { $$('#lang-flags .lang-flag').forEach((b) => b.classList.toggle('active', b.dataset.lang === window.I18N.lang)); }
+refreshLangFlags();
+document.addEventListener('langchange', refreshLangFlags);
 // Mining mode selector (solo / grouped). The Brisvia pool is being set up; until it is live, choosing "grouped"
 // reveals the pool row with a "being set up" status and mining keeps running solo. When the pool is live this
 // selector will point the miner at pool.brisvia.com.

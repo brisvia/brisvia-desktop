@@ -95,7 +95,7 @@ window.LOCALES = {
     },
     tx: {
       title: 'Detalle del movimiento', type: 'Tipo', amount: 'Monto', status: 'Estado', block: 'Bloque',
-      date: 'Fecha', txid: 'ID de transacción',
+      date: 'Fecha', txid: 'ID de transacción', open_explorer: 'Ver en el explorador',
       unconfirmed: 'Sin confirmar aún',
       confirmations: { one: '{n} confirmación', other: '{n} confirmaciones' },
     },
@@ -498,7 +498,7 @@ window.LOCALES = {
     },
     tx: {
       title: 'Transaction detail', type: 'Type', amount: 'Amount', status: 'Status', block: 'Block',
-      date: 'Date', txid: 'Transaction ID',
+      date: 'Date', txid: 'Transaction ID', open_explorer: 'View in the explorer',
       unconfirmed: 'Not confirmed yet',
       confirmations: { one: '{n} confirmation', other: '{n} confirmations' },
     },
@@ -930,7 +930,7 @@ window.LOCALES = {
       status: 'Estado',
       block: 'Bloco',
       date: 'Data',
-      txid: 'ID da transação',
+      txid: 'ID da transação', open_explorer: 'Ver no explorador',
       unconfirmed: 'Ainda sem confirmação',
       confirmations: {
         one: '{n} confirmação',
@@ -1526,7 +1526,7 @@ window.LOCALES = {
       status: '状态',
       block: '区块',
       date: '日期',
-      txid: '交易 ID',
+      txid: '交易 ID', open_explorer: '在浏览器中查看',
       unconfirmed: '尚未确认',
       confirmations: {
         other: '{n} 次确认'
@@ -2121,7 +2121,7 @@ window.LOCALES = {
       status: 'Статус',
       block: 'Блок',
       date: 'Дата',
-      txid: 'ID операции',
+      txid: 'ID операции', open_explorer: 'Открыть в обозревателе',
       unconfirmed: 'Ещё не подтверждено',
       confirmations: {
         one: '{n} подтверждение',
