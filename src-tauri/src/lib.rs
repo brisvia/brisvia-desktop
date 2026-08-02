@@ -2253,6 +2253,27 @@ fn save_autostart(datadir: &std::path::Path, enabled: bool, intensity: &str) {
 fn custom_fingerprint(host_port: &str) -> String {
     host_port.trim().to_ascii_lowercase()
 }
+/// Map a raw pool disconnect reason (from the worker) to a friendly, translatable ERR code, so the user never
+/// sees a technical string like "unexpected end of file". The frontend turns the code into plain language.
+fn classify_pool_reason(reason: &str) -> String {
+    let r = reason.to_ascii_lowercase();
+    let code = if r.contains("reject") || r.contains("login") || r.contains("unauthor") || r.contains("authenticat") {
+        "ERR:POOL_LOGIN_REJECTED"
+    } else if r.contains("certificate") || r.contains("handshake") || r.contains("tls") || r.contains("ssl") {
+        "ERR:POOL_TLS"
+    } else if (r.contains("invalid") && r.contains("share")) || r.contains("too many") || r.contains("invalidas") || r.contains("demasiadas") {
+        "ERR:POOL_KICKED"
+    } else if r.contains("refused") || r.contains("timed out") || r.contains("timeout") || r.contains("unreachable")
+        || r.contains("resolve") || r.contains("dns") || r.contains("no route") || r.contains("not connected") {
+        "ERR:POOL_UNREACHABLE"
+    } else if r.contains("end of file") || r.contains("closed") || r.contains("reset") || r.contains("eof")
+        || r.contains("broken pipe") || r.contains("aborted") {
+        "ERR:POOL_CLOSED"
+    } else {
+        "ERR:POOL_DISCONNECTED"
+    };
+    code.to_string()
+}
 /// Reject non-public IPs. Defends the reachability check AND real connections against a public hostname that
 /// resolves to an internal address (DNS rebinding / SSRF). Covers IPv4 private/loopback/link-local/unspecified/
 /// broadcast/multicast/documentation and IPv6 loopback/unspecified/unique-local (fc00::/7)/link-local (fe80::/10)/
@@ -3689,15 +3710,14 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
                             Some("share_accepted") => { p_ok += 1; ready.store(true, Ordering::SeqCst); }
                             Some("share_rejected") => {
                                 p_rej += 1;
-                                p_err = Some(match evt["reason"].as_str() {
-                                    Some(r) => format!("share rechazada: {r}"), None => "share rechazada".into() });
+                                p_err = Some("ERR:POOL_SHARE_REJECTED".to_string());
                             }
                             // A share met the NETWORK target: a real block found via the pool. Counts as a block.
                             Some("pool_block") => { total += 1; ready.store(true, Ordering::SeqCst); }
                             Some("pool_disconnected") => {
                                 p_conn = false; p_has_job = false;
                                 p_err = Some(match evt["reason"].as_str() {
-                                    Some(r) => format!("desconectado: {r}"), None => "desconectado".into() });
+                                    Some(r) => classify_pool_reason(r), None => "ERR:POOL_DISCONNECTED".to_string() });
                             }
                             // The pool is under MAINTENANCE (explicit), not a crash or an error. Not connected
                             // for mining, but the UI must say "en mantenimiento", never "error" or "solo". The

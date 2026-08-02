@@ -38,6 +38,10 @@ function transError(err) {
       POOL_ADDR_LOCAL: 'errors.pool_addr_local',
       CUSTOM_NEEDS_CONFIRM: 'errors.custom_needs_confirm',
       POOL_ID_UNKNOWN: 'errors.pool_id_unknown',
+      POOL_CLOSED: 'errors.pool_closed', POOL_LOGIN_REJECTED: 'errors.pool_login_rejected',
+      POOL_UNREACHABLE: 'errors.pool_unreachable', POOL_TLS: 'errors.pool_tls',
+      POOL_KICKED: 'errors.pool_kicked', POOL_DISCONNECTED: 'errors.pool_disconnected',
+      POOL_SHARE_REJECTED: 'errors.pool_share_rejected',
       NO_UPDATE: 'errors.no_update',
       NODE_STILL_RUNNING: 'errors.node_still_running',
       UPDATE_UNREACHABLE: 'errors.update_unreachable',
@@ -440,7 +444,7 @@ async function refreshMine() {
       // the self-healing phases). A genuinely stuck disconnect still shows it.
       const err = $('#pool-error');
       const selfHealing = (phase === 'connecting' || phase === 'reconnecting' || phase === 'suspended');
-      if (p.lastError && !selfHealing) { err.hidden = false; err.textContent = p.lastError; } else { err.hidden = true; }
+      if (p.lastError && !selfHealing) { err.hidden = false; err.textContent = transError(p.lastError); } else { err.hidden = true; }
       // Speed in pool mode: the pool worker DOES emit a per-second hashrate (consumed into s.hashrate). While
       // it is still 0 (right after login, before the first sample) show "measuring" instead of a misleading
       // "0 H/s". The honest work signal here is accepted shares (above).
@@ -1028,6 +1032,8 @@ function renderMineMode(s) {
     b.classList.toggle('active', b.dataset.mode === currentMiningMode);
     if (b.dataset.mode === 'pool') { b.disabled = !poolEnabled; b.classList.toggle('seg-off', !poolEnabled); }
   });
+  // Inline custom bar shows only while custom is the selected mode.
+  const mcr = $('#mine-custom-row'); if (mcr) mcr.hidden = currentMiningMode !== 'custom';
   const soon = $('#mine-mode-soon');
   if (soon) soon.hidden = poolEnabled;
   // If the user configured pool but the backend still runs solo (pool not enabled), say so honestly — never
@@ -1087,11 +1093,38 @@ async function changeMiningMode(mode) {
   }
 }
 let pendingModeSwitch = null;
-$$('#mine-mode-seg .seg-btn').forEach((b) => b.addEventListener('click', () => {
+$$('#mine-mode-seg .seg-btn').forEach((b) => b.addEventListener('click', async () => {
   if (b.disabled) return;
+  if (b.dataset.mode === 'custom') {
+    // Custom pool: reveal the inline address bar right here (no trip to Settings) + select custom.
+    applyMiningMode('custom');
+    window.brisvia.settings.set('miningMode', 'custom');
+    const row = $('#mine-custom-row'); if (row) row.hidden = false;
+    try {
+      const st = await window.brisvia.settings.get();
+      const inp = $('#mine-pool-addr'); if (inp) inp.value = st.poolAddress || '';
+      const pp = $('#mine-pool-plain'); if (pp) pp.checked = !!st.poolPlain;
+    } catch {}
+    const f = $('#mine-pool-addr'); if (f) f.focus();
+    return;
+  }
   if (b.dataset.mode === currentMiningMode) return;
   requestModeSwitch(b.dataset.mode);
 }));
+// Inline custom-pool bar (Mine tab): same backend actions as Settings (same prefs, same validation).
+$('#mine-pool-save')?.addEventListener('click', async () => {
+  const inp = $('#mine-pool-addr'); if (!inp) return;
+  const r = await window.brisvia.settings.set('poolAddress', inp.value.trim());
+  if (r && r.ok === false && r.error) {
+    const t = $('#mine-custom-health-text'); if (t) t.textContent = transError(r.error);
+    const d = $('#mine-custom-health-dot'); if (d) d.className = 'conn-dot bad';
+    return;
+  }
+  const saved = $('#mine-pool-saved'); if (saved) { saved.hidden = false; setTimeout(() => { saved.hidden = true; }, 1500); }
+  if (inp.value.trim()) checkPoolHealth('custom', '#mine-custom-health-dot', '#mine-custom-health-text');
+});
+$('#mine-pool-plain')?.addEventListener('change', (e) => window.brisvia.settings.set('poolPlain', e.target.checked));
+$('#mine-custom-check')?.addEventListener('click', () => checkPoolHealth('custom', '#mine-custom-health-dot', '#mine-custom-health-text'));
 // Switching mining type stops and restarts mining, so confirm first — a mis-click must never change it silently.
 // Cancel keeps the current mode (nothing changed yet); Confirm applies it. Custom modal, never a native confirm().
 function requestModeSwitch(mode) {
