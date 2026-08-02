@@ -3460,6 +3460,13 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
             use std::io::BufRead;
             let mut prev_total: u64 = 0;
             let mut prev_pool_ok: u64 = 0;
+            // Cumulative accepted-shares carry that survives a worker relaunch. The events log is
+            // TRUNCATED on every relaunch (a speed change or a reconnect respawn), so p_ok -- recomputed
+            // from the current log each pass -- restarts at 0. Seeded from the counter's current value
+            // (0 on a fresh Start because miner_start reset it; the previous total on a keep-session
+            // relaunch) and grown by the previous generation's final count on each detected truncation,
+            // so the shown "accepted (session)" never drops to 0 mid-session.
+            let mut sess_carry_ok: u64 = pool_accepted.load(Ordering::SeqCst);
             let mut last_flush = Instant::now();
             loop {
                 if !mining.load(Ordering::SeqCst) { break; }
@@ -3558,7 +3565,13 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
                 pool_has_job.store(p_has_job, Ordering::SeqCst);
                 pool_ever_job.store(p_ever_job, Ordering::SeqCst);
                 pool_sent.store(p_sent, Ordering::SeqCst);
-                pool_accepted.store(p_ok, Ordering::SeqCst);
+                if p_ok < prev_pool_ok {
+                    // The events log was truncated (the worker respawned): carry the previous
+                    // generation's final accepted count forward so the session total keeps growing.
+                    sess_carry_ok += prev_pool_ok;
+                    prev_pool_ok = 0;
+                }
+                pool_accepted.store(sess_carry_ok + p_ok, Ordering::SeqCst);
                 pool_rejected.store(p_rej, Ordering::SeqCst);
                 if p_ok > prev_pool_ok {
                     prev_pool_ok = p_ok;
