@@ -3315,6 +3315,11 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
     if state.mining.swap(true, Ordering::SeqCst) {
         return json!({ "mining": true }); // already mining
     }
+    // Consume the keep-session flag HERE, before any guard can early-return. A power/intensity relaunch sets it
+    // just before calling us; reading it only at the reset below would leave it stuck `true` if a guard bails
+    // first (NO_PEERS, CLOCK_SKEW, spawn error, ...), and the NEXT manual Start would then wrongly SKIP the
+    // session reset -- inflating the persisted lifetime-mined total and carrying stale pool counters.
+    let keep_session_flag = state.keep_session_on_relaunch.swap(false, Ordering::SeqCst);
     // Defense in depth (audit CF2-10): do NOT start mining while the node is still in initial block download —
     // it would mine on a stale/partial chain. The UI already blocks "Mine" during IBD; this backend guard does not
     // rely on the UI alone. An RPC failure (node still warming up) is tolerated: only an explicit IBD=true blocks.
@@ -3344,7 +3349,7 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
     }
     // A power change relaunches the engine; in that case keep the session timer, the shown speed and the
     // "ready" flag (the worker reports the new speed in a moment) — for the user it's the same session.
-    if !state.keep_session_on_relaunch.swap(false, Ordering::SeqCst) {
+    if !keep_session_flag {
         *state.mine_start.lock().unwrap() = Some(Instant::now());
         *state.hashrate.lock().unwrap() = 0.0;
         state.miner_ready.store(false, Ordering::SeqCst); // starts "preparing" until the engine's first event
@@ -3439,9 +3444,13 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
         Err(e) => { state.mining.store(false, Ordering::SeqCst); return json!({ "mining": false, "error": format!("could not start the miner: {e}") }); }
     };
 
+    // One generation id per miner_start. BOTH the events follower and the worker supervisor capture it and
+    // exit as soon as a newer relaunch bumps it -- a relaunch flips `mining` false->true in microseconds, so
+    // without this an old follower/supervisor survives and races the new one (double counters, or two
+    // uncoordinated light-mode retries spawning orphan ~2 GB workers on an OOM death).
+    let my_follower_gen = state.follower_gen.fetch_add(1, Ordering::SeqCst) + 1;
     // Thread that follows the events file and updates accepted contributions + real hashrate.
     {
-        let my_follower_gen = state.follower_gen.fetch_add(1, Ordering::SeqCst) + 1;
         let follower_gen = state.follower_gen.clone();
         let events_path = events_path.clone(); // the follower gets its own copy; the supervisor keeps the original
         let mined = state.mined.clone();
@@ -3605,11 +3614,13 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
             (miner_bin.clone(), url.clone(), addr.clone(), cuser.clone(), cpass.clone());
         let (pool_url, events_path) = (pool_url.clone(), events_path.clone());
         let is_solo = pool_url.is_none();
+        let sup_gen = state.follower_gen.clone();
         std::thread::spawn(move || {
             let mut retried_light = false;
             loop {
                 std::thread::sleep(Duration::from_millis(600));
-                if !mining.load(Ordering::SeqCst) { break; } // stopped by the user / another path
+                // Stop if mining ended OR a newer relaunch took over (single-supervisor guarantee, like the follower).
+                if !mining.load(Ordering::SeqCst) || sup_gen.load(Ordering::SeqCst) != my_follower_gen { break; }
                 let mut guard = miner_child.lock().unwrap();
                 let exited = match guard.as_mut() {
                     Some(child) => matches!(child.try_wait(), Ok(Some(_))),
