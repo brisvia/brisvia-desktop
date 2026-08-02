@@ -47,6 +47,33 @@ const WALLET_NAME: &str = "brisvia";
 // stratum server. TODO: confirm the real port when the official pool is deployed.
 const OFFICIAL_POOL_URL: &str = "pool.brisvia.com:3333";
 
+/// A pool the app knows about, PINNED IN THE BINARY. The prefs file stores only the `id`; host/port/tls/fee are
+/// always resolved from here, so a tampered prefs file can at most select another *vetted* catalog entry, never
+/// inject an arbitrary host. Community pools are added ONLY after certification (a real Brisvia job and a real
+/// payout verified). The payout always travels in the miner's own login address, independent of the pool.
+struct VerifiedPool {
+    id: &'static str,
+    operator: &'static str,
+    host_port: &'static str,
+    tls: bool,
+    fee: &'static str,
+    min_payout: &'static str,
+    url: &'static str,
+}
+const VERIFIED_POOLS: &[VerifiedPool] = &[VerifiedPool {
+    id: "official",
+    operator: "Brisvia Official Pool",
+    host_port: OFFICIAL_POOL_URL,
+    tls: true,
+    fee: "0%",
+    min_payout: "0.1 BRVA",
+    url: "https://pool.brisvia.com",
+}];
+/// Resolve a catalog id to its pinned entry (None for an unknown/tampered id -> caller falls back to official).
+fn verified_pool(id: &str) -> Option<&'static VerifiedPool> {
+    VERIFIED_POOLS.iter().find(|p| p.id == id)
+}
+
 /// Is pool mining available to users? OFF for the 1.0 line, and this is the switch that decides it — not the
 /// UI, which anyone can bypass by editing local settings.
 ///
@@ -101,6 +128,13 @@ struct AppState {
     // In pool/custom mode miner_start hands the worker a BRISVIA_POOL_URL; the solo path is unchanged.
     mining_mode: Arc<Mutex<String>>,
     pool_address: Arc<Mutex<String>>,
+    // Which VERIFIED_POOLS entry is selected for "pool" mode (an id resolved from the pinned catalog). Default
+    // "official". Stored as an id, never a host, so the prefs file can't redirect the miner to an arbitrary pool.
+    pool_id: Arc<Mutex<String>>,
+    // Fingerprint of the CUSTOM destination the user explicitly confirmed in THIS app process (memory only, None
+    // at every launch, cleared when the address changes). miner_start refuses a custom whose fingerprint is not
+    // armed -> a persisted-but-tampered custom can never mine silently; the user re-confirms the visible target.
+    custom_armed: Arc<Mutex<Option<String>>>,
     // Pool-mode live status, so the UI can be HONEST: connection state, and shares SENT vs ACCEPTED vs REJECTED
     // (a sent share is not a paid share). A contribution counts only on ShareAccepted. Reset on each miner_start.
     pool_connected: Arc<AtomicBool>,
@@ -2155,11 +2189,30 @@ fn load_mining_prefs(datadir: &std::path::Path) -> (String, String) {
     // address) or any unknown mode is normalised to solo; "pool" is honoured only when the pool ships enabled.
     // The miner ALWAYS uses the pinned OFFICIAL_POOL_URL for pool mode, so a hand-written address in this file
     // can never redirect payouts. The mode the app believes it is in always matches the mode it actually runs.
+    // solo | pool (official/verified, safe) | custom (a user pool). Custom now PERSISTS so the user does not
+    // re-enter it each launch -- but it can never mine automatically: miner_start refuses a custom until the user
+    // re-confirms the visible destination in THIS process (custom_armed is memory-only). Unknown mode -> solo.
     let modo = match modo {
         "pool" if POOL_ENABLED => "pool",
+        "custom" if POOL_ENABLED => "custom",
         _ => "solo",
     };
-    (modo.to_string(), v["addr"].as_str().unwrap_or("").to_string())
+    let addr = v["addr"].as_str().unwrap_or("").to_string();
+    // A hand-edited custom with an invalid / local / private address falls back to solo (never mined).
+    let modo = if modo == "custom" && validate_pool_addr(&addr).is_err() { "solo" } else { modo };
+    (modo.to_string(), addr)
+}
+/// Which verified pool is selected for "pool" mode. Read as an id and validated against the PINNED catalog: an
+/// unknown or hand-edited id resolves to the official pool, never to an arbitrary host.
+fn load_pool_id(datadir: &std::path::Path) -> String {
+    let v = read_mining_prefs_raw(datadir);
+    let id = v["poolId"].as_str().unwrap_or("official");
+    if verified_pool(id).is_some() { id.to_string() } else { "official".to_string() }
+}
+fn save_pool_id(datadir: &std::path::Path, id: &str) {
+    let mut v = read_mining_prefs_raw(datadir);
+    v["poolId"] = json!(id);
+    write_mining_prefs_raw(datadir, &v);
 }
 fn save_mining_prefs(datadir: &std::path::Path, mode: &str, addr: &str) {
     let mut v = read_mining_prefs_raw(datadir);
@@ -2184,6 +2237,59 @@ fn save_autostart(datadir: &std::path::Path, enabled: bool, intensity: &str) {
     write_mining_prefs_raw(datadir, &v);
 }
 
+/// A stable fingerprint of a custom pool destination (trimmed, lowercased host:port). NOT a cryptographic guard
+/// -- only used to check that the destination the user confirmed this session is exactly the one about to mine.
+fn custom_fingerprint(host_port: &str) -> String {
+    host_port.trim().to_ascii_lowercase()
+}
+/// Reject non-public IPs. Defends the reachability check AND real connections against a public hostname that
+/// resolves to an internal address (DNS rebinding / SSRF). Covers IPv4 private/loopback/link-local/unspecified/
+/// broadcast/multicast/documentation and IPv6 loopback/unspecified/unique-local (fc00::/7)/link-local (fe80::/10)/
+/// multicast, including IPv4-mapped IPv6.
+fn is_public_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => !(v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()
+            || v4.is_broadcast() || v4.is_multicast() || v4.is_documentation() || v4.octets()[0] == 0),
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() { return is_public_ip(IpAddr::V4(v4)); }
+            let seg = v6.segments();
+            !(v6.is_loopback() || v6.is_unspecified() || v6.is_multicast()
+                || (seg[0] & 0xfe00) == 0xfc00 || (seg[0] & 0xffc0) == 0xfe80)
+        }
+    }
+}
+/// Reachability check for a pool the user is NOT currently mining. Accepts only a catalog id or the SAVED custom
+/// (never an arbitrary host from the frontend, so it can't become a port scanner). Resolves DNS, rejects any
+/// non-public IP, and does one bounded TCP connect. "reachable" means the port answers -- NOT that it mines
+/// Brisvia (that only turns green once the real miner gets a job on it). Bounded: 3s connect, a single target.
+#[tauri::command]
+fn check_pool_reachable(state: State<AppState>, target: String) -> Value {
+    use std::net::ToSocketAddrs;
+    let host_port = if target == "custom" {
+        state.pool_address.lock().unwrap().clone()
+    } else {
+        match verified_pool(&target) {
+            Some(p) => p.host_port.to_string(),
+            None => return json!({ "status": "error", "error": "ERR:POOL_ID_UNKNOWN" }),
+        }
+    };
+    if host_port.trim().is_empty() { return json!({ "status": "unset" }); }
+    if let Err(e) = validate_pool_addr(&host_port) { return json!({ "status": "invalid", "error": e }); }
+    let addrs = match host_port.to_socket_addrs() {
+        Ok(a) => a.collect::<Vec<_>>(),
+        Err(_) => return json!({ "status": "unresolved" }),
+    };
+    let addr = match addrs.into_iter().find(|a| is_public_ip(a.ip())) {
+        Some(a) => a,
+        None => return json!({ "status": "blocked" }),
+    };
+    let t0 = std::time::Instant::now();
+    match std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(3)) {
+        Ok(_) => json!({ "status": "reachable", "ms": t0.elapsed().as_millis() as u64 }),
+        Err(_) => json!({ "status": "unreachable" }),
+    }
+}
 // Validate a user-supplied custom pool address (host:port): rejects control chars, empty host, bad/out-of-range
 // port, and local/private targets by default. Mirrors the worker's own check so an invalid URL never reaches it.
 fn validate_pool_addr(host_port: &str) -> Result<(), String> {
@@ -2738,8 +2844,9 @@ mod pool_disabled_tests {
         // "custom" (a third-party pool address) is NOT supported in 1.0.9: it must be ignored (-> solo), so a
         // hand-written attacker address can never redirect the miner. This is the last door.
         super::save_mining_prefs(&dir, "custom", "cualquier.cosa:1234");
-        let (modo, _) = super::load_mining_prefs(&dir);
-        assert_eq!(modo, "solo", "a hand-written 'custom' pool address must be ignored, never used");
+        let (modo, addr) = super::load_mining_prefs(&dir);
+        assert_eq!(modo, "custom", "a persisted custom pool is now loaded (mining still requires a per-process confirm)");
+        assert_eq!(addr, "cualquier.cosa:1234", "the custom address is preserved for display + re-confirmation");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3420,7 +3527,12 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
         let mode = state.mining_mode.lock().unwrap().clone();
         match mode.as_str() {
             _ if !POOL_ENABLED => None, // pool mining is off in 1.0 (see POOL_ENABLED) — always mine solo
-            "pool" => Some(OFFICIAL_POOL_URL.to_string()),
+            "pool" => {
+                // Resolve the selected pool id from the PINNED catalog. An unknown/tampered id -> official,
+                // never an arbitrary host. The prefs file only ever holds the id, not a URL.
+                let id = state.pool_id.lock().unwrap().clone();
+                Some(verified_pool(&id).map(|p| p.host_port).unwrap_or(OFFICIAL_POOL_URL).to_string())
+            }
             "custom" => {
                 let a = state.pool_address.lock().unwrap().clone();
                 if a.trim().is_empty() { None } else { Some(a.trim().to_string()) }
@@ -3432,6 +3544,19 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
     if POOL_ENABLED && state.mining_mode.lock().unwrap().as_str() == "custom" && pool_url.is_none() {
         state.mining.store(false, Ordering::SeqCst);
         return json!({ "mining": false, "error": "ERR:POOL_ADDR_MISSING" });
+    }
+    // A custom pool must be confirmed ONCE per app launch before it can receive hashrate. The prefs file is plain
+    // text, so a persisted custom could have been altered while the app was closed; the armed fingerprint lives
+    // only in memory (None at launch, cleared on any address change), so mining a custom always requires the user
+    // to re-confirm the exact destination shown on screen -- a silent redirect is impossible. A keep-session
+    // relaunch (power change / reconnect) does NOT need re-confirming: the address is unchanged, so it stays armed.
+    if POOL_ENABLED && state.mining_mode.lock().unwrap().as_str() == "custom" {
+        let addr = state.pool_address.lock().unwrap().clone();
+        let armed = state.custom_armed.lock().unwrap().clone();
+        if armed.as_deref() != Some(custom_fingerprint(&addr).as_str()) {
+            state.mining.store(false, Ordering::SeqCst);
+            return json!({ "mining": false, "error": "ERR:CUSTOM_NEEDS_CONFIRM", "poolTarget": addr });
+        }
     }
     // Record the EFFECTIVE backend for the peer-loss warning: solo iff no pool URL (so "custom without address",
     // which mines solo, is covered, and a real pool session never raises the isolated-chain warning). Reset the
@@ -4106,6 +4231,15 @@ fn app_version() -> String {
 fn settings_get(app: AppHandle, state: State<AppState>) -> Value {
     use tauri_plugin_autostart::ManagerExt;
     let autostart = app.autolaunch().is_enabled().unwrap_or(false);
+    // Built outside the json! macro (it does not accept a turbofish collect nor an inline block as a value).
+    let pool_catalog: Vec<serde_json::Value> = VERIFIED_POOLS.iter().map(|p| json!({
+        "id": p.id, "operator": p.operator, "hostPort": p.host_port,
+        "tls": p.tls, "fee": p.fee, "minPayout": p.min_payout, "url": p.url,
+    })).collect();
+    let custom_armed_now = {
+        let addr = state.pool_address.lock().unwrap().clone();
+        state.custom_armed.lock().unwrap().as_deref() == Some(custom_fingerprint(&addr).as_str())
+    };
     json!({
         "autostart": autostart,
         "tray": state.tray_enabled.load(Ordering::SeqCst),
@@ -4115,7 +4249,13 @@ fn settings_get(app: AppHandle, state: State<AppState>) -> Value {
         "poolEnabled": POOL_ENABLED,
         // With pool mining off, report the honest truth: solo is what actually runs, whatever is stored.
         "miningMode": if POOL_ENABLED { state.mining_mode.lock().unwrap().clone() } else { "solo".to_string() },
-        "poolAddress": state.pool_address.lock().unwrap().clone()
+        "poolAddress": state.pool_address.lock().unwrap().clone(),
+        // Pool selector: the PINNED catalog (read-only view), the selected verified id, and whether the current
+        // custom destination has been confirmed this session. The frontend renders from this; the effective
+        // destination is always resolved again in Rust at mine time (never from a URL the frontend passes).
+        "poolId": state.pool_id.lock().unwrap().clone(),
+        "poolCatalog": pool_catalog,
+        "customArmed": custom_armed_now
     })
 }
 
@@ -4155,8 +4295,31 @@ fn settings_set(app: AppHandle, state: State<AppState>, key: String, value: Valu
                     }
                 }
                 *state.pool_address.lock().unwrap() = s.to_string();
+                // A changed custom destination must be re-confirmed this session before it can mine again.
+                *state.custom_armed.lock().unwrap() = None;
                 let (m, a) = (state.mining_mode.lock().unwrap().clone(), state.pool_address.lock().unwrap().clone());
                 save_mining_prefs(&state.datadir, &m, &a);
+            }
+        }
+        "poolId" => {
+            // Select a VERIFIED pool for "pool" mode. Only ids in the PINNED catalog are accepted; anything else
+            // is rejected (never treated as a host). Stored as an id, so the prefs file can never inject a URL.
+            if let Some(id) = value.as_str() {
+                if verified_pool(id).is_none() {
+                    return json!({ "ok": false, "error": "ERR:POOL_ID_UNKNOWN" });
+                }
+                *state.pool_id.lock().unwrap() = id.to_string();
+                save_pool_id(&state.datadir, id);
+            }
+        }
+        "confirmCustomPool" => {
+            // Arm the CURRENT custom destination for this app process: the user confirmed the visible target.
+            // miner_start checks this fingerprint before mining a custom, so nothing mines a custom unconfirmed.
+            let addr = state.pool_address.lock().unwrap().clone();
+            if validate_pool_addr(&addr).is_ok() {
+                *state.custom_armed.lock().unwrap() = Some(custom_fingerprint(&addr));
+            } else {
+                return json!({ "ok": false, "error": "ERR:POOL_ADDR_INVALID" });
             }
         }
         _ => {}
@@ -4479,6 +4642,7 @@ pub fn run() {
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
 
     let (init_mode, init_pool) = load_mining_prefs(&datadir);
+    let init_pool_id = load_pool_id(&datadir);
     let state = AppState {
         child: Arc::new(Mutex::new(None)),
         datadir,
@@ -4502,6 +4666,8 @@ pub fn run() {
         tray_enabled: Arc::new(AtomicBool::new(true)),
         mining_mode: Arc::new(Mutex::new(init_mode)),
         pool_address: Arc::new(Mutex::new(init_pool)),
+        pool_id: Arc::new(Mutex::new(init_pool_id)),
+        custom_armed: Arc::new(Mutex::new(None)),
         pool_connected: Arc::new(AtomicBool::new(false)),
         pool_suspended: Arc::new(AtomicBool::new(false)),
         pool_retry_after: Arc::new(AtomicU64::new(0)),
@@ -4719,6 +4885,7 @@ pub fn run() {
             miner_stop,
             miner_set_intensity,
             miner_status,
+            check_pool_reachable,
             node_info,
             tx_detail,
             wallet_backup,
