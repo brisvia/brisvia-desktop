@@ -407,9 +407,6 @@ async function refreshMine() {
     const inPool = !!p.enabled && (s.mode === 'pool' || s.mode === 'custom');
     poolBox.hidden = !inPool;
     if (inPool) {
-      $('#pool-accepted').textContent = window.I18N.fmtNum(p.sharesAccepted || 0);
-      $('#pool-sent').textContent = window.I18N.fmtNum(p.sharesSent || 0);
-      $('#pool-rejected').textContent = window.I18N.fmtNum(p.sharesRejected || 0);
       // Single source of truth: the phase comes from the backend state machine (derived from the miner's real
       // events). "working" means an active job + hashing, NEVER just an open socket; "suspended" is honest
       // maintenance (not an error, not a fall to solo); "reconnecting" shows a real countdown. Green only while
@@ -425,11 +422,6 @@ async function refreshMine() {
       $('#pool-conn-text').textContent = phaseTxt;
       const connected = phase === 'working' || phase === 'waiting' || phase === 'authenticated';
       const suspended = phase === 'suspended';
-      const la = $('#pool-last-accepted');
-      if (p.lastAcceptedTs > 0) {
-        la.hidden = false;
-        la.textContent = T('pool.last_accepted', { t: new Date(p.lastAcceptedTs * 1000).toLocaleTimeString() });
-      } else { la.hidden = true; }
       const err = $('#pool-error');
       if (p.lastError) { err.hidden = false; err.textContent = p.lastError; } else { err.hidden = true; }
       // Speed in pool mode: the pool worker DOES emit a per-second hashrate (consumed into s.hashrate). While
