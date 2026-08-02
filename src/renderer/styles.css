@@ -476,3 +476,14 @@ h1 { font-size: 26px; line-height: 1.1; letter-spacing: -.02em; max-width: 18ch;
 .mine-custom-row .pool-addr-wrap { justify-content: flex-start; margin-left: 4px; }
 .tx-link { cursor: pointer; }
 .tx-link:hover { color: var(--brand); text-decoration: underline; }
+
+/* Language switch dropdown (single current flag + menu). */
+.lang-switch { position: relative; margin-right: 4px; }
+#lang-current { opacity: 1; }
+.lang-flag svg { overflow: hidden; }
+.lang-menu { position: absolute; top: 100%; right: 0; margin-top: 6px; display: flex; flex-direction: column; gap: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 6px; z-index: 60; box-shadow: 0 8px 24px rgba(0,0,0,.4); }
+.lang-menu .lang-flag { opacity: .8; }
+.lang-menu .lang-flag:hover, .lang-menu .lang-flag.active { opacity: 1; border-color: var(--brand); }
+/* Custom-pool bar (Mine tab): input row aligned left with the mode segment; checkbox tight under it. */
+.mine-custom-inputrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-left: 4px; }
+.mine-custom-row .pool-plain-row { margin-top: 6px; margin-left: 4px; gap: 6px; }

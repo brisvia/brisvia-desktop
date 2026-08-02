@@ -937,16 +937,24 @@ $$('#set-language .seg-btn').forEach((b) => b.addEventListener('click', () => {
   if (window.brisvia.setLanguage) window.brisvia.setLanguage(b.dataset.lang); // rebuilds the tray menu
   reRenderForLanguage();
 }));
-// Language flags in the top bar (replace the Settings language row; click to switch).
-$$('#lang-flags .lang-flag').forEach((b) => b.addEventListener('click', () => {
+// Language switch (top bar): show only the current flag; click to reveal the others.
+function updateLangCurrent() {
+  const src = document.querySelector('#lang-menu .lang-flag[data-lang="' + window.I18N.lang + '"]') || document.querySelector('#lang-menu .lang-flag[data-lang="en"]');
+  const cur = $('#lang-current');
+  if (cur && src) { cur.innerHTML = src.innerHTML; cur.dataset.lang = window.I18N.lang; }
+  $$('#lang-menu .lang-flag').forEach((b) => b.classList.toggle('active', b.dataset.lang === window.I18N.lang));
+}
+$('#lang-current') && $('#lang-current').addEventListener('click', (e) => { e.stopPropagation(); const m = $('#lang-menu'); if (m) m.hidden = !m.hidden; });
+$$('#lang-menu .lang-flag').forEach((b) => b.addEventListener('click', () => {
   window.I18N.setLang(b.dataset.lang);
   if (window.brisvia.setLanguage) window.brisvia.setLanguage(b.dataset.lang);
   reRenderForLanguage();
-  refreshLangFlags();
+  updateLangCurrent();
+  const m = $('#lang-menu'); if (m) m.hidden = true;
 }));
-function refreshLangFlags() { $$('#lang-flags .lang-flag').forEach((b) => b.classList.toggle('active', b.dataset.lang === window.I18N.lang)); }
-refreshLangFlags();
-document.addEventListener('langchange', refreshLangFlags);
+document.addEventListener('click', () => { const m = $('#lang-menu'); if (m && !m.hidden) m.hidden = true; });
+updateLangCurrent();
+document.addEventListener('langchange', updateLangCurrent);
 // Mining mode selector (solo / grouped). The Brisvia pool is being set up; until it is live, choosing "grouped"
 // reveals the pool row with a "being set up" status and mining keeps running solo. When the pool is live this
 // selector will point the miner at pool.brisvia.com.
