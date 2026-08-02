@@ -422,8 +422,13 @@ async function refreshMine() {
       $('#pool-conn-text').textContent = phaseTxt;
       const connected = phase === 'working' || phase === 'waiting' || phase === 'authenticated';
       const suspended = phase === 'suspended';
+      // While the miner is connecting, auto-reconnecting or the pool is under maintenance, the status line
+      // above (with its countdown) already tells the story. Surfacing the raw drop reason on top of that reads
+      // as a scary error the user can do nothing about — so only show it once the state is settled (not one of
+      // the self-healing phases). A genuinely stuck disconnect still shows it.
       const err = $('#pool-error');
-      if (p.lastError) { err.hidden = false; err.textContent = p.lastError; } else { err.hidden = true; }
+      const selfHealing = (phase === 'connecting' || phase === 'reconnecting' || phase === 'suspended');
+      if (p.lastError && !selfHealing) { err.hidden = false; err.textContent = p.lastError; } else { err.hidden = true; }
       // Speed in pool mode: the pool worker DOES emit a per-second hashrate (consumed into s.hashrate). While
       // it is still 0 (right after login, before the first sample) show "measuring" instead of a misleading
       // "0 H/s". The honest work signal here is accepted shares (above).
