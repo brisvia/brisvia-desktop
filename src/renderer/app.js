@@ -36,6 +36,8 @@ function transError(err) {
       POOL_ADDR_FORMAT: 'errors.pool_addr_format',
       POOL_ADDR_PORT: 'errors.pool_addr_port',
       POOL_ADDR_LOCAL: 'errors.pool_addr_local',
+      CUSTOM_NEEDS_CONFIRM: 'errors.custom_needs_confirm',
+      POOL_ID_UNKNOWN: 'errors.pool_id_unknown',
       NO_UPDATE: 'errors.no_update',
       NODE_STILL_RUNNING: 'errors.node_still_running',
       UPDATE_UNREACHABLE: 'errors.update_unreachable',
