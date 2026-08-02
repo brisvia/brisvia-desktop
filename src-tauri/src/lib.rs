@@ -135,6 +135,8 @@ struct AppState {
     // at every launch, cleared when the address changes). miner_start refuses a custom whose fingerprint is not
     // armed -> a persisted-but-tampered custom can never mine silently; the user re-confirms the visible target.
     custom_armed: Arc<Mutex<Option<String>>>,
+    // Whether the CUSTOM pool link is plain (no TLS). Opt-in, persisted; only ever applied to a custom pool.
+    pool_plain: Arc<Mutex<bool>>,
     // Pool-mode live status, so the UI can be HONEST: connection state, and shares SENT vs ACCEPTED vs REJECTED
     // (a sent share is not a paid share). A contribution counts only on ShareAccepted. Reset on each miner_start.
     pool_connected: Arc<AtomicBool>,
@@ -2214,6 +2216,15 @@ fn save_pool_id(datadir: &std::path::Path, id: &str) {
     v["poolId"] = json!(id);
     write_mining_prefs_raw(datadir, &v);
 }
+/// Whether the custom pool link is plain (no TLS). Opt-in; default false (encrypted).
+fn load_pool_plain(datadir: &std::path::Path) -> bool {
+    read_mining_prefs_raw(datadir)["poolPlain"].as_bool().unwrap_or(false)
+}
+fn save_pool_plain(datadir: &std::path::Path, plain: bool) {
+    let mut v = read_mining_prefs_raw(datadir);
+    v["poolPlain"] = json!(plain);
+    write_mining_prefs_raw(datadir, &v);
+}
 fn save_mining_prefs(datadir: &std::path::Path, mode: &str, addr: &str) {
     let mut v = read_mining_prefs_raw(datadir);
     v["mode"] = json!(mode);
@@ -3387,7 +3398,7 @@ fn refresh_tooltip(state: &AppState) {
 /// from a clean log (the follower re-reads the whole file every pass, so truncation is safe). RPC credentials
 /// travel via env, never argv; the pool URL only in pool mode; the plaintext-pool opt-out is always removed.
 fn build_worker_command(miner_bin: &Path, url: &str, addr: &str, cuser: &str, cpass: &str, threads: usize,
-                        pool_url: &Option<String>, events_path: &Path, force_light: bool) -> Command {
+                        pool_url: &Option<String>, events_path: &Path, force_light: bool, plain: bool) -> Command {
     let out = std::fs::File::create(events_path).map(Stdio::from).unwrap_or_else(|_| Stdio::null());
     let max_blocks = u64::MAX.to_string();
     let thr = threads.to_string();
@@ -3406,7 +3417,9 @@ fn build_worker_command(miner_bin: &Path, url: &str, addr: &str, cuser: &str, cp
     }
     // Never mine unencrypted: an inherited BRISVIA_POOL_PLAIN would downgrade the pool link to plain text, where
     // a man-in-the-middle can rewrite the payout address. Remove it ALWAYS.
-    cmd.env_remove("BRISVIA_POOL_PLAIN");
+    // Plain is OPT-IN for a custom pool only (env below); TLS stays the default and is forced otherwise. Never an
+    // automatic TLS->plain fallback -- only an explicit choice for the user's own pool, shown with a warning.
+    if plain { cmd.env("BRISVIA_POOL_PLAIN", "1"); } else { cmd.env_remove("BRISVIA_POOL_PLAIN"); }
     // Light-mode retry: skip the ~2.1 GB fast dataset and mine in light from the start (used by the supervisor
     // when a fast worker died before producing any work, e.g. Linux overcommit OOM-killing it mid-init).
     if force_light { cmd.env("BRISVIA_FORCE_LIGHT", "1"); } else { cmd.env_remove("BRISVIA_FORCE_LIGHT"); }
@@ -3563,8 +3576,12 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
     // peer-loss timer so a new session never inherits a stale 0-peers instant from a previous solo run.
     state.mining_is_solo.store(pool_url.is_none(), Ordering::SeqCst);
     *state.no_peers_since.lock().unwrap() = None;
+    // Plain (unencrypted) is opt-in and only for a CUSTOM pool: many community pools speak the same stratum login
+    // as the official pool but on a plain port. Verified pools always use TLS; a plain link only ever happens when
+    // the user explicitly turned it on for THEIR OWN pool (shown with a warning). Never an auto TLS->plain fallback.
+    let use_plain = state.mining_mode.lock().unwrap().as_str() == "custom" && *state.pool_plain.lock().unwrap();
     // First launch: FAST where the RAM allows it (build_worker_command handles args, env creds and pool mode).
-    let child = match build_worker_command(&miner_bin, &url, &addr, &cuser, &cpass, threads, &pool_url, &events_path, false).spawn() {
+    let child = match build_worker_command(&miner_bin, &url, &addr, &cuser, &cpass, threads, &pool_url, &events_path, false, use_plain).spawn() {
         Ok(c) => c,
         Err(e) => { state.mining.store(false, Ordering::SeqCst); return json!({ "mining": false, "error": format!("could not start the miner: {e}") }); }
     };
@@ -3758,7 +3775,7 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
                 // that is the dataset-OOM signature. Pool mode already falls back to light on its own.
                 if is_solo && !retried_light && !ready.load(Ordering::SeqCst) {
                     retried_light = true;
-                    match build_worker_command(&miner_bin, &url, &addr, &cuser, &cpass, threads, &pool_url, &events_path, true).spawn() {
+                    match build_worker_command(&miner_bin, &url, &addr, &cuser, &cpass, threads, &pool_url, &events_path, true, false).spawn() {
                         Ok(c) => { *guard = Some(c); continue; }
                         Err(_) => { *guard = None; }
                     }
@@ -3947,6 +3964,23 @@ fn miner_status(state: State<AppState>) -> Value {
         else if pool_everjob { "waiting" }
         else { "authenticated" };
     let pool_retry_secs = pool_retry_at.saturating_sub(now_secs);
+    // The resolved destination for display (operator + host:port), so the mining screen always shows exactly where
+    // the hashrate goes. Resolved here in Rust from the current selection, never from a value the frontend passes.
+    let pool_target: serde_json::Value = {
+        let mode = state.mining_mode.lock().unwrap().clone();
+        match mode.as_str() {
+            "pool" => match verified_pool(&state.pool_id.lock().unwrap()).or_else(|| verified_pool("official")) {
+                Some(p) => json!({ "operator": p.operator, "hostPort": p.host_port, "verified": true, "url": p.url }),
+                None => serde_json::Value::Null,
+            },
+            "custom" => {
+                let a = state.pool_address.lock().unwrap().clone();
+                if a.trim().is_empty() { serde_json::Value::Null }
+                else { json!({ "operator": "Custom", "hostPort": a.trim(), "verified": false }) }
+            }
+            _ => serde_json::Value::Null,
+        }
+    };
     // Sustained peer-loss warning while mining SOLO on mainnet: if the node holds 0
     // peers for >= 75 s the solo miner may be extending an isolated branch whose blocks get discarded (no funds
     // lost). We only WARN (persistent yellow banner in the UI) — never stop, switch mode or restart.
@@ -3993,6 +4027,7 @@ fn miner_status(state: State<AppState>) -> Value {
         },
         // Which mode the app is ACTUALLY running (normalised: never "pool" while POOL_ENABLED is off).
         "mode": state.mining_mode.lock().unwrap().clone(),
+        "poolTarget": pool_target,
         // Pool-mode live status for the honest UI. `sharesSent` is what left the miner; `sharesAccepted` is what
         // the pool CONFIRMED (a contribution counts only here). A sent share is not a paid share.
         "pool": {
@@ -4255,7 +4290,8 @@ fn settings_get(app: AppHandle, state: State<AppState>) -> Value {
         // destination is always resolved again in Rust at mine time (never from a URL the frontend passes).
         "poolId": state.pool_id.lock().unwrap().clone(),
         "poolCatalog": pool_catalog,
-        "customArmed": custom_armed_now
+        "customArmed": custom_armed_now,
+        "poolPlain": *state.pool_plain.lock().unwrap()
     })
 }
 
@@ -4311,6 +4347,12 @@ fn settings_set(app: AppHandle, state: State<AppState>, key: String, value: Valu
                 *state.pool_id.lock().unwrap() = id.to_string();
                 save_pool_id(&state.datadir, id);
             }
+        }
+        "poolPlain" => {
+            // Opt-in plain (no TLS) for the user's OWN custom pool. Applied only to custom mode in miner_start.
+            let plain = value.as_bool().unwrap_or(false);
+            *state.pool_plain.lock().unwrap() = plain;
+            save_pool_plain(&state.datadir, plain);
         }
         "confirmCustomPool" => {
             // Arm the CURRENT custom destination for this app process: the user confirmed the visible target.
@@ -4643,6 +4685,7 @@ pub fn run() {
 
     let (init_mode, init_pool) = load_mining_prefs(&datadir);
     let init_pool_id = load_pool_id(&datadir);
+    let init_pool_plain = load_pool_plain(&datadir);
     let state = AppState {
         child: Arc::new(Mutex::new(None)),
         datadir,
@@ -4668,6 +4711,7 @@ pub fn run() {
         pool_address: Arc::new(Mutex::new(init_pool)),
         pool_id: Arc::new(Mutex::new(init_pool_id)),
         custom_armed: Arc::new(Mutex::new(None)),
+        pool_plain: Arc::new(Mutex::new(init_pool_plain)),
         pool_connected: Arc::new(AtomicBool::new(false)),
         pool_suspended: Arc::new(AtomicBool::new(false)),
         pool_retry_after: Arc::new(AtomicU64::new(0)),

@@ -461,3 +461,4 @@ h1 { font-size: 26px; line-height: 1.1; letter-spacing: -.02em; max-width: 18ch;
 .pool-health-line { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 .pool-health-line .conn-dot { flex: 0 0 auto; }
 .conn-dot.bad { background: #e5534b; box-shadow: 0 0 0 3px rgba(229,83,75,.18); }
+.pool-plain-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; cursor: pointer; }

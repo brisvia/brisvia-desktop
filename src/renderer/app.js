@@ -908,9 +908,11 @@ async function loadSettings() {
   $$('#set-language .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.lang === window.I18N.lang));
   applyMiningMode(s.miningMode || 'solo');
   { const _pa = $('#set-pool-addr'); if (_pa && s.poolAddress) _pa.value = s.poolAddress; }
+  { const _pp = $('#set-pool-plain'); if (_pp) _pp.checked = !!s.poolPlain; }
 }
 $('#set-autostart').addEventListener('change', (e) => window.brisvia.settings.set('autostart', e.target.checked));
 $('#set-tray').addEventListener('change', (e) => window.brisvia.settings.set('tray', e.target.checked));
+$('#set-pool-plain')?.addEventListener('change', (e) => window.brisvia.settings.set('poolPlain', e.target.checked));
 $$('#set-intensity .seg-btn').forEach((b) => b.addEventListener('click', () => setPower(parseInt(b.dataset.pct, 10), true)));
 // Static text (data-i18n) is re-applied by I18N.setLang. Text PAINTED BY JS (the auto-start summary, the
 // power label, the balances) is NOT, so a live language change would leave it in the old language until the
@@ -1010,7 +1012,14 @@ function renderMineMode(s) {
   // "OTHER POOL" when the user picked one in Settings, not be flattened to "official pool".
   const rawMode = (s && s.mode) === 'custom' ? 'custom' : active;
   const activeEl = $('#mine-mode-active');
-  if (activeEl) activeEl.textContent = T('settings.mode_' + rawMode).toUpperCase();
+  if (activeEl) {
+    // Show the ACTUAL destination the user chose: the pool operator (official) or the host:port (custom),
+    // not a generic 'OTHER POOL'. Solo stays 'SOLO'. Resolved by the backend (poolTarget).
+    const pt = s && s.poolTarget;
+    if (s && s.mode === 'custom' && pt && pt.hostPort) activeEl.textContent = pt.hostPort;
+    else if (s && s.mode === 'pool' && pt && pt.operator) activeEl.textContent = pt.operator;
+    else activeEl.textContent = T('settings.mode_' + rawMode).toUpperCase();
+  }
   // The per-mode explanation lives in Settings now; the Mining screen stays uncluttered (owner's call).
   const desc = $('#mine-mode-desc');
   if (desc) desc.hidden = true;
@@ -1066,9 +1075,15 @@ async function changeMiningMode(mode) {
   if (st) {
     delete st.dataset.busy;
     st.hidden = false;
-    st.textContent = (active === mode)
-      ? T('mine.mode_switched', { m: T('settings.mode_' + active).toUpperCase() })
-      : T('mine.mode_mismatch');
+    if (active === mode) {
+      // A one-off switch confirmation, auto-hidden after a few seconds so it never lingers as a stale
+      // 'Active mode: SOLO' after the user later picks another mode in Settings.
+      st.textContent = T('mine.mode_switched', { m: T('settings.mode_' + active).toUpperCase() });
+      st.dataset.status = 'switched';
+      setTimeout(() => { if (st.dataset.status === 'switched') { st.hidden = true; st.textContent = ''; delete st.dataset.status; } }, 4000);
+    } else {
+      st.textContent = T('mine.mode_mismatch'); st.dataset.status = 'mode-mismatch';
+    }
   }
 }
 let pendingModeSwitch = null;
