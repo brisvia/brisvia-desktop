@@ -107,6 +107,10 @@ struct AppState {
     pool_shares_sent: Arc<AtomicU64>,
     pool_shares_accepted: Arc<AtomicU64>,
     pool_shares_rejected: Arc<AtomicU64>,
+    // Monotonic id bumped on every miner_start. The events follower captures its value at spawn and exits
+    // as soon as a newer follower exists, so exactly ONE follower writes the counters at a time (a relaunch
+    // flips `mining` false->true within microseconds, so the old follower would otherwise survive and race).
+    follower_gen: Arc<AtomicU64>,
     pool_last_error: Arc<Mutex<String>>,
     pool_suspended: Arc<AtomicBool>, // the pool told us it is under maintenance (distinct from an error/disconnect)
     pool_retry_after: Arc<AtomicU64>, // ABSOLUTE unix ts of the next reconnect/maintenance attempt (0 = none)
@@ -3437,6 +3441,8 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
 
     // Thread that follows the events file and updates accepted contributions + real hashrate.
     {
+        let my_follower_gen = state.follower_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        let follower_gen = state.follower_gen.clone();
         let events_path = events_path.clone(); // the follower gets its own copy; the supervisor keeps the original
         let mined = state.mined.clone();
         let stale = state.stale.clone();
@@ -3469,7 +3475,8 @@ fn miner_start(app: AppHandle, state: State<AppState>, intensity: Option<String>
             let mut sess_carry_ok: u64 = pool_accepted.load(Ordering::SeqCst);
             let mut last_flush = Instant::now();
             loop {
-                if !mining.load(Ordering::SeqCst) { break; }
+                // Stop if mining ended OR a newer follower has taken over (single-writer guarantee).
+                if !mining.load(Ordering::SeqCst) || follower_gen.load(Ordering::SeqCst) != my_follower_gen { break; }
                 std::thread::sleep(Duration::from_millis(500));
                 // Periodic save of the total time (including the in-progress session), in case the app
                 // closes without going through "Stop". Every 30 s is enough and doesn't wear the disk.
@@ -4476,6 +4483,7 @@ pub fn run() {
         stale: Arc::new(AtomicU64::new(0)),
         mine_start: Arc::new(Mutex::new(None)),
         keep_session_on_relaunch: Arc::new(AtomicBool::new(false)),
+        follower_gen: Arc::new(AtomicU64::new(0)),
         intensity: Arc::new(Mutex::new("equilibrado".to_string())),
         miner_child: Arc::new(Mutex::new(None)),
         hashrate: Arc::new(Mutex::new(0.0)),
