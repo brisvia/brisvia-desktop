@@ -12,6 +12,13 @@ window.CHANGELOG = {
     zh: { title: '版本更新内容', ok: '知道了' },
     ru: { title: 'Что нового в версии', ok: 'Понятно' },
   },
+  '1.1.5': {
+    es: '• «Tus aportes aceptados» ya no vuelven a cero cuando cambiás la potencia o el minero se reconecta.\n• Estado de conexión más claro: mientras se reconecta solo, ya no aparece un cartel de error.\n• Pantalla de minado más limpia: sacamos información que estaba repetida.\n• Reconexión más confiable y arreglos internos para que el tiempo minado se cuente bien.',
+    en: '• “Your accepted work” no longer resets to zero when you change power or the miner reconnects.\n• Clearer connection status: while it reconnects on its own, no scary error message pops up.\n• Cleaner mining screen: we removed information that was repeated.\n• More reliable reconnection and internal fixes so your mining time is counted correctly.',
+    pt: '• “Sua contribuição aceita” não zera mais quando você muda a potência ou o minerador reconecta.\n• Status de conexão mais claro: enquanto reconecta sozinho, não aparece mais uma mensagem de erro.\n• Tela de mineração mais limpa: removemos informações que estavam repetidas.\n• Reconexão mais confiável e correções internas para que o tempo minerado seja contado corretamente.',
+    zh: '• 更改功率或矿机重新连接时，“你的已接受贡献”不再归零。\n• 连接状态更清晰：自动重连时不再弹出吓人的错误提示。\n• 挖矿界面更简洁：移除了重复显示的信息。\n• 重连更可靠，并修复了内部问题，使挖矿时间正确计算。',
+    ru: '• «Ваш принятый вклад» больше не сбрасывается в ноль при смене мощности или переподключении майнера.\n• Понятнее статус подключения: во время автоматического переподключения больше нет пугающего сообщения об ошибке.\n• Более чистый экран майнинга: убрали информацию, которая повторялась.\n• Более надёжное переподключение и внутренние исправления, чтобы время майнинга считалось правильно.',
+  },
   '1.1.4': {
     es: '• El minero en modo Solo ahora muestra la velocidad real (antes marcaba 0).\n• En Grupo, «Tu aporte» muestra lo que aportaste en esta sesión; el pago siempre cae en tu Billetera.\n• Al cambiar de tipo de minado ahora te pedimos confirmar antes.\n• La potencia que elegiste se mantiene al cambiar de tipo de minado.',
     en: '• Solo mode now shows your real hashrate (it used to read 0).\n• In a pool, “Your contribution” now shows this session’s accepted work; the payout always lands in your Wallet.\n• Switching mining type now asks you to confirm first.\n• Your chosen power is kept when you change mining type.',
