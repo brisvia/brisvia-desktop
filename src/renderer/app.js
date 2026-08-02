@@ -1693,19 +1693,10 @@ async function pollNet() {
   const netKey = waitMode ? 'wait.net'
     : (!connected ? 'net.connecting' : (syncing ? 'net.syncing' : (!hasPeers ? 'net.connecting' : (walletReady ? 'net.connected' : 'net.preparing'))));
   setNet(connected && !waitMode && !syncing && hasPeers, netKey);
-  if ($('#nr-status')) {
-    // Network + mode: gives the user certainty about WHERE they are mining (asked by users who weren't sure).
-    // `network` comes from the build itself (NET_CHAIN), so it's right even before the node connects.
-    $('#nr-network').textContent = networkLabel(info && info.network);
-    // Show what the user picked, honestly (audit N5): mining runs solo until the pool
-    // client lands, so pool/custom are shown as "solo · <group> pending".
-    $('#nr-mode').textContent = currentMiningMode === 'pool' ? T('net_panel.mode_pool_pending')
-      : currentMiningMode === 'custom' ? T('net_panel.mode_custom_pending')
-      : T('net_panel.mode_solo');
-    $('#nr-status').textContent = waitMode ? T('wait.net')
-      : (!connected ? T('net_panel.connecting') : (syncing ? T('net.syncing') : (!hasPeers ? T('net_panel.connecting') : (walletReady ? T('net_panel.connected') : T('net_panel.preparing')))));
+  // The network panel now shows only blocks + difficulty (owner's call): the Red/Modo/Estado/Conexiones rows
+  // were removed. The header already shows "Red conectada", so those were redundant technical clutter here.
+  if ($('#nr-height')) {
     $('#nr-height').textContent = connected ? window.I18N.fmtNum(info.blocks ?? 0) : '—';
-    $('#nr-peers').textContent = connected ? (info.peers ?? 0) : '—';
     // Difficulty on the shared testnet is a tiny number; 2 decimals would round it to "0".
     // Show it readable: >=1 with 2 decimals, small values with 3 significant digits.
     $('#nr-diff').textContent = (connected && info.difficulty != null)
