@@ -487,3 +487,24 @@ h1 { font-size: 26px; line-height: 1.1; letter-spacing: -.02em; max-width: 18ch;
 /* Custom-pool bar (Mine tab): input row aligned left with the mode segment; checkbox tight under it. */
 .mine-custom-inputrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-left: 4px; }
 .mine-custom-row .pool-plain-row { margin-top: 6px; margin-left: 4px; gap: 6px; }
+
+/* Coin control: "Funds come from" selector in the Send dialog (choose one or several source addresses). */
+.send-from-field { display: flex; flex-direction: column; gap: 4px; text-align: left; margin: 12px 0; }
+.send-from-label { display: block; margin-bottom: 5px; }
+/* Defensive: keep the row checkboxes as real checkboxes and rows clean, even if a global input/span rule leaks
+   in. (The container is intentionally NOT a .field, whose `input{width:100%}` / `span{display:block}` broke this.) */
+.send-from-list input[type="checkbox"] { width: auto; min-width: 0; flex: 0 0 auto; margin: 0; padding: 0; background: none; border: 0; accent-color: var(--brand); }
+.send-from-all span { display: inline; margin: 0; white-space: nowrap; }
+.send-from-toggle { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; text-align: left; padding: 9px 12px; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; font: inherit; }
+.send-from-toggle:hover { border-color: var(--brand); }
+.send-from-chev { opacity: .6; font-size: .85em; }
+.send-from-list { display: flex; flex-direction: column; gap: 2px; border: 1px solid var(--border); border-radius: 8px; padding: 6px; max-height: 190px; overflow-y: auto; background: var(--surface); }
+.send-from-all, .send-from-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+.send-from-all { border-bottom: 1px solid var(--border); border-radius: 0; margin-bottom: 2px; padding-bottom: 8px; font-weight: 600; }
+.send-from-item:hover, .send-from-all:hover { background: rgba(255,255,255,.04); }
+.send-from-item.sel { background: rgba(53,191,197,.12); } /* chosen rows tinted with the brand colour */
+.send-from-item.sel:hover { background: rgba(53,191,197,.18); }
+/* The address stays on ONE line: override the global .mono (word-break:break-all + text-align:right) that
+   otherwise splits it character by character. min-width:0 lets the flex item shrink; ellipsis handles overflow. */
+.send-from-item code { flex: 1 1 auto; min-width: 0; font-size: .82em; opacity: .85; white-space: nowrap; word-break: normal; overflow: hidden; text-overflow: ellipsis; text-align: left; }
+.send-from-item strong { white-space: nowrap; font-variant-numeric: tabular-nums; flex: 0 0 auto; }

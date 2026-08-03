@@ -1356,9 +1356,11 @@ fn wallet_addresses(state: State<AppState>) -> Value {
     let list: Vec<String> = std::fs::read_to_string(addresses_path(&state.datadir))
         .unwrap_or_default()
         .lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-    // Current balance per address = sum of its unspent outputs. One listunspent call (minconf 0) covers them all.
+    // Current balance per address = sum of its SPENDABLE unspent outputs. include_unsafe=false so the amount the
+    // coin-control selector shows equals what a send can actually spend (unsafe external 0-conf is excluded,
+    // matching wallet_send/wallet_estimate_send). minconf 0 keeps own unconfirmed change visible.
     let mut balances: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
-    if let Ok(utxos) = rpc(&state.datadir, Some(WALLET_NAME), "listunspent", json!([0])) {
+    if let Ok(utxos) = rpc(&state.datadir, Some(WALLET_NAME), "listunspent", json!([0, 9999999, [], false])) {
         if let Some(arr) = utxos.as_array() {
             for u in arr {
                 if let (Some(a), Some(amt)) = (u["address"].as_str(), u["amount"].as_f64()) {
@@ -1371,6 +1373,27 @@ fn wallet_addresses(state: State<AppState>) -> Value {
         .iter()
         .map(|a| json!({ "address": a, "balance": balances.get(a).copied().unwrap_or(0.0) }))
         .collect();
+    json!(out)
+}
+
+#[tauri::command]
+/// Every address that currently holds SPENDABLE coins (include_unsafe=false), with its total, biggest first.
+/// This is what the coin-control "Funds come from" selector needs: it must list ANY address that holds coins
+/// (change and coinbase addresses included), not only the app-generated receive addresses in addresses.txt.
+fn wallet_spendable_sources(state: State<AppState>) -> Value {
+    let mut balances: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    if let Ok(utxos) = rpc(&state.datadir, Some(WALLET_NAME), "listunspent", json!([0, 9999999, [], false])) {
+        if let Some(arr) = utxos.as_array() {
+            for u in arr {
+                if let (Some(a), Some(amt)) = (u["address"].as_str(), u["amount"].as_f64()) {
+                    *balances.entry(a.to_string()).or_insert(0.0) += amt;
+                }
+            }
+        }
+    }
+    let mut items: Vec<(String, f64)> = balances.into_iter().collect();
+    items.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)); // biggest first
+    let out: Vec<Value> = items.iter().map(|(a, bal)| json!({ "address": a, "balance": bal })).collect();
     json!(out)
 }
 
@@ -1588,7 +1611,7 @@ fn prepare_wallet_layout(datadir: &std::path::Path) -> WalletLayout {
 // `amount` arrives as the STRING the user typed, never as f64: floating point must not touch money.
 // It is parsed into integer base units here and handed to the node as an exact decimal string, which its
 // RPC layer reads with ParseFixedPoint (exact). See parse_amount_briv.
-fn wallet_send(state: State<AppState>, address: String, amount: String, password: String) -> Result<Value, String> {
+fn wallet_send(state: State<AppState>, address: String, amount: String, password: String, from_addresses: Option<Vec<String>>) -> Result<Value, String> {
     // Single-flight: only one send may be in flight. try_lock, NEVER lock() — waiting for the guard would
     // just run the duplicate send a moment later, which is the exact thing being prevented. The guard is
     // held to the end of the function (unlock, send, relock) and released on every return path.
@@ -1598,21 +1621,62 @@ fn wallet_send(state: State<AppState>, address: String, amount: String, password
         .map_err(|_| "ERR:SEND_IN_PROGRESS".to_string())?;
     let briv = parse_amount_briv(&amount)?;
     let exact = briv_to_decimal(briv);
-    // Encrypted wallets (new format): unlock briefly with the password, send, and lock again right away.
-    // Old unencrypted wallets (created before password support): send directly, without a passphrase, so
-    // updating the app never breaks an existing wallet. The UI offers to protect them with a password.
-    if wallet_is_encrypted(&state.datadir) {
+    // OPTIONAL coin control: the user may pick one OR SEVERAL source addresses; the payment then spends ONLY the
+    // UTXOs at those addresses (change still returns to the wallet). Empty/None keeps the audited default: Core
+    // funds the payment from the whole wallet. The destination address and the amount are always explicit and
+    // identical in both paths, so choosing sources only changes WHICH coins pay -- never who gets paid or how much.
+    let froms: Vec<String> = from_addresses
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let inputs: Option<Value> = if !froms.is_empty() {
+        // listunspent needs no passphrase; gather the chosen addresses' spendable coins BEFORE unlocking.
+        // include_unsafe=false (4th arg): exclude coins that are not safe to spend -- unconfirmed outputs from
+        // OUTSIDE keys and unconfirmed replacements. This matches what sendtoaddress/fundrawtransaction use by
+        // default, so coin control never spends a coin the audited whole-wallet path would refuse. Own confirmed
+        // coins and own unconfirmed change stay eligible (Core marks them "safe").
+        let utxos = rpc(&state.datadir, Some(WALLET_NAME), "listunspent", json!([0, 9999999, froms, false]))
+            .map_err(|e| friendly_error(&e))?;
+        let arr = utxos.as_array().cloned().unwrap_or_default();
+        if arr.is_empty() { return Err("ERR:INSUFFICIENT_FUNDS".to_string()); }
+        Some(json!(arr.iter().map(|u| json!({ "txid": u["txid"], "vout": u["vout"] })).collect::<Vec<Value>>()))
+    } else { None };
+    let encrypted = wallet_is_encrypted(&state.datadir);
+    // Encrypted wallets (new format): unlock briefly with the password, send, and lock again right away. Old
+    // unencrypted wallets send directly (updating the app never breaks an existing wallet).
+    if encrypted {
         rpc(&state.datadir, Some(WALLET_NAME), "walletpassphrase", json!([password, 30]))
             .map_err(|e| friendly_error(&e))?;
-        let res = rpc_classified(&state.datadir, Some(WALLET_NAME), "sendtoaddress", json!([address, exact]));
-        let _ = rpc(&state.datadir, Some(WALLET_NAME), "walletlock", json!([]));
-        let txid = res.map_err(send_failure_to_code)?;
-        Ok(json!({ "ok": true, "txid": txid }))
-    } else {
-        let txid = rpc_classified(&state.datadir, Some(WALLET_NAME), "sendtoaddress", json!([address, exact]))
-            .map_err(send_failure_to_code)?;
-        Ok(json!({ "ok": true, "txid": txid }))
     }
+    let coin_control = inputs.is_some();
+    let res = if let Some(ref ins) = inputs {
+        // Coin control via `send`: only the chosen UTXOs (add_inputs=false), change back to the wallet.
+        let mut outs = serde_json::Map::new();
+        outs.insert(address.clone(), json!(exact));
+        let opts = json!({ "inputs": ins, "add_inputs": false });
+        rpc_classified(&state.datadir, Some(WALLET_NAME), "send",
+            json!([Value::Object(outs), Value::Null, "unset", Value::Null, opts]))
+    } else {
+        rpc_classified(&state.datadir, Some(WALLET_NAME), "sendtoaddress", json!([address, exact]))
+    };
+    if encrypted { let _ = rpc(&state.datadir, Some(WALLET_NAME), "walletlock", json!([])); }
+    let out = res.map_err(send_failure_to_code)?;
+    let txid = if coin_control {
+        // `send` returns {complete, txid, psbt}. A txid appears ONLY when it fully signed AND broadcast
+        // (complete:true). complete:false means it produced an unsigned/partial PSBT and did NOT broadcast --
+        // a clean "nothing was sent" state, safe to retry. This is NOT SEND_STATUS_UNKNOWN (which means the
+        // request went out and no answer came, so it MAY be on the network): here we KNOW it never left.
+        let complete = out.get("complete").and_then(|c| c.as_bool()).unwrap_or(false);
+        match (complete, out.get("txid").and_then(|t| t.as_str())) {
+            (true, Some(id)) => Value::String(id.to_string()),
+            _ => return Err("ERR:SEND_NOT_BROADCAST".to_string()),
+        }
+    } else {
+        out // sendtoaddress returns the txid string directly
+    };
+    Ok(json!({ "ok": true, "txid": txid }))
 }
 
 // Estimate the network fee for a payment WITHOUT sending it. Builds a funded PSBT (Core picks the inputs and
@@ -1622,7 +1686,7 @@ fn wallet_send(state: State<AppState>, address: String, amount: String, password
 // the network fee for this exact payment. amount uses the same exact parse as the real send; the fee itself
 // is informational, so reading it as f64 is fine (the actual send stays exact via the amount string).
 #[tauri::command]
-fn wallet_estimate_send(state: State<AppState>, address: String, amount: String) -> Result<Value, String> {
+fn wallet_estimate_send(state: State<AppState>, address: String, amount: String, from_addresses: Option<Vec<String>>) -> Result<Value, String> {
     let briv = parse_amount_briv(&amount)?;
     // The SAME exact 8-decimal string the real send uses — never routed through an f64 — so the estimate and
     // the send agree on the amount to the base unit (audit correction).
@@ -1630,11 +1694,28 @@ fn wallet_estimate_send(state: State<AppState>, address: String, amount: String)
     let mut out = serde_json::Map::new();
     out.insert(address, json!(exact));
     let outputs = serde_json::Value::Array(vec![serde_json::Value::Object(out)]);
-    // add_inputs:true -> Core picks the inputs for the empty input list; lockUnspents:false -> reserve nothing.
-    // Both stated explicitly rather than relying on defaults. This funds a PSBT only to read the fee: no sign,
-    // no broadcast, no UTXO held. The real payment still goes out through the audited sendtoaddress path.
-    let opts = json!({ "add_inputs": true, "lockUnspents": false });
-    let psbt = rpc(&state.datadir, Some(WALLET_NAME), "walletcreatefundedpsbt", json!([[], outputs, 0, opts]))
+    // Coin control: if the user chose source addresses, preview the fee with EXACTLY those UTXOs (add_inputs
+    // false) so the estimate matches what the real send will do. Otherwise Core picks inputs from the whole
+    // wallet (add_inputs true). Either way lockUnspents:false reserves nothing: this funds a PSBT only to read
+    // the fee -- no sign, no broadcast, no UTXO held.
+    let froms: Vec<String> = from_addresses
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let (ins, opts): (Value, Value) = if !froms.is_empty() {
+        // include_unsafe=false: same safe-coin set the real send uses, so the fee preview matches the send.
+        let utxos = rpc(&state.datadir, Some(WALLET_NAME), "listunspent", json!([0, 9999999, froms, false]))
+            .map_err(|e| friendly_error(&e))?;
+        let arr = utxos.as_array().cloned().unwrap_or_default();
+        if arr.is_empty() { return Err("ERR:INSUFFICIENT_FUNDS".to_string()); }
+        let ins = json!(arr.iter().map(|u| json!({ "txid": u["txid"], "vout": u["vout"] })).collect::<Vec<Value>>());
+        (ins, json!({ "add_inputs": false, "lockUnspents": false }))
+    } else {
+        (json!([]), json!({ "add_inputs": true, "lockUnspents": false }))
+    };
+    let psbt = rpc(&state.datadir, Some(WALLET_NAME), "walletcreatefundedpsbt", json!([ins, outputs, 0, opts]))
         .map_err(|e| friendly_error(&e))?;
     let fee = psbt.get("fee").and_then(|f| f.as_f64()).unwrap_or(0.0);
     let fee_briv = (fee * 100_000_000.0).round() as u64; // back to integer base units for an exact total
@@ -4942,6 +5023,7 @@ pub fn run() {
             wallet_summary,
             wallet_new_address,
             wallet_addresses,
+            wallet_spendable_sources,
             wallet_send,
             wallet_estimate_send,
             wallet_history,

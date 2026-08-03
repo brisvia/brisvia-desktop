@@ -220,9 +220,9 @@
             <p id="mine-mode-desc" class="muted small"></p>
             <div class="seg small-seg" id="mine-mode-seg" role="group" data-i18n-attr="aria-label:mine.mode_active">
               <button class="seg-btn active" data-mode="solo" data-testid="mode-solo" data-i18n="settings.mode_solo"></button>
-              <button class="seg-btn" data-mode="pool" data-testid="mode-pool" data-i18n="settings.mode_pool"></button>
-              <!-- Reflects a custom/other pool picked in Settings (owner's call 24-jul). Disabled here: the pool
-                   address is entered in Settings; Mining only shows it as the active mode. -->
+              <!-- The official Brisvia pool was retired from the picker (owner's call 2-ago): it will not be
+                   sustained long-term, so miners are steered to community pools. Anyone who still wants the
+                   official one types its address under "Custom pool" while it exists. Only SOLO + Custom remain. -->
               <button class="seg-btn" data-mode="custom" data-testid="mode-custom" data-i18n="settings.mode_custom"></button>
             </div>
             <!-- Custom pool address entered RIGHT HERE in the Mine tab (owner request): clicking "Custom pool"
@@ -391,6 +391,16 @@
       <div id="send-step1">
         <label class="field"><span class="muted small" data-i18n="send.to"></span>
           <input id="send-addr" type="text" placeholder="brv1q…" autocomplete="off" spellcheck="false"></label>
+        <!-- Coin control: choose which wallet address(es) the coins come from. Default "all" = whole wallet
+             (the audited path). Picking specific addresses spends only their coins; change returns to the wallet. -->
+        <div class="send-from-field">
+          <span class="send-from-label muted small" data-i18n="send.from_label"></span>
+          <button type="button" id="send-from-toggle" class="send-from-toggle">
+            <span id="send-from-summary"></span>
+            <span class="send-from-chev">▾</span>
+          </button>
+          <div id="send-from-list" class="send-from-list" hidden></div>
+        </div>
         <div class="send-avail">
           <span class="muted small"><span data-i18n="send.available"></span> <strong id="send-avail">0</strong> BRVA</span>
           <button type="button" id="send-max" class="link small" data-i18n="send.max"></button>

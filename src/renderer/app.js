@@ -31,6 +31,7 @@ function transError(err) {
       INVALID_AMOUNT: 'errors.invalid_amount', SEND_IN_PROGRESS: 'errors.send_in_progress',
       AMOUNT_TOO_SMALL: 'errors.amount_too_small',
       OPERATION_FAILED: 'errors.operation_failed', SEND_STATUS_UNKNOWN: 'errors.send_status_unknown',
+      SEND_NOT_BROADCAST: 'errors.send_not_broadcast',
       WALLET_LOCKED: 'errors.wallet_locked',
       POOL_ADDR_INVALID: 'errors.pool_addr_invalid',
       POOL_ADDR_FORMAT: 'errors.pool_addr_format',
@@ -279,6 +280,8 @@ function finishSetup() { $('#setup').hidden = true; showView('wallet'); if (wind
 
 // ===================== Mining =====================
 let mining = false;
+let starting = false;    // user clicked Start; keep the button locked + "Preparing…" until the backend confirms or errors
+let startingSince = 0;   // when 'starting' was set, so it can never stay stuck if the backend never confirms
 // Formats a hashrate (H/s) with the right unit, and a duration (seconds) in a human, non-technical way.
 function fmtHashrate(hs) {
   hs = hs || 0;
@@ -318,6 +321,9 @@ function maybeShowGroupHint(s) {
 async function refreshMine() {
   const s = await window.brisvia.getStatus();
   mining = s.mining;
+  // Release the optimistic "starting" lock once the backend actually reports mining/preparing, or after a
+  // safety window — so a click has instant effect yet the button can never stay stuck disabled.
+  if (starting && (mining || s.preparing || Date.now() - startingSince > 15000)) starting = false;
   // Sustained peer-loss warning strip while mining SOLO (backend raises it after >= 75 s at 0 peers). Purely
   // informational: the mining is not stopped or switched; the strip clears itself the moment a peer returns.
   { const sib = $('#solo-isolated-banner'); if (sib) sib.hidden = !(s && s.warnNoPeers); }
@@ -333,6 +339,7 @@ async function refreshMine() {
   evalAutoStart(s);  // honour the voluntary auto-start-at-launch (never without consent, never pool->solo)
   // Suppress the "Preparing…" flash for a few seconds after a live power change (the engine relaunches behind the scenes).
   const preparing = mining && s.preparing && Date.now() > suppressPreparingUntil;
+  const showPreparing = preparing || starting; // 'starting' paints "Preparing…" before the backend confirms
   const toggle = $('#toggle');
   { const hs = $('#hero-sub'); if (hs) hs.hidden = false; } // reset each render; the mining branch hides the subtitle
   // WAIT MODE (real-network build, before the Aug 1, 2026 15:00 UTC launch): the wallet works normally,
@@ -359,9 +366,9 @@ async function refreshMine() {
     toggle.disabled = true;
     return;
   }
-  toggle.disabled = false;
+  toggle.disabled = starting; // lock the button while a start we fired is still being confirmed (no double start)
   // Three states: stopped / preparing (building the dataset, a few seconds) / participating.
-  if (preparing) {
+  if (showPreparing) {
     if (!refreshMine._prepSince) refreshMine._prepSince = Date.now();
     const prepEl = (Date.now() - refreshMine._prepSince) / 1000;
     $('#state-badge').textContent = T('mine.preparing');
@@ -381,8 +388,9 @@ async function refreshMine() {
     // No permanent subtitle while mining (the title already carries it); keep the "ready" hint before starting.
     { const sub = $('#hero-sub'); if (sub) { sub.hidden = mining; sub.textContent = mining ? '' : T('mine.ready_sub'); } }
   }
-  $('#toggle').textContent = mining ? T('mine.stop') : T('mine.start');
-  $('#toggle').className = 'btn giant ' + (mining ? 'mineral' : 'primary');
+  const activeLike = mining || starting; // 'starting' shows Stop/green optimistically, before the backend confirms
+  $('#toggle').textContent = activeLike ? T('mine.stop') : T('mine.start');
+  $('#toggle').className = 'btn giant ' + (activeLike ? 'mineral' : 'primary');
   // "Your contribution" tile. In SOLO you win whole blocks, so show BRVA earned this session (accepted x 50).
   // In POOL/CUSTOM the reward is decided by the pool and paid in batches to the Wallet, so the app cannot know
   // the exact BRVA locally: showing "0 BRVA" reads as "you earned nothing" and confuses. Show the accepted shares
@@ -470,10 +478,19 @@ $('#toggle').addEventListener('click', async () => {
   if (mining) {
     await window.brisvia.stop();
   } else {
+    // INSTANT feedback: the moment Start is clicked, lock the button and paint "Preparing…" synchronously —
+    // before any await — so a slow start never looks idle and nobody clicks it again (which would try to start
+    // twice). The 'starting' flag keeps it locked (refreshMine honours it) until the backend confirms or errors.
+    starting = true; startingSince = Date.now();
+    if (!refreshMine._prepSince) refreshMine._prepSince = Date.now();
+    const t = $('#toggle'); t.disabled = true; t.textContent = T('mine.stop'); t.className = 'btn giant mineral';
+    const sb = $('#state-badge'); if (sb) { sb.textContent = T('mine.preparing'); sb.className = 'badge prep'; }
+    const ht = $('#hero-title'); if (ht) ht.textContent = T('mine.preparing_title');
+    const hsub = $('#hero-sub'); if (hsub) { hsub.hidden = false; hsub.textContent = T('mine.preparing_sub'); }
     // Read the backend's answer: if it refused to start (no peers, clock skew, syncing, wallet/worker not
-    // ready...), show WHY instead of silently doing nothing (audit N2).
+    // ready...), show WHY instead of silently doing nothing (audit N2), and release the lock.
     const r = await startWithConfirm(currentIntensity());
-    if (r && r.error && mm) { mm.textContent = transError(r.error); mm.hidden = false; }
+    if (r && r.error) { starting = false; if (mm) { mm.textContent = transError(r.error); mm.hidden = false; } }
   }
   refreshMine();
 });
@@ -823,12 +840,74 @@ function fmtAmountInput(n) {
   // very same language rules then reject.
   return (window.I18N && usesCommaDecimal(window.I18N.lang)) ? plain.replace('.', ',') : plain;
 }
+// --- Coin control: pick which address(es) fund the send. "All" (default) = whole wallet (audited path);
+// picking specific addresses spends only their coins, with change returning to the wallet. ---
+let sendFromAddrs = []; // cached [{address, balance}] limited to funded addresses (balance > 0)
+function selectedFromList() {
+  const all = $('#send-from-allcb');
+  if (!all || all.checked) return []; // [] => let the wallet choose (whole-wallet path)
+  return $$('#send-from-list .send-from-item input:checked').map((c) => c.dataset.addr);
+}
+function selectedFromSum() {
+  const sel = selectedFromList();
+  if (!sel.length) return availableBalance;
+  const bal = {}; sendFromAddrs.forEach((a) => { bal[a.address] = Number(a.balance) || 0; });
+  return sel.reduce((s, a) => s + (bal[a] || 0), 0);
+}
+function updateSendFromSummary() {
+  const sel = selectedFromList();
+  const sum = selectedFromSum();
+  const el = $('#send-from-summary');
+  if (el) el.textContent = (!sel.length ? T('send.from_all') : T('send.from_n', { n: sel.length })) + ' · ' + fmt(sum) + ' BRVA';
+  // The chosen budget drives the available line and the "use max" button.
+  const av = $('#send-avail'); if (av) av.textContent = fmt(sum);
+  // Visual clarity: highlight the picked rows, and show the "All" master as partly-selected (indeterminate)
+  // when only some addresses are chosen — so at a glance you see exactly what will fund the send.
+  const boxes = $$('#send-from-list .send-from-item input');
+  boxes.forEach((b) => { const row = b.closest('.send-from-item'); if (row) row.classList.toggle('sel', b.checked); });
+  const checkedN = boxes.filter((b) => b.checked).length;
+  const allcb = $('#send-from-allcb');
+  if (allcb) { allcb.checked = boxes.length > 0 && checkedN === boxes.length; allcb.indeterminate = checkedN > 0 && checkedN < boxes.length; }
+}
+async function renderSendFrom() {
+  const list = $('#send-from-list'); if (!list) return;
+  let addrs = [];
+  // Every address that holds spendable coins (change/coinbase included), biggest first — NOT just the
+  // app-generated receive addresses, so coin control can pick any address that actually has funds.
+  try { addrs = await window.brisvia.wallet.spendableSources(); } catch (e) { addrs = []; }
+  sendFromAddrs = (addrs || []).filter((a) => Number(a.balance) > 0);
+  let html = '<label class="send-from-all"><input type="checkbox" id="send-from-allcb" checked> <span></span></label>';
+  sendFromAddrs.forEach((a) => {
+    const short = a.address.slice(0, 10) + '…' + a.address.slice(-6);
+    html += '<label class="send-from-item"><input type="checkbox" data-addr="' + a.address + '" checked> <code class="mono">' + short + '</code> <strong>' + fmt(Number(a.balance)) + ' BRVA</strong></label>';
+  });
+  list.innerHTML = html;
+  const allLabel = list.querySelector('.send-from-all span'); if (allLabel) allLabel.textContent = T('send.from_all');
+  list.hidden = true;
+  const allcb = $('#send-from-allcb');
+  allcb.addEventListener('change', () => {
+    $$('#send-from-list .send-from-item input').forEach((c) => { c.checked = allcb.checked; });
+    updateSendFromSummary();
+  });
+  $$('#send-from-list .send-from-item input').forEach((c) => c.addEventListener('change', () => {
+    const boxes = $$('#send-from-list .send-from-item input');
+    const checked = boxes.filter((b) => b.checked);
+    if (!checked.length) { allcb.checked = true; boxes.forEach((b) => { b.checked = true; }); } // never leave zero selected
+    else { allcb.checked = checked.length === boxes.length; }
+    updateSendFromSummary();
+  }));
+  updateSendFromSummary();
+}
+if ($('#send-from-toggle')) $('#send-from-toggle').addEventListener('click', () => {
+  const l = $('#send-from-list'); if (l) l.hidden = !l.hidden;
+});
 $('#act-send').addEventListener('click', async () => {
   $('#send-addr').value = ''; $('#send-amount').value = ''; $('#send-pass').value = ''; $('#send-msg').hidden = true;
   $('#send-avail').textContent = fmt(availableBalance);
   $('#send-step1').hidden = false; $('#send-step2').hidden = true; pendingSend = null; // always open on the review step
   const go = $('#send-go'); go.disabled = false; go.classList.remove('is-busy');
   openModal('modal-send');
+  await renderSendFrom();
   // Re-check the crypto state on open (it may have been UNKNOWN at load on a slow node) and reflect it.
   await refreshWalletCrypto();
   applySendCryptoState();
@@ -839,7 +918,15 @@ $('#send-max').addEventListener('click', () => {
   // Leave room for the network fee so "use max" yields an amount that actually sends (audit N4):
   // fallbackfee is ~0.0001 BRVA/kB; a small reserve covers a typical transaction.
   const FEE_RESERVE = 0.0002;
-  $('#send-amount').value = fmtAmountInput(Math.max(0, availableBalance - FEE_RESERVE));
+  // "Use max" means send EVERYTHING: first select every address (so it reads as the whole balance, not a subset),
+  // then fill the full available amount minus a small fee reserve.
+  const allcb = $('#send-from-allcb');
+  if (allcb) {
+    allcb.checked = true; allcb.indeterminate = false;
+    $$('#send-from-list .send-from-item input').forEach((c) => { c.checked = true; });
+    updateSendFromSummary();
+  }
+  $('#send-amount').value = fmtAmountInput(Math.max(0, selectedFromSum() - FEE_RESERVE));
   $('#send-msg').hidden = true;
 });
 // Clear a stale send error (invalid address/amount/password) as soon as the user edits any field.
@@ -862,16 +949,19 @@ $('#send-go').addEventListener('click', async () => {
   const msg = $('#send-msg'); msg.hidden = false; msg.className = 'verify-msg err';
   if (!addr || addr.length < 14 || !addr.toLowerCase().includes('brv')) { msg.textContent = T('send.invalid_addr'); return; }
   if (amountCanon == null || !(amount > 0)) { msg.textContent = T('send.invalid_amount'); return; }
-  if (amount > availableBalance + 1e-8) { msg.textContent = T('send.over_balance'); return; }
+  // Budget check against the chosen source(s): whole wallet when "all", else the sum of the picked addresses.
+  const fromList = selectedFromList();
+  const budget = selectedFromSum();
+  if (amount > budget + 1e-8) { msg.textContent = T('send.over_balance'); return; }
   if (!walletCryptoKnown) { msg.textContent = T('send.crypto_unknown'); return; } // never send while UNKNOWN
   if (walletEncrypted && !pass) { msg.textContent = T('send.need_pass'); return; }
   msg.hidden = true;
   go.disabled = true; go.classList.add('is-busy');
-  // Read-only fee check (funds a PSBT, reserves nothing, sends nothing). If it fails, show the reason here.
-  const est = await window.brisvia.wallet.estimateSend(addr, amountCanon).catch(() => null);
+  // Read-only fee check (funds a PSBT, reserves nothing, sends nothing) — honoring the chosen source(s).
+  const est = await window.brisvia.wallet.estimateSend(addr, amountCanon, fromList.length ? fromList : null).catch(() => null);
   go.disabled = false; go.classList.remove('is-busy');
   if (!est || est.error) { msg.hidden = false; msg.textContent = est && est.error ? transError(est.error) : T('send.fail'); return; }
-  pendingSend = { addr, amountCanon, pass };
+  pendingSend = { addr, amountCanon, pass, from: fromList };
   $('#conf-addr').textContent = addr;
   $('#conf-net').textContent = T('send.net_name');
   $('#conf-recv').textContent = fmt(Number(est.receives)) + ' BRVA';
@@ -888,7 +978,7 @@ $('#send-confirm-go').addEventListener('click', async () => {
   if (go.disabled || !pendingSend) return;
   const msg = $('#send-msg2'); msg.hidden = false; msg.className = 'verify-msg err';
   go.disabled = true; go.classList.add('is-busy');
-  const r = await window.brisvia.wallet.send(pendingSend.addr, pendingSend.amountCanon, pendingSend.pass);
+  const r = await window.brisvia.wallet.send(pendingSend.addr, pendingSend.amountCanon, pendingSend.pass, (pendingSend.from && pendingSend.from.length) ? pendingSend.from : null);
   if (r && r.ok) { msg.className = 'verify-msg ok'; msg.textContent = T('send.done'); setTimeout(() => closeModal('modal-send'), 1200); loadWallet(); }
   else if (r && r.error === 'ERR:SEND_STATUS_UNKNOWN') {
     // The node never confirmed: the payment MAY be on the network. Do not re-enable and do not retry — a
@@ -912,7 +1002,12 @@ async function loadSettings() {
   const savedPow = (() => { try { return localStorage.getItem('brv_intensity'); } catch { return null; } })();
   setPower(savedPow != null ? parseInt(savedPow, 10) : parseInt(pctOf(s.defaultIntensity), 10), false);
   $$('#set-language .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.lang === window.I18N.lang));
-  applyMiningMode(s.miningMode || 'solo');
+  // The official pool was retired from the picker (owner's call 2-ago). Migrate any wallet still saved on the
+  // official "pool" mode to SOLO, once, and persist it — so there is no UI/backend mismatch and no dead mode.
+  // A custom pool is unaffected; anyone who wants the official one re-enters its address under "Custom pool".
+  let startMode = s.miningMode || 'solo';
+  if (startMode === 'pool') { startMode = 'solo'; try { window.brisvia.settings.set('miningMode', 'solo'); } catch {} }
+  applyMiningMode(startMode);
   { const _pa = $('#set-pool-addr'); if (_pa && s.poolAddress) _pa.value = s.poolAddress; }
   { const _pp = $('#set-pool-plain'); if (_pp) _pp.checked = !!s.poolPlain; }
 }
@@ -963,7 +1058,8 @@ let currentMiningMode = 'solo';
 // address the user types). Today mining runs solo until the stratum client lands; choosing pool/custom saves the
 // preference and reveals the matching row, without touching the audited solo path.
 function applyMiningMode(mode) {
-  const m = (mode === 'pool' || mode === 'custom') ? mode : 'solo';
+  // Official "pool" was retired from the picker (owner's call 2-ago): it folds to SOLO. Only SOLO + custom remain.
+  const m = (mode === 'custom') ? 'custom' : 'solo';
   currentMiningMode = m;
   $$('#set-mining-mode .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.mode === m));
   // Big, plain "Current mode: SOLO" with the mode word highlighted, so it doesn't depend on reading a paragraph.
