@@ -1,0 +1,220 @@
+{
+  "_comment": "BORRADOR del paquete integral de lanzamiento de Brisvia 1.1.3. Reune TODA la evidencia y hashes para el OK UNICO de Fernando. NO ejecutar nada hasta que status=READY y authorization tenga el texto verbatim de Fernando. Este documento es distinto de owner-approval-v1.1.3.json (que autoriza SOLO publicar el release en GitHub); este cubre el conjunto completo.",
+  "schema": "brisvia-launch-bundle/1",
+  "status": "PREPARING_FOR_APPROVAL",
+  "_design_note": "La autorizacion de Fernando NO va dentro de este archivo (obligaria a modificarlo tras calcular su hash). Cuando status=READY_FOR_APPROVAL, este bundle se CONGELA y su SHA-256 se referencia desde un launch-approval-v1.1.3.json aparte que se crea con el OK verbatim de Fernando. owner-approval-v1.1.3.json sigue limitado a publicar el release en GitHub.",
+  "version": "1.1.3",
+  "build": {
+    "commit_R": "4739d298c43c6f759d36ae44f86663487b2c417a",
+    "commit_role": "build_source (English-only clean; disuelve el enredo de 4 commits)",
+    "gates_8_of_8": "PASS (build win/linux/mac, verify-candidate, test-installer-scenarios, e2e, tests rust+guards)",
+    "release_go_manifest_sha256": "c4908031ef15b7ca7d8e5be1b0d16615244ca877b284897b5c1edd7ab0db46f7",
+    "sidecars_R": {
+      "bitcoind_linux_sha256": "38564f06279ca0368ca5fbb97b696df71a41ba33a0545b382f9910301519c41c",
+      "brisvia_worker_sha256": "45e2a4f5e6ff3dcef11d1b3055af92713bf1186b1946d51651e671cb2357fa5e",
+      "bitcoin_cli_sha256": "5a037681e9f8de2f7a950380bb07940b70180aaf6d0df0a817e31d99d7d8d304",
+      "candados_before_launch": "presente en bitcoind (header + body barrier), verificado"
+    },
+    "assets_R_full_sha256": {
+      "Brisvia-Miner-Linux.AppImage": "5f55465884752630dad3bef2c0f9ed7f7f8ff2427164058be9ef3dd2be0fcaf7",
+      "Brisvia-Miner-Windows.exe": "eac3c27dce03679c8ef3cd9b21dd1c63ba05636312895e2dae1abddcbc47f458",
+      "Brisvia-Miner-macOS.dmg": "4522a9f60e31ac9a986c5c88db76c750d4050dff1dbe42339c71fd91cc0d3f55",
+      "Brisvia.Miner.app.tar.gz": "6ff31266c2a93b50645147579bf2ec55f8d45e5b1d839adb3ce2107bca1997c0",
+      "Brisvia.Miner.app.tar.gz.sig": "efc578fc6b23c227a2ee1ada95ce6deb097f575c49705a4473641208c07d9080",
+      "Brisvia.Miner_1.1.3_aarch64.dmg": "4522a9f60e31ac9a986c5c88db76c750d4050dff1dbe42339c71fd91cc0d3f55",
+      "Brisvia.Miner_1.1.3_amd64.AppImage": "5f55465884752630dad3bef2c0f9ed7f7f8ff2427164058be9ef3dd2be0fcaf7",
+      "Brisvia.Miner_1.1.3_amd64.AppImage.sig": "acc4addeb40f6788ef578470260e5625a364148288b68a108bbe55a7ffc5c96f",
+      "Brisvia.Miner_1.1.3_amd64.deb": "5ced983fef55b1f1d033ed77a01ade42e214d0af5dd5a7de74d61c0f1a8b807e",
+      "Brisvia.Miner_1.1.3_x64-setup.exe": "eac3c27dce03679c8ef3cd9b21dd1c63ba05636312895e2dae1abddcbc47f458",
+      "Brisvia.Miner_1.1.3_x64-setup.exe.sig": "423b91f526775cded3f6a0c8e4dfcef51bdf909da7ce9eec5d080bd9937bc2ec"
+    },
+    "macos_arch_verified": "Mach-O single-arch arm64 (Brisvia Miner.app/Contents/MacOS/brisvia-miner) => clave latest.json darwin-aarch64 CORRECTA",
+    "gates_run_ids": {
+      "tests_rust_R": "30358851800 (success, sha 4739d298)",
+      "verify_migration_1.0.9->R": "30368863700 (success)",
+      "verify_migration_1.1.0->R": "30368867352 (success)",
+      "verify_migration_1.1.1->R": "30360143507 (success)",
+      "verify_migration_1.1.2->R": "30363955071 (success)",
+      "note": "faltan run IDs de build win/linux/mac + verify-candidate + e2e (agregar del historico de R)"
+    }
+  },
+  "infra_hashes": {
+    "explorer_transition_script_sha256": "0fc6ed4a1578c2b8b751b1d5719f92f7f8e140758b2803f1629d9066b7300a52 (con fix BRVA idempotente + health check /api/block/0)",
+    "pool_canonical_target": "/opt/brisvia-pool/releases/20260722-pplns8-final",
+    "pool_stratum_server_sha256": "f6af5469cdfa0a15b1917bac689db97287a19e9c2d24337a4fe93b512e74719e",
+    "pool_rxverify_sha256": "19c24db82d31683cf115c8d41a1c2fd9c7d0ba498771c74777c692614da05e6b",
+    "explorer_BRVA_dir": "0.json 1.json 2.json 3.json (persistido en el script de transicion)",
+    "seed_units_manifests": {
+      "oracle_36": {
+        "bitcoind_sha256_16": "38564f06279ca036",
+        "service_sha256_16": "47c01a4389a009f8",
+        "timer_sha256_16": "f2f8f216656aa616"
+      },
+      "oracle_102": {
+        "bitcoind_sha256_16": "38564f06279ca036",
+        "service_sha256_16": "47c01a4389a009f8",
+        "timer_sha256_16": "f2f8f216656aa616"
+      },
+      "hostinger_145": {
+        "bitcoind_mainnet_sha256_16": "38564f06279ca036",
+        "explorer_script_sha256_16": "0fc6ed4a1578c2b8",
+        "reboot": "OK 28-jul (kernel 6.8.0-136)",
+        "post_reboot": "testnet+explorer vuelven solos (altura 14104, /api/version 200); tls-ensayo NO reaparece; proceso manual NO reaparece; localhost:3333 y 33333 LIBRES; mainnet+pool-mainnet inactive; POOL_PUBLIC ausente; pool.conf no habilitado; timers a T0 OK; 0 units fallidas / 0 symlinks rotos / 0 deleted; NTP+swap OK"
+      }
+    },
+    "firewall_persistencia_RESUELTA": "Mecanismo automatico fail-closed implementado: service `brisvia-pool-firewall.service` (enabled, oneshot, After=ufw) -> `/usr/local/bin/brisvia-pool-firewall-guard.sh` re-pone la regla DROP 3333 al boot SI POOL_PUBLIC ausente (si la pool esta abierta a proposito, no cierra). FUERA del artefacto congelado de la pool. VERIFICADO: (a) recarga (borrar regla + start -> re-puesta); (b) REINICIO REAL de .145 -> la regla queda PRESENTE sola al boot, 3333 publico CERRADO desde fuera. Sobrevive a reboot.",
+    "monitoreo_alerta_probada": "Alerta sintetica [TEST] enviada al canal de alertas de Discord (canal 1525341310696034464): HTTP 200, message id 1531716389210161313. Confirmado que el canal recibe (no solo que el monitoreo envia metricas)."
+  },
+  "proofs": {
+    "fair_launch_P0_1": "DEMOSTRADO + validado ChatGPT 98%. R rechaza bloque-1 pre-T0 / acepta post-T0 (binario real + faketime + submitblock). 1.1.1 acepta pre-T0 pero su app tiene wait-mode (no mina hasta T0). Comunicar: 'los nodos 1.1.3 no aceptan bloques antes de T0'.",
+    "residual_risk_accepted": "Pre-computo privado de RandomX = inherente a cualquier PoW, NO prevenible por candado, NO mitigado por 0% premine (propiedad distinta). Aceptado (Via A).",
+    "pool_e2e_P0_2": "CERRADO release-critical + validado ChatGPT. Copia canonica 20260722-pplns8-final + worker real 45e2a4f5: share valida aceptada (54), negativas rechazadas, reconexion, suspension, compat protocolo. NUNCA cae POOL->SOLO (triple: worker dinamico + codigo app + compat).",
+    "firewall_9342": "Decidido NO cerrar (sin listener no explotable; cerrar+reabrir = mas riesgo). Monitoreo pre-T0. 3 seeds verificados limpios.",
+    "explorer_transition_P0_3": "Script fail-closed/rollback probado. FIX aplicado (dir mining-pools-configs/BRVA + health check via /api/block/0 robusto en altura 0). Backup previo guardado. Infra, no toca R.",
+    "updater_matrix": "1.0.9/1.1.0/1.1.1/1.1.2 -> R TODAS VERDES (install-over-install real, misma pubkey minisign 5a9fe07b58bf4a00).",
+    "pool_publica_pre_T0": "VERIFICADA: no puede dar trabajo mainnet antes de T0 (stratum vivo=testnet, pool-mainnet disabled, POOL_PUBLIC ausente, nodo mainnet off)."
+  },
+  "updater": {
+    "latest_json_prepared_sha256": "35a467f73af916c21d83b9724ecec97b3e70f1f93e06be1e3211a7173420bc94",
+    "latest_json_sha_note": "provisional con notes cerrado; el SHA FINAL se recalcula al poner pub_date en la publicacion",
+    "platforms": [
+      "windows-x86_64",
+      "darwin-aarch64",
+      "linux-x86_64"
+    ],
+    "signatures": "coinciden con los .sig de los assets R del draft (verificado)",
+    "notes": "APROBADO por Fernando 28-jul: cartel en ingles, por items, detallista sin revelar vulnerabilidades, con Discord discord.gg/ZF4MExMJn4. notes cerrado en el latest.json (399 chars)",
+    "pub_date": "PENDIENTE_AL_PUBLICAR (unico campo que falta; se pone al publicar con el OK)",
+    "activation": "NO activar hasta despues de publicar el release + canaria publica + OK"
+  },
+  "seeds": {
+    "count": 3,
+    "nodes": [
+      {
+        "host": ".145 Hostinger",
+        "role": "seed principal + testnet + explorer + pool",
+        "bitcoind_sha256_16": "38564f06279ca036",
+        "genesis": "aa6bc268",
+        "timer_T0": "Sat 2026-08-01 15:00:00 UTC"
+      },
+      {
+        "host": ".36 Oracle",
+        "role": "seed",
+        "bitcoind_sha256_16": "38564f06279ca036",
+        "genesis": "aa6bc268",
+        "timer_T0": "Sat 2026-08-01 15:00:00 UTC"
+      },
+      {
+        "host": ".102 Oracle",
+        "role": "seed",
+        "bitcoind_sha256_16": "38564f06279ca036",
+        "genesis": "aa6bc268",
+        "timer_T0": "Sat 2026-08-01 15:00:00 UTC"
+      }
+    ],
+    "ports": {
+      "p2p": 9342,
+      "rpc": 9338
+    },
+    "cross_connect": "probado (los 3 mismo magic/genesis)",
+    "reboot_verification": "Oracle .36 y .102 REINICIADOS OK (28-jul): vuelven idempotentes, binario/units identicos, timer a T0, mainnet inactive, 0 bitcoind, sin listener 9342/9338, NTP, swap, sin units fallidas/symlinks rotos, unit retirada sigue ausente, security updates aplicados (kernel 6.8.0-1058-oracle). FALTA .145 (coordinado, interrumpe testnet/explorer/pool)"
+  },
+  "web": {
+    "estado": "PREPARADA a 1.1.3 en copia /tmp/web-113 (sin deploy). Fuente /root/web-prueba y servido /var/www/brisvia-current INTACTOS en 1.1.2; snippet nginx activo intacto en v1.1.2.",
+    "web_113_tree_sha256": "f0a8761d6943b3760caa56ee9389e0173b9720db7b8d488a692e9429f55bd6a6",
+    "snippet_downloads_113_sha256": "57961fd99eb728c1b593f84cd39af5b425ec7941e0040f1af5a05cdd99d38a88",
+    "cambios": "softwareVersion + app-version + releases/tag -> 1.1.3 (5 idiomas); 3 hashes de descarga a los de R (win eac3c27d, mac dmg 4522a9f6, linux AppImage 5f554658) en 5 idiomas; snippet nginx /download/* -> v1.1.3 (setup/dmg-aarch64/AppImage/deb). Textos historicos 'fixed in 1.1.1' + genesis aa6bc268 + merkle c17012d7 INTACTOS. 0 residual de 1.1.2.",
+    "deploy": "SOLO con el OK y DESPUES de publicar el release (los links a v1.1.3 no resuelven hasta publicar). Deploy: aplicar reemplazos sobre /root/web-prueba (mismo script) -> /var/www/brisvia-releases/<ts>-v113 + activar snippet 1.1.3 + nginx -t + reload. Backup previo."
+  },
+  "git_reorder": {
+    "plan": "C' = R + 2 manifiestos; tag v1.1.3 -> C'; main promovido via merge-of-promotion (arbol=C'); force-with-lease contra tag viejo ffc31af0; clon limpio + gate seco.",
+    "dry_run": "6 checks PASARON (ensayado en seco). CONGELADO: no ejecutar hasta el OK.",
+    "status": "FROZEN"
+  },
+  "ok_unico_sequence": [
+    "1. Fernando aprueba el cartel (notes) + da el OK verbatim -> completar owner-approval + este launch-bundle (authorization).",
+    "2. Crear C' real + merge M + promover main + mover tag v1.1.3 (force-with-lease) + corregir draft target.",
+    "3. Clon limpio + gate seco.",
+    "4. Publicar el GitHub Release v1.1.3 (publish-approved-release).",
+    "5. Verificacion anonima + canaria del canal publico.",
+    "6. Activar latest.json (make_latest).",
+    "7. Update real post-publicacion (1.1.1/1.1.2 -> R).",
+    "8. Publicar web (commit congelado) + Discord (mensaje congelado).",
+    "9. Red mainnet cerrada hasta el momento autorizado.",
+    "10. En T0: arrancar servicios + ejecutar runbook."
+  ],
+  "stop_gates": [
+    "Si falla la publicacion del release -> detener, no activar latest.json.",
+    "Si la canaria publica falla -> detener, no activar latest.json.",
+    "Si el update real 1.1.1->R falla -> detener, revertir latest.json a 1.1.1.",
+    "Si aparece un listener inesperado en 9342 pre-T0 -> alerta + investigar antes de continuar.",
+    "Si el explorer no sirve el genesis aa6bc268 en la transicion -> rollback automatico (ya en el script)."
+  ],
+  "pending_before_ready": [
+    "OK verbatim de Fernando (completa authorization + dispara la secuencia del OK unico).",
+    "latest.json (GitHub + mirror): completar pub_date (se pone al publicar).",
+    "Deploy web 5 idiomas a 1.1.3 (preparada+congelada) + nota descarga directa mirror para China (con el OK).",
+    "Aplicar bodies 1.1.3 + 1.1.2 (preparados con procedencia) al publicar.",
+    "Canaria REAL del updater 1.1.1->1.1.3 con GitHub bloqueado (necesita Windows+app; cubierta por codigo verificado + gate verify-update + firma mirror verificada).",
+    "Discord: mensaje final (Fernando lo maneja).",
+    "App completa en Windows de Fernando (refuerzo NO bloqueante)."
+  ],
+  "authorization": {
+    "state": "PENDING: awaiting Fernando",
+    "authorized_utc": "PENDING",
+    "note": "No falsificar. Se completa solo con el texto verbatim de Fernando cuando status=READY."
+  },
+  "continuity_audit": {
+    "_comment": "Auditoria sistematica 1.1.0/1.1.1/1.1.2 -> 1.1.3 pedida por Fernando, hecha con ChatGPT (26 categorias).",
+    "verdict_chatgpt": "Continuidad CERRADA 98%. Paquete total lanzamiento 96%. NO reconstruir R, NO reabrir categorias.",
+    "matrix_file": "MATRIZ-CONTINUIDAD-1.1.3.md",
+    "identity_resolved": {
+      "R": "4739d298c43c6f759d36ae44f86663487b2c417a",
+      "parent": "58286e2f (diff = 3 comentarios, cero funcional)",
+      "derives_from": "v1.1.1 (5df3ec1, ancestro) + 2bb8a78 (1.1.2 de producto real)",
+      "tag_v112_note": "tag v1.1.2 (eeddf56) MAL PUESTO en rama lateral CI; NO mover, solo documentar procedencia 2bb8a78 en su body",
+      "tag_v113_note": "tag v1.1.3 apunta a ffc31af (viejo); mover a C'=R con lease en la ceremonia del OK"
+    },
+    "code_continuity": "Todos los mecanismos presentes en R (mirror China, pool oficial/custom, fair-launch, wait-mode, low-RAM, supervisor, popup grupo). Pubkey updater IDENTICA en todas las versiones (keyid 5a9fe07b58bf4a00) -> apps viejas validan 1.1.3.",
+    "gaps": {
+      "G1_firma_mirror": "CERRADO cripto (minisign valida). Canaria de la APP real (1.1.1 GitHub bloqueado -> fallback -> instala R) necesita Windows+Fernando.",
+      "G2_descarga_externa": "CERRADO (SHA/firma/MIME/no-HTML verificados desde otra red).",
+      "G3_descarga_manual_china": "Binarios completos en mirror; documentar en /downloads o /blocked durante el deploy web.",
+      "G4_tag_112": "NO mover; documentar procedencia en body (preparado)."
+    }
+  },
+  "china_mirror": {
+    "_comment": "Fallback del updater para GitHub bloqueado (China). STAGED 1.1.3, activo sigue 1.1.1.",
+    "status": "STAGED (activar con el OK: mv latest.json.NEW-1.1.3 latest.json)",
+    "path": "/var/www/updates/v1.1.3/",
+    "formats": "5 (setup.exe, app.tar.gz, AppImage, dmg, deb) + .sig, SHA verificados = R",
+    "external_verified": "brisvia.com 200 octet-stream, SHA=R, firma minisign VALIDA (keyid 5a9fe07b58bf4a00) + global valida",
+    "latest_json_new": "/var/www/updates/latest.json.NEW-1.1.3 (mismas firmas que GitHub, urls al VPS)"
+  },
+  "_preparation_note": "Preparacion pre-OK cerrada + hashes congelados + rollback + reset_counters definidos (28-jul). Los 3 avisos del validador (pub_date, authorization x2) son EXCLUSIVAMENTE de momento-del-OK.",
+  "frozen_hashes": {
+    "_comment": "Hashes de referencia PRE-OK (28-jul). Los de latest.json/bodies son PROVISIONALES hasta fijar pub_date/notes finales en el OK (se recalculan). El web_tree y snippet son estables.",
+    "web_tree_sha256": "90bdf8140f91d2ac0fd6429b340031d6d871cc4cc5754aefb5a032d76d9dd4ea",
+    "web_file_count": 137,
+    "nginx_snippet_downloads_sha256": "57961fd99eb728c1b593f84cd39af5b425ec7941e0040f1af5a05cdd99d38a88",
+    "mirror_latest_new_sha256": "dae27f601166635b71d3651efed3f06ac50b8a3bbd35c7be4b831c7c525ce5f7",
+    "body_1_1_3_sha256": "884b58b1dfe836d4e43e59594d20e81e40211fda6aa81966a99e46d851ea7063",
+    "body_1_1_2_sha256": "808c032b117043860874e122be0469f285cf737fd5c0497aeabf1d2a9c70e38a",
+    "latest_github_sha256": "35a467f73af916c21d83b9724ecec97b3e70f1f93e06be1e3211a7173420bc94",
+    "latest_mirror_sha256": "dae27f601166635b71d3651efed3f06ac50b8a3bbd35c7be4b831c7c525ce5f7"
+  },
+  "reset_counters": {
+    "_comment": "Reset SOLO de contadores de descarga de GitHub (control preciso pedido por Fernando). Se logra re-subiendo los 11 assets de R al publicar (el contador de cada asset arranca en 0). NO requiere backup de datos.",
+    "target": "Los 11 assets del release v1.1.3 en GitHub (setup.exe, dmg, AppImage, deb, app.tar.gz + .sig, + genericos).",
+    "method": "En la ceremonia de publicacion, subir los assets frescos de R (contador GitHub = 0). Las descargas actuales del draft son de pruebas propias.",
+    "PROHIBIDO_resetear": "ledger del pool, pagos, wallet, estadisticas historicas de la red/explorer, evidencia de auditoria. SOLO contadores de descarga de GitHub."
+  },
+  "rollback": {
+    "_comment": "Procedimiento de reversion si algo falla en la ceremonia. Cada paso es fail-closed: ante fallo, detener y NO continuar.",
+    "git_tag_main": "tag v1.1.3 vuelve a f16ff5e y main a 155caa5 con force-with-lease (refs viejas guardadas). NO tocar tag v1.1.2.",
+    "latest_json_github": "El release 1.1.1 sigue siendo Latest hasta activar; si se activo, re-publicar el latest.json 1.1.1 (backup en el release 1.1.1).",
+    "latest_json_mirror": "restaurar /var/www/updates/latest.json desde backup (latest.json.bak-* ya presente) — vuelve a 1.1.1.",
+    "web": "swap atomico reversible: restaurar /var/www/brisvia-current desde el backup previo al deploy.",
+    "nginx_snippet": "restaurar el snippet /download/* a v1.1.2 (backup del actual antes de reemplazar) + nginx -t + reload."
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "status": "GO",
+  "version": "1.1.3",
+  "tag": "v1.1.3",
+  "commit_sha": "4739d298c43c6f759d36ae44f86663487b2c417a",
+  "tree_sha": "57484122d183ba2005fe66f8730693a414a7c2ce",
+  "commit_role": "build_source",
+  "repo": "brisvia/brisvia-desktop",
+  "generated_utc": "2026-07-28T13:34:50Z",
+  "note_on_tag": "The 11 assets were built from build_source 4739d29 (headSha of every build/gate run). The published tag v1.1.3 will point at a release-metadata commit C' whose only difference from 4739d29 is this file plus owner-approval-v1.1.3.json; neither JSON is a build input, so the compilable code is identical. The binaries were NOT built from C'.",
+  "previous_incorrect_tag": {
+    "tag_object": "ffc31af00da859c2eefe25d05c7c06b248da7623",
+    "pointed_at_commit": "f16ff5ea31",
+    "reason": "tag created too early (before the fair-launch/IBD/startup-guard/sidecar-signing/receive-modal commits and before the R English-only cleanup); it was never published, latest.json never offered it, no updater push happened. Corrected to the real 1.1.3 build source."
+  },
+  "provenance": [
+    { "component": "brisvia-miner (Tauri app)", "repo": "brisvia/brisvia-desktop", "commit": "4739d298c43c6f759d36ae44f86663487b2c417a" },
+    { "component": "bitcoind (node)", "repo": "core", "commit": "8195a1b0c71d236eb32b8675ffc245e1f6f7fcb1", "packaged_sha256": "38564f06279ca0368ca5fbb97b696df71a41ba33a0545b382f9910301519c41c", "genesis": "aa6bc268339aa9f4f2e39ae33aca7b7e48e395033d08d37c08f828890af7baf7" },
+    { "component": "brisvia-worker (miner)", "repo": "core", "path": "crates/brisvia-randomx (bin mine-once)", "commit": "8195a1b0c71d236eb32b8675ffc245e1f6f7fcb1" },
+    { "component": "bitcoin-cli", "repo": "core", "commit": "8195a1b0c71d236eb32b8675ffc245e1f6f7fcb1" }
+  ],
+  "assets": [
+    { "name": "Brisvia-Miner-Linux.AppImage", "sha256": "5f55465884752630dad3bef2c0f9ed7f7f8ff2427164058be9ef3dd2be0fcaf7", "size": 184551928 },
+    { "name": "Brisvia-Miner-Windows.exe", "sha256": "eac3c27dce03679c8ef3cd9b21dd1c63ba05636312895e2dae1abddcbc47f458", "size": 10930152 },
+    { "name": "Brisvia-Miner-macOS.dmg", "sha256": "4522a9f60e31ac9a986c5c88db76c750d4050dff1dbe42339c71fd91cc0d3f55", "size": 16418035 },
+    { "name": "Brisvia.Miner.app.tar.gz", "sha256": "6ff31266c2a93b50645147579bf2ec55f8d45e5b1d839adb3ce2107bca1997c0", "size": 15618882 },
+    { "name": "Brisvia.Miner.app.tar.gz.sig", "sha256": "efc578fc6b23c227a2ee1ada95ce6deb097f575c49705a4473641208c07d9080", "size": 412 },
+    { "name": "Brisvia.Miner_1.1.3_aarch64.dmg", "sha256": "4522a9f60e31ac9a986c5c88db76c750d4050dff1dbe42339c71fd91cc0d3f55", "size": 16418035 },
+    { "name": "Brisvia.Miner_1.1.3_amd64.AppImage", "sha256": "5f55465884752630dad3bef2c0f9ed7f7f8ff2427164058be9ef3dd2be0fcaf7", "size": 184551928 },
+    { "name": "Brisvia.Miner_1.1.3_amd64.AppImage.sig", "sha256": "acc4addeb40f6788ef578470260e5625a364148288b68a108bbe55a7ffc5c96f", "size": 428 },
+    { "name": "Brisvia.Miner_1.1.3_amd64.deb", "sha256": "5ced983fef55b1f1d033ed77a01ade42e214d0af5dd5a7de74d61c0f1a8b807e", "size": 127130960 },
+    { "name": "Brisvia.Miner_1.1.3_x64-setup.exe", "sha256": "eac3c27dce03679c8ef3cd9b21dd1c63ba05636312895e2dae1abddcbc47f458", "size": 10930152 },
+    { "name": "Brisvia.Miner_1.1.3_x64-setup.exe.sig", "sha256": "423b91f526775cded3f6a0c8e4dfcef51bdf909da7ce9eec5d080bd9937bc2ec", "size": 424 }
+  ],
+  "gates": {
+    "build_windows": "PASS",
+    "build_linux": "PASS",
+    "build_macos": "PASS",
+    "verify_candidate": "PASS",
+    "test_installer_scenarios": "PASS",
+    "e2e_real_windows": "PASS",
+    "tests_rust": "PASS",
+    "verify_update_1.1.1_to_1.1.3": "PASS"
+  },
+  "gates_note": "All 8 gates ran on build_source 4739d29. build-windows/linux/macos, verify-candidate, test-installer-scenarios, e2e and tests(rust+guards, incl. English-only which now passes) headSha=4739d29. verify-update ran from_version=1.1.1 to_version=1.1.3 against the R draft assets (an earlier run used the wrong default inputs 1.0.8/1.0.9 and was discarded, not counted as PASS). A separate verify-update from 1.1.2 is also being run for the upgrade matrix.",
+  "signatures_verified": {
+    "method": "ed25519 over blake2b-512, checked against the updater pubkey embedded in tauri.conf.json",
+    "key_id": "5a9fe07b58bf4a00",
+    "windows_x64_setup_exe": "VALID",
+    "macos_app_tar_gz": "VALID",
+    "linux_amd64_appimage": "VALID"
+  },
+  "hashes_verified": "the 11 asset SHA-256 were taken from GitHub asset digests; the three updater artifacts were downloaded and their SHA-256 + minisign signatures recomputed and verified locally.",
+  "main_contains_candidate": false,
+  "release_is_draft": true,
+  "latest_json_offers": "1.1.1"
+}

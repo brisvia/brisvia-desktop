@@ -1,0 +1,22 @@
+{
+  "version": "1.1.3",
+  "tag": "v1.1.3",
+  "repo": "brisvia/brisvia-desktop",
+  "build_commit": "4739d298c43c6f759d36ae44f86663487b2c417a",
+  "release_metadata_commit": "PENDING (C' is created at authorization time; its parent must be the build_commit above)",
+  "manifest": "release-go-v1.1.3.json",
+  "manifest_sha256": "c4908031ef15b7ca7d8e5be1b0d16615244ca877b284897b5c1edd7ab0db46f7",
+  "asset_count": 11,
+  "approved_by": "Fernando (owner)",
+  "authorization": "PENDING: awaiting Fernando's explicit authorization for THIS exact package. Do not create C' or publish until his verbatim words are recorded here.",
+  "authorized_utc": "PENDING",
+  "scope": "Publish ONLY the GitHub Release v1.1.3 (draft -> published, make_latest=true) with exactly the 11 assets listed in the manifest, built from 4739d29. Nothing else.",
+  "excludes_explicitly": [
+    "activating latest.json / the automatic updater (stays at 1.1.1 until a separate decision)",
+    "starting mainnet / the seed nodes (T0 is 2026-08-01 15:00 UTC)",
+    "publishing the website change or the Discord announcement",
+    "modifying any asset, the release name/body, or these manifests after approval"
+  ],
+  "executed_by": "assistant, under the owner's explicit session authorization (recorded verbatim at authorization time)",
+  "no_reuse": "This approval authorizes ONLY version 1.1.3, commit 4739d29, and the manifest SHA above. It must not be reused for any other version, commit, asset set or manifest."
+}
